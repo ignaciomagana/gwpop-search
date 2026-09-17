@@ -23,6 +23,8 @@ def _write_pe(path, *, spin_basis="chieff"):
         f.create_dataset("m1det", data=m1)
         f.create_dataset("m2det", data=m2)
         f.create_dataset("dL", data=np.linspace(500.0, 1000.0, n))
+        f.create_dataset("ra", data=np.linspace(0.1, 1.0, n))
+        f.create_dataset("dec", data=np.linspace(-0.4, 0.4, n))
         f.create_dataset("m1src", data=m1 / 1.1)
         f.create_dataset("m2src", data=m2 / 1.1)
         f.create_dataset("redshift", data=np.full(n, 0.1))
@@ -57,6 +59,8 @@ def _write_selection(path, *, spin_basis="chieff"):
         f.create_dataset("m2det", data=m2)
         f.create_dataset("q", data=m2 / m1)
         f.create_dataset("dL", data=np.linspace(400.0, 1400.0, n))
+        f.create_dataset("ra", data=np.linspace(0.2, 1.1, n))
+        f.create_dataset("dec", data=np.linspace(-0.3, 0.3, n))
         f.create_dataset("m1src", data=m1 / 1.1)
         f.create_dataset("m2src", data=m2 / 1.1)
         f.create_dataset("redshift", data=np.full(n, 0.1))
@@ -83,6 +87,7 @@ def test_gwcat_chieff_pair_loads_without_reconstructing_priors(tmp_path):
     np.testing.assert_allclose(
         pe.samples["q"], pe.samples["m2_source"] / pe.samples["m1_source"]
     )
+    assert ("ra", "dec") == pe.basis.coordinates[3:5]
     assert sel.mode is SelectionMode.ESTIMATOR_READY
     assert sel.campaigns[0].n_draw == 5000
     assert sel.campaigns[0].metadata["campaign_ndraws"] == [2000, 3000]
