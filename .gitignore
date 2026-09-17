@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+.env
+
+# JAX / accelerator caches
+.jax_cache/
+xla_cache/
+
+# Local data and inference artifacts
+data/
+artifacts/
+results/
+runs/
+checkpoints/
+*.h5
+*.hdf5
+*.zarr/
+
+# Slurm
+slurm-*.out
+slurm-*.err
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
