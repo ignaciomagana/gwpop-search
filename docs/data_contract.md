@@ -1,19 +1,25 @@
 # Data contract
 
-This document defines the intended internal data boundary. Raw LVK/PESummary ingestion is out of scope for the HBI core.
+This is the implemented boundary between release-specific products and the HBI engine. Raw LVK/PESummary ingestion is intentionally outside `gwpop-search`.
 
-The design is informed by `gwcat`, but `gwpop-search` must not depend on private implementation details of that repository.
+## Core rule
 
-## Principles
+The HBI layer never guesses a PE prior, injection draw density, coordinate Jacobian, or selection normalization from a release name. Adapters provide explicit denominator densities and an explicit density basis.
 
-- PE and selection products are separate typed objects.
-- Both declare a coordinate basis.
-- Both carry an explicit reference density in that basis.
-- Required coordinates fail loudly when absent.
-- Ragged PE sample counts are first-class.
-- Multiple selection campaigns remain identifiable.
-- Reference-density factors are applied exactly once.
-- Provenance fields can grow later without changing the mathematical interface.
+## CoordinateBasis
+
+`CoordinateBasis` identifies the measure a density is expressed against. Its stable identity is derived from:
+
+- name;
+- ordered independent coordinates;
+- frame convention;
+- spin parameterization;
+- density-measure description;
+- contract version.
+
+PE and selection products must have exactly matching basis identities before inference.
+
+Derived/advisory sample columns may exist without being independent density coordinates.
 
 ## PosteriorCatalog
 
@@ -24,115 +30,113 @@ event_names:            [n_events]
 offsets:                [n_events + 1]
 samples/<coordinate>:   [n_total_samples]
 log_ref_density:        [n_total_samples]
-availability:           [n_events, n_coordinates]
-metadata:               event/sample-set metadata
+availability:           [n_events, n_stored_fields]
 basis:                  CoordinateBasis
+metadata:               mapping
 ```
 
-The event i slice is
+The event-i slice is `offsets[i]:offsets[i+1]`.
 
-```
-offsets[i] : offsets[i + 1]
-```
+`log_ref_density` is the complete PE denominator density supplied by the adapter in the declared basis. It must be finite on every retained sample. Zero-density samples are not repaired with floors.
 
-`log_ref_density` means the complete density that must be divided out for population reweighting **in the declared exported basis**. An adapter may compute it from a gwcat `p_pe` field via `log(p_pe)`; HBI code does not reconstruct the PE prior from release assumptions.
-
-The initial internal API should expose:
-
-```python
-catalog.n_events
-catalog.event_names
-catalog.sample_count(i)
-catalog.get_event(i, fields)
-catalog.require(fields)
-catalog.basis
-```
+The container supports ragged event sample counts and stores the union of sample fields, with per-event availability checks.
 
 ## SelectionCatalog
 
-Logical contents per detected/usable injection row:
+Logical contents:
 
 ```
 samples/<coordinate>:   [n_selected]
 log_draw_density:       [n_selected]
-campaign_id:            [n_selected] or campaign slices
-campaign metadata:
-    n_draw
-    observing_time
-    detection rule metadata
-    any estimator-normalization metadata required by the adapter
+campaign_id:            [n_selected]
+campaigns:              typed per-campaign metadata
 basis:                  CoordinateBasis
+mode:                   raw_draw | estimator_ready
+estimator_semantics:    required for estimator_ready
 ```
 
-The exact canonical estimator interface will be fixed in Phase 1 using a parity test against the chosen gwcat export convention.
+Two modes are deliberately distinct.
 
-The HBI layer should receive one of two explicit representations, never infer which one it has:
+### raw_draw
 
-1. **raw-draw representation:** true draw density + `n_draw` / exposure per campaign, from which the HBI engine builds the Monte Carlo selection estimator;
-2. **estimator-ready representation:** an adapter-provided denominator/normalization whose semantics are complete and versioned (e.g. a validated gwcat-style `pdraw` product).
+The denominator is the actual draw density for each campaign. Every campaign must carry `n_draw`; Phase 2 will construct the Monte Carlo selection estimator explicitly from the campaign metadata.
 
-Mixing these representations is an error.
+### estimator_ready
 
-## CoordinateBasis
+The adapter-provided denominator already encodes a complete estimator convention. The HBI engine must use those semantics directly and must not automatically apply an additional `1/n_draw`, observing-time factor, or campaign-mixture factor.
 
-A basis identifier must include enough information to reject incompatible PE/selection pairs before inference.
+The mode is a typed enum so these two cases cannot be silently mixed.
 
-Initial fields:
+## Reference-density support
+
+Any denominator used for a retained nonzero-weight sample must be finite and strictly positive. Generic HBI code never introduces numerical density floors.
+
+An external schema that intentionally encodes zero-importance rows must get a dedicated adapter treatment; that convention is not inferred from large or small numbers.
+
+## Internal round-trip format
+
+Phase 1 defines simple internal HDF5 formats:
+
+- `gwpop-search-pe-1.0`
+- `gwpop-search-selection-1.0`
+
+These are implementation/test formats, not frozen public release manifests. Production provenance remains deferred.
+
+## gwcat v2 adapter
+
+Reference inspected read-only:
 
 ```
-name
-coordinates
-frame conventions
-spin parameterization
-density measure/version
+repository: ignaciomagana/gwcat
+branch: master
+commit: 8f9e2f12b499a6b2bf16ed938f66d020b12c44c2
 ```
 
-Examples might distinguish
+The adapter consumes exported `gwcat-pe-2.0/2.1` and `gwcat-selection-2.0/2.1` products. It does not ingest raw PE files.
+
+Supported Phase-1 spaces:
+
+- `chieff`
+- `chieff_chip`
+- `component`
+
+The current gwcat registry defines the fitted core as:
 
 ```
-source_m1_q_z_chieff
-detector_m1_q_dL_chieff
-source_m1_q_z_chieff_chip
-component_spin_source
+m1det, q, dL, ra, dec
 ```
 
-Do not rely on a free-form string alone; use a typed structure plus a stable serialized identity.
+plus the selected independent spin coordinates. Therefore the canonical gwcat adapter basis includes sky; source-frame masses, redshift, `m2det`, and derived spin quantities are advisory columns unless they belong to the chosen independent spin basis.
 
-## Required-field contract
+For PE:
 
-Population models declare their required coordinates. The loader checks those requirements against every event and the selection product.
+```
+log_ref_density = log(p_pe)
+```
 
-A missing required quantity is a hard error naming:
+with no reconstruction of the prior.
 
-- the coordinate;
-- the event/campaign;
-- the requested model/basis.
+For selection:
 
-Do not silently NaN-drop events or selection rows.
+```
+log_draw_density = log(pdraw)
+mode = estimator_ready
+```
 
-## Support contract
+The exported gwcat `pdraw` already contains its documented campaign-mixture/exposure convention. The adapter preserves it exactly. A Phase-1 parity test verifies that `sum(p_pop / pdraw)` is unchanged by adaptation and specifically verifies that the adapter does not divide by `ndraw` again.
 
-Reference densities in a denominator must be finite and strictly positive wherever a retained PE sample or nonzero-weight selection sample is used.
+The component space may expose `chi_eff` as a useful derived sample column, but `chi_eff` is not included in the component density basis.
 
-Out-of-support rows may be represented only when the adapter's schema explicitly assigns them zero importance weight and records that convention. Generic HBI code must not invent density floors.
+## Pair validation
 
-## gwcat compatibility direction
+`validate_pair(pe, selection, required_coordinates=...)` checks:
 
-The read-only `gwcat` inspection showed several conventions worth preserving:
+1. exact basis compatibility;
+2. required PE coordinates are present and available for every event;
+3. required selection coordinates are present.
 
-- concatenated PE columns + offsets;
-- union parameter schema + availability mask;
-- strict export requirements;
-- first-class `SelectionSet` / `CombinedSelectionSet`;
-- explicit spin-basis/reference-density semantics;
-- paired PE/selection validation.
-
-Phase 1 should write a gwcat adapter against a selected public/stable export API. It should not duplicate gwcat's raw release ingestion.
-
-For a gwcat PE product, the adapter should treat exported `p_pe` as the reference density supplied by the data product.
-
-For a gwcat selection product, the adapter should treat exported `pdraw` according to the exact documented schema/version and prove estimator parity with a direct calculation fixture before production use.
+Any mismatch fails before likelihood evaluation.
 
 ## Deferred provenance
 
-Production manifests, release URLs, file checksums, event cuts, waveform policies, and injection campaign IDs are deliberately deferred until the interface is tested. When added, they belong in dataset manifests and metadata, not in the core HBI functions.
+Production dataset manifests, release URLs, checksums, final GWTC-5 event cuts, waveform policies, and injection campaign selections remain intentionally deferred until the HBI engine is validated.
