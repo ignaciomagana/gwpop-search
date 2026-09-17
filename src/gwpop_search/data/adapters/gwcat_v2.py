@@ -52,16 +52,16 @@ def _basis(spin_basis: str) -> CoordinateBasis:
             f"gwcat v2 spin_basis={spin_basis!r} is not supported by the Phase-1 "
             f"adapter; supported={sorted(_SUPPORTED_BASES)}"
         )
-    base = ("m1_detector", "q", "luminosity_distance")
+    base = ("m1_detector", "q", "luminosity_distance", "ra", "dec")
     if spin_basis == "chieff":
         spin = ("chi_eff",)
-        measure = "dm1_detector dq ddL dchi_eff"
+        measure = "dm1_detector dq ddL dOmega dchi_eff"
     elif spin_basis == "chieff_chip":
         spin = ("chi_eff", "chi_p")
-        measure = "dm1_detector dq ddL dchi_eff dchi_p"
+        measure = "dm1_detector dq ddL dOmega dchi_eff dchi_p"
     else:
         spin = ("a1", "a2", "cos_tilt1", "cos_tilt2")
-        measure = "dm1_detector dq ddL da1 da2 dcos_tilt1 dcos_tilt2"
+        measure = "dm1_detector dq ddL dOmega da1 da2 dcos_tilt1 dcos_tilt2"
     return CoordinateBasis(
         name=f"gwcat_v2_{spin_basis}",
         coordinates=base + spin,
@@ -73,7 +73,7 @@ def _basis(spin_basis: str) -> CoordinateBasis:
 
 
 def _sample_columns(f: h5py.File, spin_basis: str) -> dict[str, np.ndarray]:
-    required = ["m1det", "m2det", "dL"]
+    required = ["m1det", "m2det", "dL", "ra", "dec"]
     if spin_basis in {"chieff", "chieff_chip"}:
         required.append("chieff")
     if spin_basis == "chieff_chip":
@@ -93,6 +93,8 @@ def _sample_columns(f: h5py.File, spin_basis: str) -> dict[str, np.ndarray]:
         "m1_detector": m1,
         "q": q,
         "luminosity_distance": np.asarray(f["dL"][:], dtype=float),
+        "ra": np.asarray(f["ra"][:], dtype=float),
+        "dec": np.asarray(f["dec"][:], dtype=float),
     }
     if "m1src" in f:
         columns["m1_source"] = np.asarray(f["m1src"][:], dtype=float)
