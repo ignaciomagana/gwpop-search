@@ -4,9 +4,9 @@ Last updated: 2026-09-17
 
 ## Current phase
 
-**Phase 0 — architecture/specification.**
+**Phase 0 — COMPLETE.**
 
-Repository created and initialized. No scientific inference has been run from this repository.
+The repository is initialized, installable, and carries the scientific/software contracts needed to begin implementation. No scientific inference has been run from this repository.
 
 ## Project intent
 
@@ -26,9 +26,17 @@ Build `gwpop-search`: a standardized HBI package plus model-graph search system 
 - Input layout should be gwcat-like for both PE and selection products: explicit schemas, concatenated/ragged sample handling where useful, strict required-parameter checks, and explicit reference-density semantics.
 - `gwcat` was inspected read-only on 2026-09-17. Do not modify it as part of this project.
 
-## gwcat observations to carry forward
+## gwcat reference inspected
 
-Useful conventions observed in `ignaciomagana/gwcat`:
+Read-only reference:
+
+```
+repository: ignaciomagana/gwcat
+branch: master
+commit: 8f9e2f12b499a6b2bf16ed938f66d020b12c44c2
+```
+
+Useful conventions observed there:
 
 - PE store uses concatenated 1-D sample columns with an integer offsets index.
 - It stores the union of parameters and an event-by-parameter availability mask rather than shrinking to the intersection.
@@ -41,16 +49,29 @@ Useful conventions observed in `ignaciomagana/gwcat`:
 
 For `gwpop-search`, prefer consuming a stable gwcat export/adapter contract over copying release-specific ingestion logic.
 
+## Phase 0 files
+
+- `README.md`
+- `SPEC.md`
+- `ROADMAP.md`
+- `PROJECT_STATE.md`
+- `docs/data_contract.md`
+- `docs/hbi_contract.md`
+- `pyproject.toml`
+- `src/gwpop_search/__init__.py`
+- `src/gwpop_search/cli.py`
+- `tests/test_package.py`
+
 ## Immediate next phase
 
-Phase 1: implement canonical internal data containers and fake fixtures.
+**Phase 1: canonical internal data containers and fake fixtures.**
 
-Suggested first commits:
+Suggested commit sequence:
 
 1. `data/schema.py`: coordinate-space metadata, required-field validation, basis identity.
 2. `data/posterior.py`: ragged `PosteriorCatalog` with offsets and `log_ref_density`.
-3. `data/selection.py`: campaign-aware `SelectionCatalog` with draw/reference-density contract.
-4. synthetic fixture writers/readers.
+3. `data/selection.py`: campaign-aware `SelectionCatalog` with raw-draw vs estimator-ready semantics.
+4. synthetic fixture writers/readers and failure-mode tests.
 5. adapter boundary for gwcat v2 products, with parity tests but no production data manifest yet.
 
 Only after these pass should Phase 2 implement the likelihood.
