@@ -42,6 +42,7 @@ def complete_graph_evidence(
     dataset_identity: str,
     state_database: str | Path,
     artifact_root: str | Path,
+    root_seed: int | None = None,
 ) -> dict[str, object]:
     """Run/resume F3 for all graph nodes lacking valid F3/F4 evidence.
 
@@ -57,6 +58,11 @@ def complete_graph_evidence(
             "this campaign"
         )
 
+    seed_root = (
+        campaign.seed_policy.root_seed
+        if root_seed is None
+        else int(root_seed)
+    )
     store = ResultStore(state_database)
     artifact_root = Path(artifact_root)
     artifact_root.mkdir(parents=True, exist_ok=True)
@@ -83,7 +89,7 @@ def complete_graph_evidence(
             continue
 
         seed = evaluation_seed(
-            campaign.seed_policy.root_seed,
+            seed_root,
             model_hash,
             Fidelity.F3_EVIDENCE,
         )
@@ -174,6 +180,7 @@ def complete_graph_evidence(
         "format_version": "gwpop-search-evidence-completion-1.0",
         "campaign_id": campaign.campaign_id,
         "dataset_identity": str(dataset_identity),
+        "evidence_seed_root": int(seed_root),
         "n_graph_models": len(graph.nodes),
         "n_valid_evidence_initial": len(initially_valid),
         "n_reused": len(reused),
