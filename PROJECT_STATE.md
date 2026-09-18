@@ -4,35 +4,38 @@ Last updated: 2026-09-17
 
 ## Current phase
 
-**Phase 1 — COMPLETE.**
+**Phase 2 â COMPLETE.**
 
-The repository now has canonical PE/selection data containers, explicit density-basis contracts, synthetic fixtures, and a tested gwcat-v2 adapter boundary. No GWTC-5 population inference has been run from this repository.
+The repository now contains the canonical data layer from Phase 1 and a standardized NumPy/JAX HBI likelihood from Phase 2. No GWTC-5 population inference has been run from this repository yet.
+
+Package version: `0.2.0`.
 
 ## Project intent
 
 Build `gwpop-search`: a standardized HBI package plus model-graph search system for GW population structure, initially GWTC-5 BBHs. The end state is suitable for handing to a high-compute worker on an H100 machine for production inference.
 
-## Decisions already made
+## Frozen architectural decisions
 
-- The repo owns its own HBI implementation; it will not merely orchestrate an external population package.
-- Search/model-selection logic is above the HBI layer and cannot modify the production likelihood during a search.
-- Population models are declarative serialized specifications.
-- Model-graph edges represent exactly one controlled mutation.
-- Scientific model scoring eventually uses evidence + explicit model priors, not the largest raw BF found by a broad search.
-- Search-level claims must ultimately be calibrated by replaying the complete search on null catalogs.
-- Flexible spline/GP/HSGP models are scouts that can suggest interpretable parametric descendants.
-- Build deterministic finite model search before adding agents.
-- Data provenance/manifests remain intentionally deferred until the internal data/HBI interfaces are working.
-- PE prior and selection draw/reference densities are adapter inputs. HBI code must never reconstruct them from filenames or release assumptions.
+- The repo owns its own HBI implementation; it does not merely orchestrate an external population package.
+- Search/model-selection logic sits above the HBI layer and cannot modify the production likelihood during a search.
+- Population models will be declarative serialized specifications.
+- Model-graph edges will represent exactly one controlled mutation.
+- Final scientific model scoring will use evidence + explicit model priors, not the largest raw BF found by a broad search.
+- Search-level claims will ultimately be calibrated by replaying the complete search on null catalogs.
+- Flexible spline/GP/HSGP models are scouts for interpretable parametric descendants.
+- Deterministic finite model search comes before agents.
+- Data provenance/manifests remain intentionally deferred until the data/HBI/model interfaces are validated.
+- PE priors and selection draw/reference densities are adapter inputs. HBI code never reconstructs them from filenames or release assumptions.
 - PE and selection products carry an exact `CoordinateBasis` identity and must match before inference.
-- Selection inputs have two distinct modes: `raw_draw` and `estimator_ready`. The HBI engine must dispatch on the mode and cannot silently apply both normalization conventions.
+- Selection inputs have two distinct modes: `raw_draw` and `estimator_ready`.
 - Generic inference code never floors a zero denominator density.
+- A model callable returns the complete normalized population log density in the declared data basis. If a source-frame model needs advisory coordinates to transform into that basis, it must explicitly declare `required_fields` and own the Jacobian.
 
 ## gwcat reference inspected
 
 Read-only reference:
 
-```
+```text
 repository: ignaciomagana/gwcat
 branch: master
 commit: 8f9e2f12b499a6b2bf16ed938f66d020b12c44c2
@@ -40,107 +43,142 @@ commit: 8f9e2f12b499a6b2bf16ed938f66d020b12c44c2
 
 Do not modify gwcat as part of this project.
 
-Important contract learned from that revision:
+Important gwcat contract carried into this project:
 
-- the current registered fitted core is `m1det, q, dL, ra, dec`;
-- sky contributes the same explicit isotropic density factor on PE and selection sides;
-- source masses, redshift, m2det, and derived spin quantities are advisory unless they belong to the chosen fitted space;
+- current fitted core: `m1det, q, dL, ra, dec`;
+- sky contributes the explicit density factor on both PE and selection sides;
+- source masses, redshift, `m2det`, and derived spin quantities are advisory unless in the fitted space;
 - gwcat `p_pe` is consumed directly as the PE denominator;
 - gwcat `pdraw` is an estimator-ready denominator and already carries the documented multi-campaign mixture/exposure convention;
-- the component-spin space carries `chi_eff` only as a derived/advisory column.
-
-The Phase-1 adapter therefore preserves the gwcat exported density basis rather than converting it to source-frame coordinates. Source-population-to-export-basis transforms belong in the HBI/model layer and must carry explicit Jacobians.
+- component-spin exports may carry `chi_eff` as a derived/advisory column.
 
 ## Phase 1 implementation
 
-New package modules:
+Data layer:
 
 - `src/gwpop_search/data/schema.py`
-  - `CoordinateBasis`
-  - basis hashing / exact pair compatibility
-  - denominator-density validation
-  - typed contract errors
 - `src/gwpop_search/data/posterior.py`
-  - ragged `PosteriorCatalog`
-  - concatenated columns + offsets
-  - per-event availability
-  - finite `log_ref_density`
-  - internal HDF5 round trip
 - `src/gwpop_search/data/selection.py`
-  - `SelectionCatalog`
-  - `Campaign`
-  - `SelectionMode.RAW_DRAW`
-  - `SelectionMode.ESTIMATOR_READY`
-  - internal HDF5 round trip
 - `src/gwpop_search/data/pair.py`
-  - PE/selection cross-validation
 - `src/gwpop_search/data/fixtures.py`
-  - deterministic ragged PE + two-campaign raw-draw fixtures
 - `src/gwpop_search/data/adapters/gwcat_v2.py`
-  - gwcat PE 2.0/2.1 adapter
-  - gwcat selection 2.0/2.1 adapter
-  - supported spaces: chieff, chieff_chip, component
 
-Package version is now `0.1.0`.
+Phase-1 local reference run after the final sky-basis correction:
 
-## Phase 1 tests
-
-Added:
-
-- `tests/test_data_schema.py`
-- `tests/test_data_containers.py`
-- `tests/test_gwcat_v2_adapter.py`
-- updated package smoke test
-
-Local reference run after the final sky-basis correction:
-
-```
+```text
 Python 3.13.5
 16 passed
 ```
 
-The gwcat adapter parity test checks that adaptation preserves
+## Phase 2 implementation
 
+New HBI modules:
+
+- `src/gwpop_search/hbi/types.py`
+  - explicit `HBIConfig` and `RateTreatment`
+  - event, campaign, selection, catalog, and variance result types
+- `src/gwpop_search/hbi/common.py`
+  - population-density validation
+  - event/selection importance ESS
+  - maximum normalized weight
+  - delta-method Monte-Carlo log-integral variance
+  - model `required_fields` contract
+  - raw-vs-estimator-ready selection normalization
+- `src/gwpop_search/hbi/numpy_backend.py`
+  - event importance-reweighting likelihood
+  - raw multi-campaign selection estimator
+  - estimator-ready selection path
+  - shape/rate-marginalized likelihood
+  - explicit-rate Poisson point-process likelihood
+  - per-campaign diagnostics
+  - selection chunking
+- `src/gwpop_search/hbi/jax_backend.py`
+  - padded/masked ragged PE representation
+  - fixed-size selection chunks
+  - `lax.scan` log-space selection accumulation
+  - differentiable shape and Poisson likelihood builders
+- `src/gwpop_search/hbi/__init__.py`
+  - public NumPy API and lazy JAX builders
+
+### Selection convention now pinned in HBI
+
+For raw campaign `k`:
+
+```text
+A_k = T_k / N_draw,k * sum_detected p_pop / p_draw,k
+A = sum_k A_k
 ```
-sum p_pop / pdraw
+
+Setting `HBIConfig.raw_selection_use_observing_time=False` explicitly changes the campaign factor to `1/N_draw,k`.
+
+For `estimator_ready` selection products, including the current gwcat adapter:
+
+```text
+A = sum p_pop / pdraw
 ```
 
-and explicitly checks that the adapter does not divide by `ndraw` again.
+with no second `ndraw`, observing-time, or campaign-mixture factor.
 
-No CI workflow has been added yet; the passing test count above is the local Phase-1 acceptance run.
+### Likelihoods
+
+Shape:
+
+```text
+log L = sum_i log ell_i - N log A
+```
+
+Poisson with explicit rate `R`:
+
+```text
+log L = sum_i log ell_i + N log R - R A
+```
+
+### Phase 2 tests
+
+Added:
+
+- `tests/test_hbi_numpy.py`
+- `tests/test_hbi_jax.py`
+
+The targeted Phase-2 local reference run used Python 3.13.5 and reported:
+
+```text
+14 passed in 6.04s
+```
+
+It covers analytic event reweighting, raw and estimator-ready selection normalization, shape/PPP formulas, permutation and chunk invariance, support failures, likelihood-variance diagnostics, toy recovery, NumPy/JAX equality, and JAX differentiation.
+
+Important bookkeeping note: the Phase-1 `16 passed` and Phase-2 `14 passed` results were obtained in separate local reference checkouts. Do not report them as a single combined 30-test suite until a full repository checkout/CI run executes all tests together.
+
+No GitHub Actions CI workflow has been added yet.
 
 ## Immediate next phase
 
-**Phase 2: standardized HBI engine.**
+**Phase 3: baseline normalized BBH population components + NumPyro inference.**
 
 Implement in this order:
 
-1. NumPy reference event-reweighting likelihood with per-event contributions.
-2. NumPy raw-draw selection estimator with per-campaign accounting.
-3. NumPy estimator-ready selection path for gwcat products.
-4. shape/rate-marginalized catalog likelihood.
-5. explicit Poisson point-process rate likelihood.
-6. event importance ESS + max-weight diagnostics.
-7. selection ESS + per-campaign diagnostics.
-8. likelihood-variance diagnostics.
-9. JAX implementation with parity against NumPy.
-10. selection chunking with chunk-size invariance tests.
+1. population-model interface wrapping normalized source-population densities into the adapter density basis;
+2. explicit detector/source-frame + cosmology/Jacobian transform layer needed for the gwcat basis;
+3. normalized primary-mass baseline (power law / broken power law / peak components as required by the chosen baseline);
+4. normalized `q` conditional;
+5. simple redshift/rate evolution;
+6. normalized `chi_eff` baseline and one declared treatment of the remaining spin coordinates;
+7. composed baseline BBH model with explicit hyperpriors;
+8. numerical normalization tests across random hyperparameters;
+9. NumPyro NUTS wrapper over the JAX HBI likelihood;
+10. synthetic population + PE/selection recovery;
+11. posterior serialization/checkpoint-restart path;
+12. first Slurm/H100 run configuration, still using synthetic data.
 
-Phase 2 acceptance remains:
-
-- analytic/toy likelihood checks;
-- NumPy/JAX equality;
-- permutation/chunking invariance;
-- deliberate reference-density/support failures caught;
-- simulation recovery before real GWTC-5 inference.
-
-Do not start the model grammar or baseline population-family expansion before this likelihood layer passes.
+Do not begin the declarative model grammar or automated model search before a conventional baseline model recovers from simulation under this HBI layer.
 
 ## Questions deliberately left open
 
 - Exact production spin space: component vs projected alternatives.
 - Exact gwcat export version/parameter-space selected for production.
 - Final GWTC-5 BBH event cut and waveform policy.
+- Exact baseline family used for the first GWTC-5 reproduction.
 - Evidence estimator.
 - Model-prior hyperparameters.
 - PostgreSQL vs SQLite for distributed production state.
@@ -148,7 +186,7 @@ Do not start the model grammar or baseline population-family expansion before th
 
 ## Production/H100 handoff requirement
 
-Before handing to Fable, the repository must contain:
+Before handing to Fable for the full search, the repository must contain:
 
 - environment/bootstrap instructions for the target CUDA/JAX stack;
 - frozen dataset manifest and hashes;
