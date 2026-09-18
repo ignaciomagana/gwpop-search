@@ -574,3 +574,25 @@ def test_run_holdout_validation_cli_parses():
     assert args.n_folds == 5
     assert args.root == "runs/holdout"
     assert callable(args.func)
+
+
+
+def test_diagnose_frozen_selection_null_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "diagnose-frozen-selection-null",
+            "--manifest",
+            "dataset_manifest.json",
+            "--base-dir",
+            "data",
+            "--model",
+            "baseline.json",
+            "--hyperparameters-json",
+            "baseline_hp.json",
+        ]
+    )
+    assert args.command == "diagnose-frozen-selection-null"
+    assert args.manifest == "dataset_manifest.json"
+    assert args.model == "baseline.json"
+    assert args.hyperparameters_json == "baseline_hp.json"
+    assert callable(args.func)
