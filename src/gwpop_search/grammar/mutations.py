@@ -275,7 +275,7 @@ DEFAULT_MUTATIONS: tuple[MutationSpec, ...] = (
         prior_updates={
             "rate_a": _u(0.0, 10.0),
             "rate_b": _u(0.0, 10.0),
-            "rate_z_peak": _u(0.1, 4.0),
+            "rate_z_turnover": _u(0.1, 4.0),
         },
         description="replace power-law rate evolution with Madau-Dickinson form",
     ),
