@@ -1,0 +1,52 @@
+#!/bin/bash
+#SBATCH --job-name=gwpop-production
+#SBATCH --output=slurm-%j.out
+#SBATCH --error=slurm-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --gpus=1
+#SBATCH --time=24:00:00
+
+# Frozen deterministic F0--F4 production search.
+#
+# Add site-specific partition/account/module directives above. The environment
+# must already contain a CUDA-enabled JAX installation plus gwpop-search with
+# the evidence extra. Re-submit the identical job to resume durable work.
+
+set -euo pipefail
+
+: "${GWPOP_ENV:?Set GWPOP_ENV to the environment activation script}"
+: "${GWPOP_MANIFEST:?Set GWPOP_MANIFEST to dataset_manifest.json}"
+: "${GWPOP_GRAPH:?Set GWPOP_GRAPH to model_graph.json}"
+: "${GWPOP_CAMPAIGN:?Set GWPOP_CAMPAIGN to campaign.json}"
+: "${GWPOP_DATA_BASE:?Set GWPOP_DATA_BASE to the frozen data directory}"
+: "${GWPOP_WORK_DIR:?Set GWPOP_WORK_DIR to persistent production storage}"
+
+source "${GWPOP_ENV}"
+
+export JAX_ENABLE_X64=true
+export GWPOP_GIT_COMMIT="${GWPOP_GIT_COMMIT:-$(git rev-parse HEAD)}"
+
+python - <<'PY'
+import jax
+devices = jax.devices()
+print("JAX devices:", devices)
+if not any(device.platform == "gpu" for device in devices):
+    raise SystemExit("No JAX GPU device visible; refusing production search")
+if not bool(jax.config.x64_enabled):
+    raise SystemExit("JAX x64 is disabled; refusing production search")
+PY
+
+gwpop-search validate-production-freeze \
+  --manifest "${GWPOP_MANIFEST}" \
+  --graph "${GWPOP_GRAPH}" \
+  --campaign "${GWPOP_CAMPAIGN}" \
+  --base-dir "${GWPOP_DATA_BASE}"
+
+gwpop-search run-production-search \
+  --manifest "${GWPOP_MANIFEST}" \
+  --graph "${GWPOP_GRAPH}" \
+  --campaign "${GWPOP_CAMPAIGN}" \
+  --base-dir "${GWPOP_DATA_BASE}" \
+  --work-dir "${GWPOP_WORK_DIR}"
