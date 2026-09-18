@@ -62,7 +62,9 @@ def test_exact_null_campaign_config_roundtrip(tmp_path):
     restored = load_exact_null_campaign_config(path)
     assert restored == config
     payload = json.loads(path.read_text())
-    assert payload["format_version"] == "gwpop-search-exact-null-campaign-1.1"
+    assert payload["format_version"] == "gwpop-search-exact-null-campaign-1.2"
+    assert payload["data_mode"] == "frozen_selection_resample"
+    assert payload["min_resampling_ess"] == 200.0
     assert "stop_fidelity" not in payload
     assert payload["truth_hyperparameters"]["mmin"] == config.truth_hyperparameters["mmin"]
 
@@ -126,6 +128,46 @@ def test_exact_null_plan_requires_production_full_graph_f3_budget():
 def test_old_null_campaign_format_is_rejected():
     config = ExactNullCampaignConfig()
     payload = config.to_dict()
-    payload["format_version"] = "gwpop-search-exact-null-campaign-1.0"
+    payload["format_version"] = "gwpop-search-exact-null-campaign-1.1"
     with pytest.raises(ValueError, match="unsupported exact null"):
         ExactNullCampaignConfig.from_dict(payload)
+
+
+
+def test_exact_null_config_can_explicitly_select_engineering_synthetic_mode():
+    config = ExactNullCampaignConfig(
+        n_nulls=2,
+        data_mode="synthetic_survey",
+    )
+    assert config.data_mode == "synthetic_survey"
+
+
+def test_exact_null_config_rejects_unknown_data_mode():
+    with pytest.raises(ValueError, match="unsupported null data mode"):
+        ExactNullCampaignConfig(data_mode="not-a-mode")
+
+
+def test_exact_null_plan_pins_production_dataset_for_frozen_selection_mode():
+    graph, campaign = _campaign(max_nulls=10)
+    plan = build_exact_null_campaign_plan(
+        graph,
+        campaign,
+        ExactNullCampaignConfig(n_nulls=2),
+    )
+    assert (
+        plan["production_dataset_manifest_hash"]
+        == campaign.dataset_manifest_hash
+    )
+
+
+def test_synthetic_null_plan_does_not_claim_production_dataset_resampling():
+    graph, campaign = _campaign(max_nulls=10)
+    plan = build_exact_null_campaign_plan(
+        graph,
+        campaign,
+        ExactNullCampaignConfig(
+            n_nulls=2,
+            data_mode="synthetic_survey",
+        ),
+    )
+    assert plan["production_dataset_manifest_hash"] is None
