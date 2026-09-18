@@ -106,8 +106,14 @@ def weighted_linear_dependence(
     dof = max(n_eff - 2.0, 1.0)
     sigma2 = np.sum(w * residual_fit**2) * n_eff / dof
     slope_error = np.sqrt(sigma2 / (xx * n_eff))
-    if not np.isfinite(slope_error) or slope_error <= 0.0:
+    if not np.isfinite(slope_error):
         raise ValueError("unable to estimate a finite slope uncertainty")
+    if slope_error <= 0.0:
+        # A deterministic scout residual can be exactly linear in tests or
+        # generated summaries. Keep the diagnostic finite rather than encoding
+        # an infinite significance that downstream JSON/results cannot represent.
+        scale = max(abs(float(slope)), 1.0)
+        slope_error = np.sqrt(np.finfo(float).eps) * scale
     z_score = slope / slope_error
 
     return ResidualDependenceSummary(
