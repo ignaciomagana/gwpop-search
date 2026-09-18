@@ -57,8 +57,11 @@ mixing campaigns.
 ```
 
 `recovery_summary.json` contains the injected truth, posterior 5/50/95 percent
-quantiles, a truth-in-central-90%-interval indicator, divergence count, and
-catalog/selection sizes.
+quantiles, a truth-in-central-90%-interval indicator, divergence count, split
+R-hat/effective-sample-size summaries, catalog/selection sizes, and HBI
+importance diagnostics at both the injected truth and posterior median. The
+latter include minimum event ESS, selection ESS, maximum normalized weights,
+and the shape-likelihood Monte-Carlo variance estimate.
 
 The indicator is a diagnostic for one catalog, not a calibrated coverage claim.
 Coverage requires repeated independent synthetic catalogs.
@@ -88,8 +91,9 @@ sbatch scripts/slurm/phase3_synthetic_h100.sbatch.example
 Before Phase 4 begins:
 
 - run the default catalog with at least 4 NUTS chains;
-- require no unresolved numerical pathologies (divergences, catastrophic
-  PE/selection importance ESS, or likelihood variance);
+- require no unresolved numerical pathologies (divergences, poor split R-hat,
+  low MCMC effective sample size, catastrophic PE/selection importance ESS, or
+  excessive likelihood Monte-Carlo variance);
 - repeat with multiple independent data/sampler seeds;
 - verify posterior recovery is statistically consistent across the ensemble;
 - verify an interrupted campaign resumes without changing completed chains.
