@@ -41,6 +41,7 @@ from .review import (
     select_validated_scout_proposal,
     write_scout_review,
 )
+from .structured_confirmation import confirm_structured_scout_descendant
 from .summary import (
     ConditionalMomentSummaryConfig,
     summarize_conditional_hsgp,
@@ -79,6 +80,7 @@ __all__ = [
     "StructureProposal",
     "assess_scout_numerics",
     "compare_scout_descendant_evidence",
+    "confirm_structured_scout_descendant",
     "assess_structured_scout_campaign",
     "build_structured_scout_campaign_plan",
     "default_scout_campaign_config",
@@ -98,6 +100,7 @@ __all__ = [
     "run_structured_scout_campaign",
     "save_scout_campaign_config",
     "scout_comparison_seed_root",
+    "compare_scout_descendant_evidence_config",
     "select_validated_scout_proposal",
     "squared_exponential_spectral_weights",
     "structured_scout_seed",
