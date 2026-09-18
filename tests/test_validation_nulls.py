@@ -4,13 +4,16 @@ from gwpop_search.data.fixtures import (
     make_toy_posterior_catalog,
     make_toy_selection_catalog,
 )
+from gwpop_search.grammar import baseline_model_spec, enumerate_model_graph
 from gwpop_search.nulls import (
     SearchReplayResult,
     calibrate_search_replays,
     empirical_tail_probability,
     null_replay_seed,
     run_null_replay_campaign,
+    search_statistics_from_evidence,
 )
+from gwpop_search.search import ComplexityModelPrior, ModelEvidence
 from gwpop_search.validation import (
     compare_holdout_models,
     deterministic_event_folds,
@@ -142,3 +145,47 @@ def test_search_replay_calibration_uses_maximum_search_statistic():
     assert calibrated["max_log_bayes_factor"]["q90"] > 3.0
     assert calibrated["observed_log_bf_calibration"]["n_exceed"] == 1
     assert calibrated["observed_log_posterior_odds_calibration"]["n_exceed"] == 1
+
+
+
+def test_search_level_statistics_use_only_edges_with_actual_evidence():
+    graph = enumerate_model_graph(
+        baseline_model_spec(),
+        max_depth=1,
+        max_models=5,
+    )
+    root = graph.root_hash
+    child = graph.nodes[1].model_hash
+    evidences = {
+        root: ModelEvidence(root, -100.0, 0.1),
+        child: ModelEvidence(child, -96.0, 0.2),
+    }
+    prior = ComplexityModelPrior(penalty_per_axis=1.0)
+    stats = search_statistics_from_evidence(
+        graph,
+        evidences,
+        model_prior=prior,
+    )
+
+    assert stats["n_models_evaluated"] == 2
+    assert stats["n_evidence_edges"] == 1
+    assert stats["max_log_bayes_factor"] == 4.0
+    assert stats["max_log_posterior_odds"] == 3.0
+    assert stats["best_model_hash"] == child
+
+
+def test_search_level_statistic_is_zero_when_only_null_has_evidence():
+    graph = enumerate_model_graph(
+        baseline_model_spec(),
+        max_depth=1,
+        max_models=5,
+    )
+    root = graph.root_hash
+    stats = search_statistics_from_evidence(
+        graph,
+        {root: ModelEvidence(root, -10.0, 0.1)},
+        model_prior=ComplexityModelPrior(),
+    )
+    assert stats["max_log_bayes_factor"] == 0.0
+    assert stats["max_log_posterior_odds"] == 0.0
+    assert stats["n_evidence_edges"] == 0
