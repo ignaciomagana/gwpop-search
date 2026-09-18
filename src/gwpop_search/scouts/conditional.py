@@ -96,6 +96,20 @@ class ConditionalHSGPConfig:
             "coefficient_prefix": self.coefficient_prefix,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "ConditionalHSGPConfig":
+        return cls(
+            target=str(payload["target"]),
+            covariate=str(payload["covariate"]),
+            target_axis=HSGPAxis(**dict(payload["target_axis"])),
+            covariate_axis=HSGPAxis(**dict(payload["covariate_axis"])),
+            amplitude=float(payload.get("amplitude", 1.0)),
+            target_length_scale=float(payload["target_length_scale"]),
+            covariate_length_scale=float(payload["covariate_length_scale"]),
+            quadrature_order=int(payload.get("quadrature_order", 48)),
+            coefficient_prefix=str(payload.get("coefficient_prefix", "hsgp")),
+        )
+
 
 @lru_cache(maxsize=16)
 def _legendre_nodes(order: int):
