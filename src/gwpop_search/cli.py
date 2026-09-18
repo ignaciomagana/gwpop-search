@@ -138,6 +138,26 @@ def _validate_model_spec(args: argparse.Namespace) -> None:
     print(f"valid model spec: {spec.model_hash}")
 
 
+def _run_production_search(args: argparse.Namespace) -> None:
+    from .production import (
+        load_dataset_manifest,
+        load_production_campaign,
+        run_production_search,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    result = run_production_search(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        work_dir=Path(args.work_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    print(json.dumps(result, sort_keys=True, indent=2))
+
+
 def _validate_dataset_freeze(args: argparse.Namespace) -> None:
     from .production import (
         load_dataset_manifest,
@@ -226,6 +246,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--spec", required=True)
     validate_parser.set_defaults(func=_validate_model_spec)
+
+    run_production = subparsers.add_parser(
+        "run-production-search",
+        help="validate and run/resume the frozen deterministic F0-F4 search",
+    )
+    run_production.add_argument("--manifest", required=True)
+    run_production.add_argument("--graph", required=True)
+    run_production.add_argument("--campaign", required=True)
+    run_production.add_argument("--base-dir", default=".")
+    run_production.add_argument("--work-dir", default=".")
+    run_production.add_argument("--ignore-current-commit", action="store_true")
+    run_production.set_defaults(func=_run_production_search)
 
     dataset_freeze = subparsers.add_parser(
         "validate-dataset-manifest",
