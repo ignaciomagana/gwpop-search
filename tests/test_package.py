@@ -386,3 +386,41 @@ def test_run_nearby_baseline_suite_cli_parses():
     assert args.command == "run-nearby-baseline-suite"
     assert args.root == "runs/nearby"
     assert callable(args.func)
+
+
+
+def test_write_null_calibration_config_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "write-null-calibration-config",
+            "--n-nulls",
+            "50",
+            "--output",
+            "nulls.json",
+        ]
+    )
+    assert args.command == "write-null-calibration-config"
+    assert args.n_nulls == 50
+    assert args.stop_fidelity == "F4"
+    assert callable(args.func)
+
+
+def test_run_null_search_calibration_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "run-null-search-calibration",
+            "--manifest",
+            "dataset_manifest.json",
+            "--graph",
+            "model_graph.json",
+            "--campaign",
+            "campaign.json",
+            "--null-config",
+            "nulls.json",
+            "--root",
+            "runs/nulls",
+        ]
+    )
+    assert args.command == "run-null-search-calibration"
+    assert args.root == "runs/nulls"
+    assert callable(args.func)
