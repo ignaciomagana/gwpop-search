@@ -6,6 +6,7 @@ from .comparison import (
     scout_comparison_seed_root,
 )
 from .campaign import (
+    StructuredScoutAcceptanceCriteria,
     assess_structured_scout_campaign,
     build_structured_scout_campaign_plan,
     reachable_mutation_ids,
@@ -67,6 +68,7 @@ __all__ = [
     "ReviewedScoutProposal",
     "ScoutCampaignConfig",
     "StructuredScoutInjection",
+    "StructuredScoutAcceptanceCriteria",
     "ConditionalHSGPResidualModel",
     "ConditionalMomentSummaryConfig",
     "ConditionalScoutRunConfig",
