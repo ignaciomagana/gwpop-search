@@ -263,6 +263,8 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
         ExactNullCampaignConfig,
         save_exact_null_campaign_config,
     )
+    from .production import load_dataset_manifest
+
     truth = (
         dict(DEFAULT_BASELINE_HYPERPARAMETERS)
         if args.truth_hyperparameters_json is None
@@ -273,15 +275,31 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
             ).items()
         }
     )
+    if args.data_mode == "frozen_selection_resample":
+        if args.manifest is None:
+            raise ValueError(
+                "--manifest is required for frozen_selection_resample"
+            )
+        manifest = load_dataset_manifest(Path(args.manifest))
+        n_events = len(manifest.event_names)
+        if args.n_events is not None and args.n_events != n_events:
+            raise ValueError(
+                "--n-events disagrees with the frozen dataset manifest"
+            )
+    else:
+        n_events = 64 if args.n_events is None else args.n_events
+
     config = ExactNullCampaignConfig(
         n_nulls=args.n_nulls,
         root_seed=args.root_seed,
         survey=SyntheticSurveyConfig(
-            n_events=args.n_events,
+            n_events=n_events,
             posterior_samples_per_event=args.pe_samples,
             n_injections=args.n_injections,
         ),
         truth_hyperparameters=truth,
+        data_mode=args.data_mode,
+        min_resampling_ess=args.min_resampling_ess,
     )
     save_exact_null_campaign_config(Path(args.output), config)
     print(
@@ -319,12 +337,30 @@ def _run_exact_null_calibration(args: argparse.Namespace) -> None:
         candidate = Path(args.work_dir) / campaign.state_database
         observed = str(candidate) if candidate.is_file() else None
 
+    null_config = load_exact_null_campaign_config(
+        Path(args.null_config)
+    )
+    production_posterior = None
+    production_selection = None
+    production_dataset_identity = None
+    if null_config.data_mode == "frozen_selection_resample":
+        from .production import load_frozen_dataset
+
+        production_posterior, production_selection = load_frozen_dataset(
+            manifest,
+            data_base_dir=Path(args.base_dir),
+        )
+        production_dataset_identity = manifest.manifest_hash
+
     summary = run_exact_null_campaign(
         Path(args.root),
         load_model_graph(Path(args.graph)),
         campaign,
-        load_exact_null_campaign_config(Path(args.null_config)),
+        null_config,
         observed_state_database=observed,
+        production_posterior=production_posterior,
+        production_selection=production_selection,
+        production_dataset_identity=production_dataset_identity,
     )
     print(json.dumps(summary, sort_keys=True, indent=2))
 
@@ -1054,10 +1090,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     null_template.add_argument("--n-nulls", type=int, default=100)
     null_template.add_argument("--root-seed", type=int, default=20260918)
-    null_template.add_argument("--n-events", type=int, default=64)
+    null_template.add_argument("--n-events", type=int)
     null_template.add_argument("--pe-samples", type=int, default=256)
     null_template.add_argument("--n-injections", type=int, default=20_000)
     null_template.add_argument("--truth-hyperparameters-json")
+    null_template.add_argument("--manifest")
+    null_template.add_argument(
+        "--data-mode",
+        choices=("frozen_selection_resample", "synthetic_survey"),
+        default="frozen_selection_resample",
+    )
+    null_template.add_argument(
+        "--min-resampling-ess",
+        type=float,
+        default=200.0,
+    )
     null_template.add_argument("--output", required=True)
     null_template.set_defaults(func=_write_exact_null_config)
 
