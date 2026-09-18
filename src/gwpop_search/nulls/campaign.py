@@ -165,7 +165,7 @@ def build_exact_null_campaign_plan(
             "full-graph F3 evidence completion"
         )
     return {
-        "format_version": "gwpop-search-exact-null-plan-1.0",
+        "format_version": "gwpop-search-exact-null-plan-1.1",
         "code": _code_identity(),
         "production_campaign_hash": campaign.campaign_hash,
         "graph_hash": model_graph_hash(graph),
@@ -179,7 +179,8 @@ def build_exact_null_campaign_plan(
         "replayed_production_search": {
             "stop_fidelity": Fidelity.F4_PRODUCTION.value,
             "scheduler": asdict(campaign.scheduler),
-            "max_gpu_hours": campaign.budget.max_gpu_hours,
+            "max_gpu_hours": config.max_gpu_hours_per_null,
+            "source_production_max_gpu_hours": campaign.budget.max_gpu_hours,
             "max_f3_models": campaign.budget.max_f3_models,
             "max_f4_models": campaign.budget.max_f4_models,
             "evidence_completion_required": True,
