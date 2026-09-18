@@ -23,6 +23,10 @@ from .conditional import (
     ConditionalHSGPResidualModel,
     coefficient_priors,
 )
+from .proposals import (
+    StructureProposal,
+    descendant_payload_for_proposal,
+)
 from .summary import (
     ConditionalMomentSummaryConfig,
     summarize_conditional_hsgp,
@@ -262,6 +266,13 @@ def run_conditional_hsgp_scout(
 
     raw_proposals = list(structure["proposals"])
     validated_proposals = raw_proposals if numerical["passed"] else []
+    descendants = [
+        descendant_payload_for_proposal(
+            base_spec,
+            StructureProposal(**proposal),
+        )
+        for proposal in validated_proposals
+    ]
     summary = {
         "format_version": "gwpop-search-conditional-hsgp-run-1.0",
         "base_model_hash": base_spec.model_hash,
@@ -286,6 +297,7 @@ def run_conditional_hsgp_scout(
         "structure": structure,
         "raw_proposals": raw_proposals,
         "validated_proposals": validated_proposals,
+        "validated_descendants": descendants,
         "proposal_firewall": (
             "numerical_pass_required"
             if numerical["passed"]
