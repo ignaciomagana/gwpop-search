@@ -403,6 +403,7 @@ def test_write_null_calibration_config_cli_parses():
     assert args.n_nulls == 50
     assert args.data_mode == "frozen_selection_resample"
     assert args.min_resampling_ess == 200.0
+    assert args.max_gpu_hours_per_null == 12.0
     assert args.n_events is None
     assert not hasattr(args, "stop_fidelity")
     assert callable(args.func)
