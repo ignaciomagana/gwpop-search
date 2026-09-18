@@ -101,7 +101,11 @@ def test_exact_null_plan_pins_search_and_seed_policy():
     assert plan["seed_policy"][0]["data_seed"] != plan["seed_policy"][0]["search_seed"]
     replayed = plan["replayed_production_search"]
     assert replayed["stop_fidelity"] == "F4"
-    assert replayed["max_gpu_hours"] == campaign.budget.max_gpu_hours
+    assert replayed["max_gpu_hours"] == config.max_gpu_hours_per_null
+    assert (
+        replayed["source_production_max_gpu_hours"]
+        == campaign.budget.max_gpu_hours
+    )
     assert replayed["max_f3_models"] == campaign.budget.max_f3_models
     assert replayed["evidence_completion_required"] is True
 
@@ -187,4 +191,6 @@ def test_exact_null_plan_records_per_null_compute_cap():
         max_gpu_hours_per_null=3.5,
     )
     plan = build_exact_null_campaign_plan(graph, campaign, config)
+    assert plan["format_version"] == "gwpop-search-exact-null-plan-1.1"
     assert plan["null_config"]["max_gpu_hours_per_null"] == 3.5
+    assert plan["replayed_production_search"]["max_gpu_hours"] == 3.5
