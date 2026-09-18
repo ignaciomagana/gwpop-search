@@ -146,6 +146,63 @@ def _read_json_mapping(path: str | Path) -> dict[str, object]:
     return payload
 
 
+def _write_default_scout_config(args: argparse.Namespace) -> None:
+    from .scouts import (
+        default_scout_campaign_config,
+        save_scout_campaign_config,
+    )
+
+    config = default_scout_campaign_config(args.target, args.covariate)
+    save_scout_campaign_config(Path(args.output), config)
+    print(
+        "default HSGP scout config written: "
+        f"{args.output} target={args.target} covariate={args.covariate}"
+    )
+
+
+def _run_hsgp_scout(args: argparse.Namespace) -> None:
+    from .grammar import load_model_spec
+    from .production import (
+        load_dataset_manifest,
+        load_frozen_dataset,
+    )
+    from .scouts import (
+        load_scout_campaign_config,
+        run_conditional_hsgp_scout,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    posterior, selection = load_frozen_dataset(
+        manifest,
+        data_base_dir=Path(args.base_dir),
+    )
+    base_spec = load_model_spec(Path(args.base_model))
+    raw_hyperparameters = _read_json_mapping(args.base_hyperparameters_json)
+    base_hyperparameters = {
+        str(name): float(value)
+        for name, value in raw_hyperparameters.items()
+    }
+    scout = load_scout_campaign_config(Path(args.scout_config))
+
+    _, summary = run_conditional_hsgp_scout(
+        Path(args.run_dir),
+        posterior,
+        selection,
+        base_spec=base_spec,
+        base_hyperparameters=base_hyperparameters,
+        hsgp_config=scout.hsgp,
+        seed=args.seed,
+        config=scout.run,
+        dataset_identity=manifest.manifest_hash,
+    )
+    print(
+        "HSGP scout complete: "
+        f"numerical_pass={summary['numerical']['passed']} "
+        f"raw_proposals={len(summary['raw_proposals'])} "
+        f"validated_proposals={len(summary['validated_proposals'])}"
+    )
+
+
 def _freeze_dataset(args: argparse.Namespace) -> None:
     from .production import (
         build_dataset_manifest_from_canonical_files,
@@ -356,6 +413,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--spec", required=True)
     validate_parser.set_defaults(func=_validate_model_spec)
+
+    scout_template = subparsers.add_parser(
+        "write-default-scout-config",
+        help="write a reviewable conditional-HSGP scout configuration",
+    )
+    scout_template.add_argument(
+        "--target",
+        choices=("q", "chi_eff"),
+        required=True,
+    )
+    scout_template.add_argument(
+        "--covariate",
+        choices=("m1_source", "q", "z"),
+        required=True,
+    )
+    scout_template.add_argument("--output", required=True)
+    scout_template.set_defaults(func=_write_default_scout_config)
+
+    scout_run = subparsers.add_parser(
+        "run-hsgp-scout",
+        help="run/resume one conditional-HSGP scout on a frozen dataset",
+    )
+    scout_run.add_argument("--manifest", required=True)
+    scout_run.add_argument("--base-dir", default=".")
+    scout_run.add_argument("--base-model", required=True)
+    scout_run.add_argument("--base-hyperparameters-json", required=True)
+    scout_run.add_argument("--scout-config", required=True)
+    scout_run.add_argument("--run-dir", required=True)
+    scout_run.add_argument("--seed", type=int, required=True)
+    scout_run.set_defaults(func=_run_hsgp_scout)
 
     freeze_dataset = subparsers.add_parser(
         "freeze-dataset",
