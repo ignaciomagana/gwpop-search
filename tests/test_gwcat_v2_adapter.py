@@ -2,7 +2,13 @@ import h5py
 import numpy as np
 import pytest
 
-from gwpop_search.data import BasisMismatchError, SelectionMode
+from gwpop_search.data import (
+    BasisMismatchError,
+    PosteriorCatalog,
+    SelectionCatalog,
+    SelectionMode,
+    canonicalize_gwcat_v2_pair,
+)
 from gwpop_search.data.adapters.gwcat_v2 import load_pair, load_selection
 
 
@@ -134,3 +140,107 @@ def test_gwcat_basis_mismatch_fails_before_inference(tmp_path):
     _write_selection(sel_path, spin_basis="chieff_chip")
     with pytest.raises(BasisMismatchError):
         load_pair(pe_path, sel_path)
+
+
+
+def test_gwcat_canonicalization_writes_audited_internal_pair(tmp_path):
+    pe_export = tmp_path / "gwcat_pe.h5"
+    selection_export = tmp_path / "gwcat_selection.h5"
+    output = tmp_path / "canonical"
+    _write_pe(pe_export, spin_basis="chieff")
+    _write_selection(selection_export, spin_basis="chieff")
+
+    report = canonicalize_gwcat_v2_pair(
+        pe_export,
+        selection_export,
+        output,
+        required_spin_basis="chieff",
+    )
+
+    assert report["format_version"] == "gwpop-search-gwcat-canonicalization-1.0"
+    assert report["required_spin_basis"] == "chieff"
+    assert report["selection_mode"] == "estimator_ready"
+    assert report["n_events"] == 2
+    assert report["n_pe_samples"] == 6
+    assert report["n_selected_injections"] == 5
+    assert report["source_pe"]["sha256"]
+    assert report["canonical_pe"]["sha256"]
+    assert (
+        report["denominator_contract"]["selection"]
+        .startswith("gwcat exported estimator-ready pdraw")
+    )
+
+    pe = PosteriorCatalog.from_hdf5(output / "pe.h5")
+    selection = SelectionCatalog.from_hdf5(output / "selection.h5")
+    assert pe.basis.identity == selection.basis.identity
+    assert selection.mode is SelectionMode.ESTIMATOR_READY
+    np.testing.assert_allclose(
+        np.exp(pe.log_ref_density),
+        np.linspace(0.5, 1.5, 6),
+    )
+    np.testing.assert_allclose(
+        np.exp(selection.log_draw_density),
+        np.asarray([0.20, 0.25, 0.40, 0.50, 0.80]),
+    )
+
+
+def test_gwcat_canonicalization_is_idempotent_for_exact_same_inputs(tmp_path):
+    pe_export = tmp_path / "gwcat_pe.h5"
+    selection_export = tmp_path / "gwcat_selection.h5"
+    output = tmp_path / "canonical"
+    _write_pe(pe_export)
+    _write_selection(selection_export)
+
+    first = canonicalize_gwcat_v2_pair(
+        pe_export,
+        selection_export,
+        output,
+        required_spin_basis="chieff",
+    )
+    second = canonicalize_gwcat_v2_pair(
+        pe_export,
+        selection_export,
+        output,
+        required_spin_basis="chieff",
+    )
+    assert second == first
+
+
+def test_gwcat_canonicalization_refuses_spin_basis_mismatch(tmp_path):
+    pe_export = tmp_path / "gwcat_pe.h5"
+    selection_export = tmp_path / "gwcat_selection.h5"
+    _write_pe(pe_export, spin_basis="chieff")
+    _write_selection(selection_export, spin_basis="chieff")
+
+    with pytest.raises(ValueError, match="does not match explicit requirement"):
+        canonicalize_gwcat_v2_pair(
+            pe_export,
+            selection_export,
+            tmp_path / "canonical",
+            required_spin_basis="chieff_chip",
+        )
+
+
+def test_gwcat_canonicalization_refuses_conflicting_existing_outputs(tmp_path):
+    pe_export = tmp_path / "gwcat_pe.h5"
+    selection_export = tmp_path / "gwcat_selection.h5"
+    output = tmp_path / "canonical"
+    _write_pe(pe_export)
+    _write_selection(selection_export)
+    canonicalize_gwcat_v2_pair(
+        pe_export,
+        selection_export,
+        output,
+        required_spin_basis="chieff",
+    )
+
+    with h5py.File(pe_export, "a") as f:
+        f["m1det"][0] += 1.0
+
+    with pytest.raises(ValueError, match="different PE export"):
+        canonicalize_gwcat_v2_pair(
+            pe_export,
+            selection_export,
+            output,
+            required_spin_basis="chieff",
+        )
