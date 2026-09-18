@@ -11,6 +11,17 @@ from .numpyro import (
     run_resumable_chains,
     save_result,
 )
+from .evidence import (
+    EvidenceBackendUnavailableError,
+    EvidenceRepeatSummary,
+    EvidenceResult,
+    NestedSamplingConfig,
+    load_evidence_result,
+    run_hbi_evidence,
+    run_numpyro_nested_model,
+    save_evidence_result,
+    summarize_evidence_repeats,
+)
 from .model_spec import prior_specs_from_model_spec
 from .priors import BASELINE_SYNTHETIC_PRIORS, PriorSpec, serialize_prior_map
 
@@ -41,7 +52,11 @@ def assess_recovery_campaign(*args, **kwargs):
 
 __all__ = [
     "BASELINE_SYNTHETIC_PRIORS",
+    "EvidenceBackendUnavailableError",
+    "EvidenceRepeatSummary",
+    "EvidenceResult",
     "NUTSConfig",
+    "NestedSamplingConfig",
     "NUTSResult",
     "NumPyroUnavailableError",
     "PriorSpec",
@@ -49,12 +64,17 @@ __all__ = [
     "build_numpyro_model",
     "build_run_manifest",
     "generate_baseline_synthetic_dataset",
+    "load_evidence_result",
     "load_result",
     "prior_specs_from_model_spec",
+    "run_hbi_evidence",
+    "run_numpyro_nested_model",
     "run_nuts",
     "run_recovery_campaign",
     "run_resumable_chains",
     "run_synthetic_baseline_recovery",
+    "save_evidence_result",
     "save_result",
     "serialize_prior_map",
+    "summarize_evidence_repeats",
 ]
