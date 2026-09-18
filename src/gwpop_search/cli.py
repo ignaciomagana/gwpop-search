@@ -161,6 +161,85 @@ def _read_json_mapping(path: str | Path) -> dict[str, object]:
     return payload
 
 
+def _write_exact_null_config(args: argparse.Namespace) -> None:
+    from .inference.synthetic import SyntheticSurveyConfig
+    from .models import DEFAULT_BASELINE_HYPERPARAMETERS
+    from .nulls import (
+        ExactNullCampaignConfig,
+        save_exact_null_campaign_config,
+    )
+    from .search import Fidelity
+
+    truth = (
+        dict(DEFAULT_BASELINE_HYPERPARAMETERS)
+        if args.truth_hyperparameters_json is None
+        else {
+            str(name): float(value)
+            for name, value in _read_json_mapping(
+                args.truth_hyperparameters_json
+            ).items()
+        }
+    )
+    config = ExactNullCampaignConfig(
+        n_nulls=args.n_nulls,
+        root_seed=args.root_seed,
+        survey=SyntheticSurveyConfig(
+            n_events=args.n_events,
+            posterior_samples_per_event=args.pe_samples,
+            n_injections=args.n_injections,
+        ),
+        truth_hyperparameters=truth,
+        stop_fidelity=Fidelity(args.stop_fidelity),
+        max_gpu_hours_per_null=args.max_gpu_hours_per_null,
+        max_f3_models=args.max_f3_models,
+        max_f4_models=args.max_f4_models,
+    )
+    save_exact_null_campaign_config(Path(args.output), config)
+    print(
+        "exact null calibration config written: "
+        f"{args.output} n_nulls={config.n_nulls}"
+    )
+
+
+def _run_exact_null_calibration(args: argparse.Namespace) -> None:
+    from .grammar import load_model_graph
+    from .nulls import (
+        load_exact_null_campaign_config,
+        run_exact_null_campaign,
+    )
+    from .production import (
+        load_dataset_manifest,
+        load_production_campaign,
+        validate_production_freeze,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    freeze = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    if not freeze["valid"]:
+        raise ValueError("production freeze validation failed")
+
+    observed = args.observed_state_database
+    if observed is None:
+        candidate = Path(args.work_dir) / campaign.state_database
+        observed = str(candidate) if candidate.is_file() else None
+
+    summary = run_exact_null_campaign(
+        Path(args.root),
+        load_model_graph(Path(args.graph)),
+        campaign,
+        load_exact_null_campaign_config(Path(args.null_config)),
+        observed_state_database=observed,
+    )
+    print(json.dumps(summary, sort_keys=True, indent=2))
+
+
 def _nearby_baseline_config_from_args(args: argparse.Namespace):
     from .search import Fidelity
     from .validation import NearbyBaselineConfig
@@ -683,6 +762,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--spec", required=True)
     validate_parser.set_defaults(func=_validate_model_spec)
+
+    null_template = subparsers.add_parser(
+        "write-null-calibration-config",
+        help="write a frozen exact-search baseline-null campaign configuration",
+    )
+    null_template.add_argument("--n-nulls", type=int, default=100)
+    null_template.add_argument("--root-seed", type=int, default=20260918)
+    null_template.add_argument("--n-events", type=int, default=64)
+    null_template.add_argument("--pe-samples", type=int, default=256)
+    null_template.add_argument("--n-injections", type=int, default=20_000)
+    null_template.add_argument("--truth-hyperparameters-json")
+    null_template.add_argument(
+        "--stop-fidelity",
+        choices=("F3", "F4"),
+        default="F4",
+    )
+    null_template.add_argument(
+        "--max-gpu-hours-per-null",
+        type=float,
+        default=250.0,
+    )
+    null_template.add_argument("--max-f3-models", type=int, default=20)
+    null_template.add_argument("--max-f4-models", type=int, default=8)
+    null_template.add_argument("--output", required=True)
+    null_template.set_defaults(func=_write_exact_null_config)
+
+    null_run = subparsers.add_parser(
+        "run-null-search-calibration",
+        help="run/resume exact deterministic-search baseline-null replays",
+    )
+    null_run.add_argument("--manifest", required=True)
+    null_run.add_argument("--graph", required=True)
+    null_run.add_argument("--campaign", required=True)
+    null_run.add_argument("--null-config", required=True)
+    null_run.add_argument("--root", required=True)
+    null_run.add_argument("--base-dir", default=".")
+    null_run.add_argument("--work-dir", default=".")
+    null_run.add_argument("--observed-state-database")
+    null_run.add_argument("--ignore-current-commit", action="store_true")
+    null_run.set_defaults(func=_run_exact_null_calibration)
 
     nearby_template = subparsers.add_parser(
         "write-nearby-baseline-config",
