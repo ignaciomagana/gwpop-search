@@ -83,7 +83,7 @@ DEFAULT_COMPONENT_REGISTRY = ComponentRegistry(
         FamilyDefinition(
             "pairing",
             "powerlaw_q",
-            {"beta_dependence": "constant"},
+            {"beta_dependence": "constant", "m1_pivot": 30.0},
             {
                 "beta_dependence": (
                     "constant",
@@ -100,6 +100,9 @@ DEFAULT_COMPONENT_REGISTRY = ComponentRegistry(
                 "components": 1,
                 "mean_dependence": "constant",
                 "width_dependence": "constant",
+                "m1_pivot": 30.0,
+                "q_pivot": 0.7,
+                "z_pivot": 0.3,
             },
             {
                 "components": (1,),
