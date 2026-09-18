@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from gwpop_search.hbi import HBIConfig
+from gwpop_search.hbi import HBIConfig, shape_log_likelihood
 from gwpop_search.models import GwcatChiEffBBHModel
 
 from .numpyro import NUTSConfig, run_resumable_chains, save_result
@@ -68,6 +68,40 @@ def chain_diagnostics(samples):
     }
 
 
+def importance_diagnostics(dataset, model, hyperparameters, hbi_config):
+    """Summarize PE/selection importance quality at one hyperparameter point."""
+    evaluated = shape_log_likelihood(
+        dataset.posterior,
+        dataset.selection,
+        model,
+        hyperparameters,
+        config=hbi_config,
+    )
+    event_diagnostics = evaluated.terms.events.diagnostics
+    selection_diagnostics = evaluated.terms.selection.diagnostics
+
+    return {
+        "log_likelihood": float(evaluated.log_likelihood),
+        "min_event_ess": float(min(item.ess for item in event_diagnostics)),
+        "min_event_ess_fraction": float(
+            min(item.ess_fraction_of_draws for item in event_diagnostics)
+        ),
+        "max_event_weight_fraction": float(
+            max(item.max_weight_fraction for item in event_diagnostics)
+        ),
+        "selection_ess": float(selection_diagnostics.ess),
+        "selection_ess_fraction": float(
+            selection_diagnostics.ess_fraction_of_draws
+        ),
+        "selection_max_weight_fraction": float(
+            selection_diagnostics.max_weight_fraction
+        ),
+        "shape_log_likelihood_variance": float(
+            evaluated.terms.variance.shape_log_likelihood_variance
+        ),
+    }
+
+
 def run_synthetic_baseline_recovery(
     run_dir: str | Path,
     *,
@@ -107,6 +141,22 @@ def run_synthetic_baseline_recovery(
 
     diverging = np.asarray(result.extra_fields.get("diverging", []), dtype=bool)
     mcmc_diagnostics = chain_diagnostics(result.samples)
+    median_hyperparameters = {
+        name: float(np.median(np.asarray(values, dtype=float)))
+        for name, values in result.samples.items()
+    }
+    truth_importance = importance_diagnostics(
+        dataset,
+        model,
+        dataset.truth_hyperparameters,
+        hbi_config,
+    )
+    median_importance = importance_diagnostics(
+        dataset,
+        model,
+        median_hyperparameters,
+        hbi_config,
+    )
     summary = {
         "format_version": "gwpop-search-phase3-recovery-1.0",
         "data_seed": int(data_seed),
@@ -123,6 +173,10 @@ def run_synthetic_baseline_recovery(
             result.samples,
             dataset.truth_hyperparameters,
         ),
+        "importance_diagnostics": {
+            "truth": truth_importance,
+            "posterior_median": median_importance,
+        },
         "diagnostics": {
             "n_divergent": int(diverging.sum()) if diverging.size else None,
             "max_r_hat": mcmc_diagnostics["max_r_hat"],
