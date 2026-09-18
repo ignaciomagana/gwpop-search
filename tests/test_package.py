@@ -401,7 +401,7 @@ def test_write_null_calibration_config_cli_parses():
     )
     assert args.command == "write-null-calibration-config"
     assert args.n_nulls == 50
-    assert args.stop_fidelity == "F4"
+    assert not hasattr(args, "stop_fidelity")
     assert callable(args.func)
 
 
