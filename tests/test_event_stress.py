@@ -14,10 +14,13 @@ from gwpop_search.search import (
 from gwpop_search.validation import (
     EventDropScenario,
     EventStressConfig,
+    EventStressSuiteSpec,
     build_event_stress_plan,
     compare_edge_bayes_factors,
     edge_log_bayes_factors,
     leave_one_out_scenarios,
+    load_event_stress_suite_spec,
+    save_event_stress_suite_spec,
     stress_dataset_identity,
     stress_seed,
 )
@@ -134,3 +137,28 @@ def test_event_drop_scenario_rejects_unsafe_id():
 
     with pytest.raises(ValueError, match="scenario_id"):
         EventDropScenario("../bad", ("GW_A",))
+
+
+
+def test_event_stress_suite_spec_roundtrip(tmp_path):
+    spec = EventStressSuiteSpec(
+        scenarios=(
+            EventDropScenario(
+                "drop_A",
+                ("GW_A",),
+                category="loud_event",
+            ),
+        ),
+        config=EventStressConfig(
+            max_gpu_hours_per_scenario=11.0,
+            max_f3_models=4,
+            max_f4_models=2,
+        ),
+    )
+    path = tmp_path / "stress.json"
+    save_event_stress_suite_spec(path, spec)
+    restored = load_event_stress_suite_spec(path)
+    assert restored == spec
+    payload = json.loads(path.read_text())
+    assert payload["format_version"] == "gwpop-search-event-stress-suite-1.0"
+    assert payload["config"]["stop_fidelity"] == "F3"
