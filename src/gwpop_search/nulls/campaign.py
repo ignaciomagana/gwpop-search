@@ -40,10 +40,12 @@ class ExactNullCampaignConfig:
     truth_hyperparameters: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_BASELINE_HYPERPARAMETERS)
     )
-    format_version: str = "gwpop-search-exact-null-campaign-1.1"
+    data_mode: str = "frozen_selection_resample"
+    min_resampling_ess: float = 200.0
+    format_version: str = "gwpop-search-exact-null-campaign-1.2"
 
     def __post_init__(self) -> None:
-        if self.format_version != "gwpop-search-exact-null-campaign-1.1":
+        if self.format_version != "gwpop-search-exact-null-campaign-1.2":
             raise ValueError("unsupported exact null campaign format")
         if self.n_nulls <= 0:
             raise ValueError("n_nulls must be positive")
@@ -57,6 +59,16 @@ class ExactNullCampaignConfig:
                 f"null truth hyperparameters missing {sorted(missing)}"
             )
         object.__setattr__(self, "truth_hyperparameters", truth)
+        if self.data_mode not in {
+            "synthetic_survey",
+            "frozen_selection_resample",
+        }:
+            raise ValueError(f"unsupported null data mode {self.data_mode!r}")
+        if (
+            not math.isfinite(self.min_resampling_ess)
+            or self.min_resampling_ess <= 0.0
+        ):
+            raise ValueError("min_resampling_ess must be finite and positive")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -65,6 +77,8 @@ class ExactNullCampaignConfig:
             "root_seed": int(self.root_seed),
             "survey": asdict(self.survey),
             "truth_hyperparameters": dict(self.truth_hyperparameters),
+            "data_mode": self.data_mode,
+            "min_resampling_ess": float(self.min_resampling_ess),
         }
 
     @classmethod
@@ -82,10 +96,16 @@ class ExactNullCampaignConfig:
                     payload["truth_hyperparameters"]
                 ).items()
             },
+            data_mode=str(
+                payload.get("data_mode", "frozen_selection_resample")
+            ),
+            min_resampling_ess=float(
+                payload.get("min_resampling_ess", 200.0)
+            ),
             format_version=str(
                 payload.get(
                     "format_version",
-                    "gwpop-search-exact-null-campaign-1.1",
+                    "gwpop-search-exact-null-campaign-1.2",
                 )
             ),
         )
@@ -139,6 +159,11 @@ def build_exact_null_campaign_plan(
         "graph_hash": model_graph_hash(graph),
         "graph_root_hash": graph.root_hash,
         "null_config": config.to_dict(),
+        "production_dataset_manifest_hash": (
+            campaign.dataset_manifest_hash
+            if config.data_mode == "frozen_selection_resample"
+            else None
+        ),
         "replayed_production_search": {
             "stop_fidelity": Fidelity.F4_PRODUCTION.value,
             "scheduler": asdict(campaign.scheduler),
@@ -188,8 +213,26 @@ def run_exact_null_campaign(
     config: ExactNullCampaignConfig,
     *,
     observed_state_database: str | Path | None = None,
+    production_posterior=None,
+    production_selection=None,
+    production_dataset_identity: str | None = None,
 ) -> dict[str, object]:
     """Run/resume baseline-null catalogs through the same deterministic search."""
+    if config.data_mode == "frozen_selection_resample":
+        if production_posterior is None or production_selection is None:
+            raise ValueError(
+                "frozen_selection_resample requires the frozen production "
+                "posterior and selection catalogs"
+            )
+        if production_dataset_identity != campaign.dataset_manifest_hash:
+            raise ValueError(
+                "production dataset identity does not match the frozen campaign"
+            )
+        if int(config.survey.n_events) != int(production_posterior.n_events):
+            raise ValueError(
+                "null config n_events must equal the frozen observed event count"
+            )
+
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
 
@@ -219,6 +262,11 @@ def run_exact_null_campaign(
             truth_hyperparameters=config.truth_hyperparameters,
             completion_campaign=campaign,
             completion_seed_root=null_search_seed(config.root_seed, index),
+            data_mode=config.data_mode,
+            observed_posterior=production_posterior,
+            frozen_selection=production_selection,
+            production_dataset_identity=production_dataset_identity,
+            min_resampling_ess=config.min_resampling_ess,
         )
 
     run_null_replay_campaign(
@@ -258,6 +306,8 @@ def run_exact_null_campaign(
     summary = {
         "format_version": "gwpop-search-exact-null-summary-1.0",
         "production_campaign_hash": campaign.campaign_hash,
+        "null_data_mode": config.data_mode,
+        "production_dataset_identity": production_dataset_identity,
         "observed_search_statistics": observed,
         "calibration": calibrated,
     }
