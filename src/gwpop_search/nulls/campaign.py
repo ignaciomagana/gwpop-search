@@ -219,18 +219,14 @@ def _load_replay_results(
     return tuple(results)
 
 
-def run_exact_null_campaign(
-    root: str | Path,
-    graph: ModelGraph,
+def _validate_exact_null_inputs(
     campaign: ProductionCampaignConfig,
     config: ExactNullCampaignConfig,
     *,
-    observed_state_database: str | Path | None = None,
     production_posterior=None,
     production_selection=None,
     production_dataset_identity: str | None = None,
-) -> dict[str, object]:
-    """Run/resume baseline-null catalogs through the same deterministic search."""
+) -> None:
     if config.data_mode == "frozen_selection_resample":
         if production_posterior is None or production_selection is None:
             raise ValueError(
@@ -246,11 +242,88 @@ def run_exact_null_campaign(
                 "null config n_events must equal the frozen observed event count"
             )
 
+
+def prepare_exact_null_campaign(
+    root: str | Path,
+    graph: ModelGraph,
+    campaign: ProductionCampaignConfig,
+    config: ExactNullCampaignConfig,
+    *,
+    production_posterior=None,
+    production_selection=None,
+    production_dataset_identity: str | None = None,
+) -> dict[str, object]:
+    """Validate and freeze the immutable exact-null campaign plan."""
+    _validate_exact_null_inputs(
+        campaign,
+        config,
+        production_posterior=production_posterior,
+        production_selection=production_selection,
+        production_dataset_identity=production_dataset_identity,
+    )
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-
     plan = build_exact_null_campaign_plan(graph, campaign, config)
     _write_plan_once(root / "null_campaign_plan.json", plan)
+    return plan
+
+
+def _require_exact_null_plan(
+    root: Path,
+    graph: ModelGraph,
+    campaign: ProductionCampaignConfig,
+    config: ExactNullCampaignConfig,
+) -> dict[str, object]:
+    path = root / "null_campaign_plan.json"
+    if not path.is_file():
+        raise ValueError(
+            "exact-null campaign plan is missing; run prepare-null-search-calibration "
+            "before indexed replay jobs"
+        )
+    expected = build_exact_null_campaign_plan(graph, campaign, config)
+    actual = json.loads(path.read_text())
+    if actual != expected:
+        raise ValueError("exact-null campaign plan does not match current inputs")
+    return actual
+
+
+def run_exact_null_index(
+    root: str | Path,
+    graph: ModelGraph,
+    campaign: ProductionCampaignConfig,
+    config: ExactNullCampaignConfig,
+    *,
+    null_index: int,
+    production_posterior=None,
+    production_selection=None,
+    production_dataset_identity: str | None = None,
+) -> SearchReplayResult:
+    """Run/resume exactly one null replay; safe for unique Slurm array indices."""
+    _validate_exact_null_inputs(
+        campaign,
+        config,
+        production_posterior=production_posterior,
+        production_selection=production_selection,
+        production_dataset_identity=production_dataset_identity,
+    )
+    index = int(null_index)
+    if index < 0 or index >= config.n_nulls:
+        raise ValueError(
+            f"null_index={index} is outside [0, {config.n_nulls})"
+        )
+
+    root = Path(root)
+    _require_exact_null_plan(root, graph, campaign, config)
+    result_path = root / f"null_{index:05d}.json"
+    data_seed = null_replay_seed(config.root_seed, index)
+    if result_path.exists():
+        result = SearchReplayResult(**json.loads(result_path.read_text()))
+        if result.null_index != index or result.seed != data_seed:
+            raise ValueError(
+                f"null replay checkpoint mismatch at index {index}"
+            )
+        return result
+
     model_prior = model_prior_from_config(campaign.model_prior)
     null_campaign = replace(
         campaign,
@@ -259,44 +332,77 @@ def run_exact_null_campaign(
             max_gpu_hours=config.max_gpu_hours_per_null,
         ),
     )
+    result = run_baseline_null_search_replay(
+        index,
+        data_seed,
+        root=root,
+        graph=graph,
+        model_prior=model_prior,
+        execution_config=SearchExecutionConfig(
+            root_seed=null_search_seed(config.root_seed, index),
+            scheduler=campaign.scheduler,
+            stop_fidelity=Fidelity.F4_PRODUCTION,
+            max_models_by_fidelity={
+                "F3": campaign.budget.max_f3_models,
+                "F4": campaign.budget.max_f4_models,
+            },
+            max_total_compute_cost=config.max_gpu_hours_per_null,
+        ),
+        fidelity_config=campaign.fidelity,
+        survey_config=config.survey,
+        truth_hyperparameters=config.truth_hyperparameters,
+        completion_campaign=null_campaign,
+        completion_seed_root=null_search_seed(config.root_seed, index),
+        data_mode=config.data_mode,
+        observed_posterior=production_posterior,
+        frozen_selection=production_selection,
+        production_dataset_identity=production_dataset_identity,
+        min_resampling_ess=config.min_resampling_ess,
+    )
+    if result.null_index != index or result.seed != data_seed:
+        raise ValueError(
+            "null replay callback returned inconsistent index/seed"
+        )
+    result_path.write_text(
+        json.dumps(result.to_dict(), sort_keys=True, indent=2)
+    )
+    return result
 
-    def replay(index: int, data_seed: int) -> SearchReplayResult:
-        return run_baseline_null_search_replay(
-            index,
-            data_seed,
-            root=root,
-            graph=graph,
-            model_prior=model_prior,
-            execution_config=SearchExecutionConfig(
-                root_seed=null_search_seed(config.root_seed, index),
-                scheduler=campaign.scheduler,
-                stop_fidelity=Fidelity.F4_PRODUCTION,
-                max_models_by_fidelity={
-                    "F3": campaign.budget.max_f3_models,
-                    "F4": campaign.budget.max_f4_models,
-                },
-                max_total_compute_cost=config.max_gpu_hours_per_null,
-            ),
-            fidelity_config=campaign.fidelity,
-            survey_config=config.survey,
-            truth_hyperparameters=config.truth_hyperparameters,
-            completion_campaign=null_campaign,
-            completion_seed_root=null_search_seed(config.root_seed, index),
-            data_mode=config.data_mode,
-            observed_posterior=production_posterior,
-            frozen_selection=production_selection,
-            production_dataset_identity=production_dataset_identity,
-            min_resampling_ess=config.min_resampling_ess,
+
+def finalize_exact_null_campaign(
+    root: str | Path,
+    graph: ModelGraph,
+    campaign: ProductionCampaignConfig,
+    config: ExactNullCampaignConfig,
+    *,
+    observed_state_database: str | Path | None = None,
+    production_dataset_identity: str | None = None,
+) -> dict[str, object]:
+    """Aggregate a complete indexed campaign and calibrate the observed search."""
+    root = Path(root)
+    _require_exact_null_plan(root, graph, campaign, config)
+
+    missing = [
+        index
+        for index in range(config.n_nulls)
+        if not (root / f"null_{index:05d}.json").is_file()
+    ]
+    if missing:
+        preview = missing[:20]
+        suffix = "" if len(missing) <= 20 else f" ... (+{len(missing) - 20} more)"
+        raise ValueError(
+            f"cannot finalize exact-null campaign; missing indices {preview}{suffix}"
         )
 
-    run_null_replay_campaign(
-        root,
-        n_nulls=config.n_nulls,
-        root_seed=config.root_seed,
-        replay=replay,
-    )
     results = _load_replay_results(root, config.n_nulls)
+    for index, result in enumerate(results):
+        expected_seed = null_replay_seed(config.root_seed, index)
+        if result.null_index != index or result.seed != expected_seed:
+            raise ValueError(
+                f"null replay checkpoint mismatch at index {index}"
+            )
 
+    model_prior = model_prior_from_config(campaign.model_prior)
     observed = None
     if observed_state_database is not None:
         evidence = collect_best_available_evidence(observed_state_database)
@@ -324,7 +430,7 @@ def run_exact_null_campaign(
         ),
     )
     summary = {
-        "format_version": "gwpop-search-exact-null-summary-1.0",
+        "format_version": "gwpop-search-exact-null-summary-1.1",
         "production_campaign_hash": campaign.campaign_hash,
         "null_data_mode": config.data_mode,
         "max_gpu_hours_per_null": float(config.max_gpu_hours_per_null),
@@ -336,3 +442,45 @@ def run_exact_null_campaign(
         json.dumps(summary, sort_keys=True, indent=2)
     )
     return summary
+
+
+def run_exact_null_campaign(
+    root: str | Path,
+    graph: ModelGraph,
+    campaign: ProductionCampaignConfig,
+    config: ExactNullCampaignConfig,
+    *,
+    observed_state_database: str | Path | None = None,
+    production_posterior=None,
+    production_selection=None,
+    production_dataset_identity: str | None = None,
+) -> dict[str, object]:
+    """Serial convenience wrapper around prepare/index/finalize operations."""
+    prepare_exact_null_campaign(
+        root,
+        graph,
+        campaign,
+        config,
+        production_posterior=production_posterior,
+        production_selection=production_selection,
+        production_dataset_identity=production_dataset_identity,
+    )
+    for index in range(config.n_nulls):
+        run_exact_null_index(
+            root,
+            graph,
+            campaign,
+            config,
+            null_index=index,
+            production_posterior=production_posterior,
+            production_selection=production_selection,
+            production_dataset_identity=production_dataset_identity,
+        )
+    return finalize_exact_null_campaign(
+        root,
+        graph,
+        campaign,
+        config,
+        observed_state_database=observed_state_database,
+        production_dataset_identity=production_dataset_identity,
+    )
