@@ -501,3 +501,24 @@ def test_compare_scout_descendant_cli_parses():
     assert args.review == "review.json"
     assert args.root == "runs/scout-comparison"
     assert callable(args.func)
+
+
+
+def test_canonicalize_gwcat_v2_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "canonicalize-gwcat-v2",
+            "--pe-export",
+            "gwcat_pe.h5",
+            "--selection-export",
+            "gwcat_selection.h5",
+            "--spin-basis",
+            "chieff",
+            "--output-dir",
+            "canonical",
+        ]
+    )
+    assert args.command == "canonicalize-gwcat-v2"
+    assert args.spin_basis == "chieff"
+    assert args.output_dir == "canonical"
+    assert callable(args.func)
