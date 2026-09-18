@@ -74,11 +74,13 @@ def test_evidence_campaign_manifest_records_graph_data_prior_and_backend_config(
         model_prior=prior,
         model_hashes=selected,
         dataset_label="toy",
+        dataset_identity="toy-dataset-sha",
     )
 
     assert manifest["graph_root_hash"] == graph.root_hash
     assert manifest["selected_model_hashes"] == selected
     assert manifest["dataset_label"] == "toy"
+    assert manifest["dataset_identity"] == "toy-dataset-sha"
     assert manifest["campaign_config"]["repeats"] == 3
     assert manifest["model_prior"]["version"] == prior.version
     assert manifest["model_prior"]["parameters"]["penalty_per_axis"] == 0.5
@@ -115,6 +117,7 @@ def test_completed_evidence_repeats_are_reused(monkeypatch, tmp_path):
         selection,
         root_seed=91,
         config=config,
+        dataset_identity="dataset-A",
     )
     assert len(calls) == 2
     assert summary1["n_repeats"] == 2
@@ -127,11 +130,23 @@ def test_completed_evidence_repeats_are_reused(monkeypatch, tmp_path):
         selection,
         root_seed=91,
         config=config,
+        dataset_identity="dataset-A",
     )
     assert calls == []
     assert summary2 == summary1
     assert json.loads((tmp_path / "model_spec.json").read_text()) == spec.to_dict()
+    assert json.loads((tmp_path / "manifest.json").read_text())["dataset_identity"] == "dataset-A"
 
+    with pytest.raises(ValueError, match="evidence manifest mismatch"):
+        run_model_evidence_repeats(
+            tmp_path,
+            spec,
+            posterior,
+            selection,
+            root_seed=91,
+            config=config,
+            dataset_identity="dataset-B",
+        )
 
 def test_evidence_campaign_rejects_unknown_selected_model():
     graph = enumerate_model_graph(
