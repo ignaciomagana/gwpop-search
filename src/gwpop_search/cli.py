@@ -107,6 +107,36 @@ def _add_common_recovery_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-progress", action="store_true")
 
 
+def _enumerate_models(args: argparse.Namespace) -> None:
+    from .grammar import (
+        baseline_model_spec,
+        enumerate_model_graph,
+        save_model_graph,
+    )
+
+    graph = enumerate_model_graph(
+        baseline_model_spec(),
+        max_depth=args.max_depth,
+        max_models=args.max_models,
+    )
+    save_model_graph(Path(args.output), graph)
+    print(
+        "model graph written: "
+        f"nodes={len(graph.nodes)} edges={len(graph.edges)} "
+        f"root={graph.root_hash[:16]}"
+    )
+
+
+def _validate_model_spec(args: argparse.Namespace) -> None:
+    from .grammar import DEFAULT_COMPONENT_REGISTRY, load_model_spec
+    from .models import DeclarativeGwcatChiEffModel
+
+    spec = load_model_spec(Path(args.spec))
+    DEFAULT_COMPONENT_REGISTRY.validate_model(spec)
+    DeclarativeGwcatChiEffModel(spec)
+    print(f"valid model spec: {spec.model_hash}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gwpop-search",
@@ -142,6 +172,22 @@ def build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--root", required=True)
     assess.add_argument("--min-runs", type=int, default=4)
     assess.set_defaults(func=_assess_synthetic_campaign)
+
+    enumerate_parser = subparsers.add_parser(
+        "enumerate-models",
+        help="write the deterministic initial declarative model graph",
+    )
+    enumerate_parser.add_argument("--output", required=True)
+    enumerate_parser.add_argument("--max-depth", type=int, default=2)
+    enumerate_parser.add_argument("--max-models", type=int, default=40)
+    enumerate_parser.set_defaults(func=_enumerate_models)
+
+    validate_parser = subparsers.add_parser(
+        "validate-model",
+        help="validate and compile a declarative JSON/YAML model spec",
+    )
+    validate_parser.add_argument("--spec", required=True)
+    validate_parser.set_defaults(func=_validate_model_spec)
 
     return parser
 
