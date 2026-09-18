@@ -24,6 +24,17 @@ __all__ = [
     "save_event_stress_suite_spec",
     "stress_dataset_identity",
     "stress_seed",
+    "NearbyBaselineConfig",
+    "NearbyBaselineScenario",
+    "NearbyBaselineSuiteSpec",
+    "build_nearby_baseline_plan",
+    "compare_mutation_support",
+    "load_nearby_baseline_suite_spec",
+    "mutation_log_bayes_factors",
+    "nearby_baseline_seed",
+    "nearby_dataset_identity",
+    "run_nearby_baseline_suite",
+    "save_nearby_baseline_suite_spec",
 ]
 
 from .stress import (
@@ -39,4 +50,18 @@ from .stress import (
     save_event_stress_suite_spec,
     stress_dataset_identity,
     stress_seed,
+)
+
+from .baselines import (
+    NearbyBaselineConfig,
+    NearbyBaselineScenario,
+    NearbyBaselineSuiteSpec,
+    build_nearby_baseline_plan,
+    compare_mutation_support,
+    load_nearby_baseline_suite_spec,
+    mutation_log_bayes_factors,
+    nearby_baseline_seed,
+    nearby_dataset_identity,
+    run_nearby_baseline_suite,
+    save_nearby_baseline_suite_spec,
 )
