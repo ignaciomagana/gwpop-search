@@ -19,6 +19,86 @@ Do not launch GWTC-5 production inference until:
 The current repository contains the machinery for this freeze. The actual
 GWTC-5 provenance/event/waveform choices remain a separate scientific freeze.
 
+## Construct the frozen inputs
+
+The freeze commands do not infer event cuts, waveform policy, priors, scheduler
+settings, or budgets. Those choices must already have been reviewed.
+
+Write the event-selection and waveform-policy metadata as JSON objects, for
+example:
+
+~~~json
+{"far_threshold_per_year": 1.0, "population": "BBH"}
+~~~
+
+and:
+
+~~~json
+{"pe_policy": "reviewed GWTC-5 gwcat export"}
+~~~
+
+Freeze the canonical gwpop-search HDF5 pair:
+
+~~~bash
+gwpop-search freeze-dataset \
+  --pe /frozen/data/pe.h5 \
+  --selection /frozen/data/selection.h5 \
+  --dataset-id gwtc5-bbh-v1 \
+  --event-selection-json event_selection.json \
+  --waveform-policy-json waveform_policy.json \
+  --output /frozen/dataset_manifest.json
+~~~
+
+Write the complete default numerical ladder to a normal JSON file:
+
+~~~bash
+gwpop-search write-default-fidelity-config \
+  --output /frozen/fidelity.json
+~~~
+
+Review and edit fidelity.json before freezing the campaign. This file contains
+the F0/F1 reduction sizes, F1/F2/F4 NUTS configurations, F3/F4 JAXNS
+configurations, HBI chunking/rate semantics, and numerical acceptance
+thresholds.
+
+Serialize the reviewed finite model graph:
+
+~~~bash
+gwpop-search enumerate-models \
+  --output /frozen/model_graph.json \
+  --max-depth 2 \
+  --max-models 40
+~~~
+
+The depth/model-count values here are examples. The actual production graph is a
+scientific choice and must be reviewed before the campaign is frozen.
+
+Finally freeze the campaign. Every scheduling/prior/budget number is explicit:
+
+~~~bash
+gwpop-search freeze-production-campaign \
+  --manifest /frozen/dataset_manifest.json \
+  --graph /frozen/model_graph.json \
+  --fidelity-config /frozen/fidelity.json \
+  --campaign-id gwtc5-bbh-search-v1 \
+  --model-prior axis-complexity \
+  --model-prior-penalty 0.6931471805599453 \
+  --beam-width 8 \
+  --exploration-quota 2 \
+  --scheduler-seed 20260917 \
+  --root-seed 20260917 \
+  --max-gpu-hours 1000 \
+  --max-f3-models 20 \
+  --max-f4-models 8 \
+  --max-null-replays 200 \
+  --artifact-root runs/gwtc5-bbh-search-v1 \
+  --state-database runs/gwtc5-bbh-search-v1/state.sqlite \
+  --output /frozen/campaign.json
+~~~
+
+The numeric values above demonstrate the interface; they are not pre-approved
+GWTC-5 science choices.
+
 ## Environment
 
 Create the GPU-capable environment before entering the batch job. The evidence
