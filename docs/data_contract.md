@@ -127,6 +127,36 @@ The exported gwcat `pdraw` already contains its documented campaign-mixture/expo
 
 The component space may expose `chi_eff` as a useful derived sample column, but `chi_eff` is not included in the component density basis.
 
+### Audited canonicalization
+
+Reviewed gwcat-v2 exports are converted to the internal HDF5 pair with an
+explicit spin-basis requirement:
+
+```bash
+gwpop-search canonicalize-gwcat-v2 \
+  --pe-export /path/to/gwcat_pe.h5 \
+  --selection-export /path/to/gwcat_selection.h5 \
+  --spin-basis chieff \
+  --output-dir /frozen/canonical
+```
+
+The output directory contains:
+
+```text
+pe.h5
+selection.h5
+canonicalization_report.json
+```
+
+The report hashes both source exports and both canonical outputs, records the
+basis identity, event ordering, PE/selection counts, adapter metadata,
+selection mode/semantics, and the denominator contract. Canonicalization is
+idempotent only for the exact same source hashes and explicit spin basis.
+Partial or conflicting pre-existing outputs fail instead of being overwritten.
+
+No PE prior or selection density is reconstructed during this step:
+`p_pe` and estimator-ready `pdraw` remain authoritative.
+
 ## Pair validation
 
 `validate_pair(pe, selection, required_coordinates=...)` checks:
