@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
@@ -18,6 +18,10 @@ from .scheduler import (
     SchedulerConfig,
     decide_promotions,
 )
+
+
+class SearchBudgetExceeded(RuntimeError):
+    """Raised before a deterministic search exceeds a frozen compute/model budget."""
 
 
 class FidelityEvaluator(Protocol):
@@ -39,12 +43,25 @@ class SearchExecutionConfig:
     scheduler: SchedulerConfig = SchedulerConfig()
     start_fidelity: Fidelity = Fidelity.F0_SANITY
     stop_fidelity: Fidelity = Fidelity.F4_PRODUCTION
+    max_models_by_fidelity: Mapping[str, int] = field(default_factory=dict)
+    max_total_compute_cost: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "start_fidelity", Fidelity(self.start_fidelity))
         object.__setattr__(self, "stop_fidelity", Fidelity(self.stop_fidelity))
         if self.stop_fidelity.rank < self.start_fidelity.rank:
             raise ValueError("stop_fidelity cannot precede start_fidelity")
+        limits = {str(key): int(value) for key, value in self.max_models_by_fidelity.items()}
+        valid = {item.value for item in Fidelity}
+        unknown = set(limits) - valid
+        if unknown:
+            raise ValueError(f"unknown fidelity budget key(s): {sorted(unknown)}")
+        if any(value <= 0 for value in limits.values()):
+            raise ValueError("model-count limits must be positive")
+        object.__setattr__(self, "max_models_by_fidelity", limits)
+        if self.max_total_compute_cost is not None:
+            if self.max_total_compute_cost <= 0:
+                raise ValueError("max_total_compute_cost must be positive")
 
 
 @dataclass(frozen=True)
@@ -55,6 +72,7 @@ class SearchExecutionSummary:
     promoted_by_fidelity: Mapping[str, int]
     pruned_by_fidelity: Mapping[str, int]
     completed_fidelity: str
+    total_compute_cost: float
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -65,6 +83,7 @@ class SearchExecutionSummary:
             "promoted_by_fidelity": dict(self.promoted_by_fidelity),
             "pruned_by_fidelity": dict(self.pruned_by_fidelity),
             "completed_fidelity": self.completed_fidelity,
+            "total_compute_cost": float(self.total_compute_cost),
         }
 
 
@@ -138,8 +157,19 @@ def execute_search(
     promoted_by_fidelity: dict[str, int] = {}
     pruned_by_fidelity: dict[str, int] = {}
 
+    total_compute_cost = float(
+        sum(float(row["compute_cost"]) for row in store.evaluations())
+    )
+
     fidelity = config.start_fidelity
     while True:
+        model_limit = config.max_models_by_fidelity.get(fidelity.value)
+        if model_limit is not None and len(active_hashes) > model_limit:
+            raise SearchBudgetExceeded(
+                f"{fidelity.value} has {len(active_hashes)} active models, "
+                f"exceeding frozen limit {model_limit}"
+            )
+
         records: list[EvaluationRecord] = []
         for model_hash in sorted(active_hashes):
             model = graph.by_hash[model_hash]
@@ -152,6 +182,13 @@ def execute_search(
                 seed=seed,
             )
             if existing is None:
+                if (
+                    config.max_total_compute_cost is not None
+                    and total_compute_cost >= config.max_total_compute_cost
+                ):
+                    raise SearchBudgetExceeded(
+                        "frozen compute budget exhausted before the next evaluation"
+                    )
                 run_dir = artifact_root / fidelity.value / model_hash
                 run_dir.mkdir(parents=True, exist_ok=True)
                 record = evaluator.evaluate(
@@ -174,6 +211,16 @@ def execute_search(
                     },
                     artifact_path=str(run_dir),
                 )
+                total_compute_cost += float(record.compute_cost)
+                if (
+                    config.max_total_compute_cost is not None
+                    and total_compute_cost > config.max_total_compute_cost
+                ):
+                    raise SearchBudgetExceeded(
+                        "frozen compute budget was exceeded by the completed "
+                        f"evaluation: {total_compute_cost:.6g} > "
+                        f"{config.max_total_compute_cost:.6g}"
+                    )
             else:
                 record = existing
             records.append(record)
@@ -225,6 +272,7 @@ def execute_search(
         promoted_by_fidelity=promoted_by_fidelity,
         pruned_by_fidelity=pruned_by_fidelity,
         completed_fidelity=fidelity.value,
+        total_compute_cost=total_compute_cost,
     )
     (artifact_root / "search_execution_summary.json").write_text(
         json.dumps(summary.to_dict(), sort_keys=True, indent=2)
