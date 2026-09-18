@@ -639,6 +639,18 @@ def _run_hsgp_scout(args: argparse.Namespace) -> None:
     )
 
 
+def _canonicalize_gwcat_v2(args: argparse.Namespace) -> None:
+    from .data import canonicalize_gwcat_v2_pair
+
+    report = canonicalize_gwcat_v2_pair(
+        Path(args.pe_export),
+        Path(args.selection_export),
+        Path(args.output_dir),
+        required_spin_basis=args.spin_basis,
+    )
+    print(json.dumps(report, sort_keys=True, indent=2))
+
+
 def _freeze_dataset(args: argparse.Namespace) -> None:
     from .production import (
         build_dataset_manifest_from_canonical_files,
@@ -1087,6 +1099,23 @@ def build_parser() -> argparse.ArgumentParser:
     scout_run.add_argument("--run-dir", required=True)
     scout_run.add_argument("--seed", type=int, required=True)
     scout_run.set_defaults(func=_run_hsgp_scout)
+
+    canonicalize = subparsers.add_parser(
+        "canonicalize-gwcat-v2",
+        help=(
+            "convert reviewed gwcat-v2 PE/selection exports to canonical "
+            "gwpop-search HDF5s with an audit report"
+        ),
+    )
+    canonicalize.add_argument("--pe-export", required=True)
+    canonicalize.add_argument("--selection-export", required=True)
+    canonicalize.add_argument(
+        "--spin-basis",
+        choices=("chieff", "chieff_chip", "component"),
+        required=True,
+    )
+    canonicalize.add_argument("--output-dir", required=True)
+    canonicalize.set_defaults(func=_canonicalize_gwcat_v2)
 
     freeze_dataset = subparsers.add_parser(
         "freeze-dataset",
