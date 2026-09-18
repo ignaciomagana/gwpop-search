@@ -23,6 +23,7 @@ from gwpop_search.search import (
     execute_search,
 )
 
+from .frozen_selection import generate_frozen_selection_null_dataset
 from .replay import SearchReplayResult
 
 
@@ -85,6 +86,11 @@ def run_baseline_null_search_replay(
     truth_hyperparameters=None,
     completion_campaign=None,
     completion_seed_root: int | None = None,
+    data_mode: str = "synthetic_survey",
+    observed_posterior=None,
+    frozen_selection=None,
+    production_dataset_identity: str | None = None,
+    min_resampling_ess: float = 200.0,
 ) -> SearchReplayResult:
     """Generate one baseline-null catalog and execute the same F0--F4 search."""
     declared_root = baseline_model_spec()
@@ -99,11 +105,48 @@ def run_baseline_null_search_replay(
         if survey_config is None
         else survey_config
     )
-    dataset = generate_baseline_synthetic_dataset(
-        seed=int(seed),
-        config=survey_config,
-        hyperparameters=truth_hyperparameters,
-    )
+    if data_mode == "synthetic_survey":
+        dataset = generate_baseline_synthetic_dataset(
+            seed=int(seed),
+            config=survey_config,
+            hyperparameters=truth_hyperparameters,
+        )
+        null_posterior = null_posterior
+        null_selection = null_selection
+        null_truth_hyperparameters = dict(dataset.truth_hyperparameters)
+        null_data_metadata = {
+            "mode": data_mode,
+            "survey_config": asdict(survey_config),
+        }
+        dataset_identity = f"baseline-null:{int(seed)}"
+    elif data_mode == "frozen_selection_resample":
+        if observed_posterior is None or frozen_selection is None:
+            raise ValueError(
+                "frozen_selection_resample requires observed_posterior and "
+                "frozen_selection"
+            )
+        if not production_dataset_identity:
+            raise ValueError(
+                "frozen_selection_resample requires production_dataset_identity"
+            )
+        dataset = generate_frozen_selection_null_dataset(
+            seed=int(seed),
+            observed_posterior=observed_posterior,
+            selection=frozen_selection,
+            truth_hyperparameters=truth_hyperparameters,
+            survey_config=survey_config,
+            min_resampling_ess=min_resampling_ess,
+            model_spec=declared_root,
+        )
+        null_posterior = null_posterior
+        null_selection = null_selection
+        null_truth_hyperparameters = dict(dataset.truth_hyperparameters)
+        null_data_metadata = dict(dataset.metadata)
+        dataset_identity = (
+            f"frozen-selection-null:{production_dataset_identity}:{int(seed)}"
+        )
+    else:
+        raise ValueError(f"unsupported null data mode {data_mode!r}")
 
     root = Path(root)
     replay_root = root / "searches" / f"null_{int(null_index):05d}"
@@ -111,10 +154,10 @@ def run_baseline_null_search_replay(
     database = replay_root / "state.sqlite"
 
     evaluator = DeterministicHBIEvaluator(
-        dataset.posterior,
-        dataset.selection,
+        null_posterior,
+        null_selection,
         config=fidelity_config,
-        dataset_identity=f"baseline-null:{int(seed)}",
+        dataset_identity=dataset_identity,
     )
     execution = execute_search(
         graph,
@@ -127,10 +170,10 @@ def run_baseline_null_search_replay(
     if completion_campaign is not None:
         completion = complete_graph_evidence(
             graph,
-            dataset.posterior,
-            dataset.selection,
+            null_posterior,
+            null_selection,
             completion_campaign,
-            dataset_identity=f"baseline-null:{int(seed)}",
+            dataset_identity=dataset_identity,
             state_database=database,
             artifact_root=artifacts,
             root_seed=completion_seed_root,
@@ -159,7 +202,9 @@ def run_baseline_null_search_replay(
             "n_evidence_edges": int(stats["n_evidence_edges"]),
             "execution": execution.to_dict(),
             "evidence_completion": completion,
+            "null_data_mode": data_mode,
+            "null_data_metadata": null_data_metadata,
             "survey_config": asdict(survey_config),
-            "truth_hyperparameters": dict(dataset.truth_hyperparameters),
+            "truth_hyperparameters": null_truth_hyperparameters,
         },
     )
