@@ -146,6 +146,64 @@ def _read_json_mapping(path: str | Path) -> dict[str, object]:
     return payload
 
 
+def _run_structured_scout_campaign(args: argparse.Namespace) -> None:
+    from .grammar import baseline_model_spec, load_model_spec
+    from .inference.synthetic import SyntheticSurveyConfig
+    from .models import DEFAULT_BASELINE_HYPERPARAMETERS
+    from .scouts import (
+        StructuredScoutInjection,
+        load_scout_campaign_config,
+        run_structured_scout_campaign,
+    )
+
+    base_spec = (
+        baseline_model_spec()
+        if args.base_model is None
+        else load_model_spec(Path(args.base_model))
+    )
+    base_hyperparameters = (
+        dict(DEFAULT_BASELINE_HYPERPARAMETERS)
+        if args.base_hyperparameters_json is None
+        else {
+            str(name): float(value)
+            for name, value in _read_json_mapping(
+                args.base_hyperparameters_json
+            ).items()
+        }
+    )
+    summary = run_structured_scout_campaign(
+        Path(args.root),
+        n_runs=args.n_runs,
+        root_seed=args.root_seed,
+        injection=StructuredScoutInjection(
+            mutation_id=args.mutation_id,
+            strength=args.strength,
+        ),
+        survey_config=SyntheticSurveyConfig(
+            n_events=args.n_events,
+            posterior_samples_per_event=args.pe_samples,
+            n_injections=args.n_injections,
+        ),
+        scout_config=load_scout_campaign_config(Path(args.scout_config)),
+        base_spec=base_spec,
+        base_hyperparameters=base_hyperparameters,
+    )
+    print(
+        "structured scout campaign complete: "
+        f"runs={summary['n_runs']} "
+        f"numerical_pass={summary['n_numerical_pass']} "
+        f"expected_reachable={summary['expected_mutation_reachable']} "
+        f"expected_proposed={summary['n_expected_proposed']}"
+    )
+
+
+def _assess_structured_scout_campaign(args: argparse.Namespace) -> None:
+    from .scouts import assess_structured_scout_campaign
+
+    summary = assess_structured_scout_campaign(Path(args.root))
+    print(json.dumps(summary, sort_keys=True, indent=2))
+
+
 def _write_default_scout_config(args: argparse.Namespace) -> None:
     from .scouts import (
         default_scout_campaign_config,
@@ -413,6 +471,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--spec", required=True)
     validate_parser.set_defaults(func=_validate_model_spec)
+
+    structured_scout = subparsers.add_parser(
+        "structured-scout-campaign",
+        help="run/resume a multi-seed structured-injection HSGP validation campaign",
+    )
+    structured_scout.add_argument("--root", required=True)
+    structured_scout.add_argument("--n-runs", type=int, default=4)
+    structured_scout.add_argument("--root-seed", type=int, default=20260918)
+    structured_scout.add_argument(
+        "--mutation-id",
+        choices=(
+            "null",
+            "pairing.beta.linear_m1",
+            "chieff.mean.linear_q",
+            "chieff.width.linear_q",
+        ),
+        required=True,
+    )
+    structured_scout.add_argument("--strength", type=float, required=True)
+    structured_scout.add_argument("--scout-config", required=True)
+    structured_scout.add_argument("--n-events", type=int, default=64)
+    structured_scout.add_argument("--pe-samples", type=int, default=256)
+    structured_scout.add_argument("--n-injections", type=int, default=20_000)
+    structured_scout.add_argument("--base-model")
+    structured_scout.add_argument("--base-hyperparameters-json")
+    structured_scout.set_defaults(func=_run_structured_scout_campaign)
+
+    assess_structured = subparsers.add_parser(
+        "assess-structured-scout-campaign",
+        help="assess completed structured HSGP scout runs without inference",
+    )
+    assess_structured.add_argument("--root", required=True)
+    assess_structured.set_defaults(func=_assess_structured_scout_campaign)
 
     scout_template = subparsers.add_parser(
         "write-default-scout-config",
