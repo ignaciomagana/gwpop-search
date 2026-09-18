@@ -111,7 +111,6 @@ DEFAULT_COMPONENT_REGISTRY = ComponentRegistry(
                     "linear_m1",
                     "linear_q",
                     "linear_z",
-                    "logistic_m1",
                 ),
                 "width_dependence": (
                     "constant",
@@ -129,13 +128,8 @@ DEFAULT_COMPONENT_REGISTRY = ComponentRegistry(
                 "fraction_dependence": "constant",
             },
             {
-                "components": (2, 3),
-                "fraction_dependence": (
-                    "constant",
-                    "linear_m1",
-                    "linear_q",
-                    "linear_z",
-                ),
+                "components": (2,),
+                "fraction_dependence": ("constant",),
             },
         ),
         FamilyDefinition(
