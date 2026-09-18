@@ -13,7 +13,9 @@ from gwpop_search.production import (
 from gwpop_search.scouts import (
     StructureProposal,
     compare_scout_descendant_evidence,
+    load_scout_review,
     review_scout_proposal,
+    write_scout_review,
     scout_comparison_seed_root,
 )
 from gwpop_search.search import EvaluationRecord, Fidelity, SchedulerConfig
@@ -228,3 +230,21 @@ def test_descendant_bayes_factor_is_blocked_by_numerical_failure(
     assert not result["both_numerically_valid"]
     assert result["log_bayes_factor_child_over_parent"] is None
     assert result["interpretation"] == "comparison_blocked_by_numerical_failure"
+
+
+
+def test_scout_review_record_roundtrip(tmp_path):
+    parent = baseline_model_spec()
+    review, _ = review_scout_proposal(
+        _summary(parent),
+        parent,
+        proposal_id="hsgp-mean-q",
+        decision="accepted",
+        note="explicit review",
+    )
+    path = tmp_path / "review.json"
+    write_scout_review(path, review)
+    restored = load_scout_review(path)
+
+    assert restored == review
+    assert restored.format_version == "gwpop-search-scout-review-1.0"
