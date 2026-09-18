@@ -116,9 +116,30 @@ def _grids(
     config: ConditionalMomentSummaryConfig,
 ) -> tuple[np.ndarray, np.ndarray]:
     cov_axis = model.config.covariate_axis
+    cov_lower = float(cov_axis.lower)
+    cov_upper = float(cov_axis.upper)
+
+    # For q|m1 the secondary-mass bound makes the conditional support collapse
+    # to the singleton q=1 at m1=mmin. That boundary has zero measure and must
+    # not be used for numerical moment summaries. Stay infinitesimally inside
+    # the physically valid support while retaining the declared HSGP domain.
+    if (
+        model.config.target == "q"
+        and model.config.covariate == "m1_source"
+    ):
+        mmin = float(model.base_hyperparameters["mmin"])
+        if cov_upper <= mmin:
+            raise ValueError(
+                "q|m1 scout covariate domain has no nonzero conditional support"
+            )
+        cov_lower = max(
+            cov_lower,
+            np.nextafter(mmin, np.inf),
+        )
+
     covariate = np.linspace(
-        cov_axis.lower,
-        cov_axis.upper,
+        cov_lower,
+        cov_upper,
         config.covariate_grid_size,
     )
     target_axis = model.config.target_axis
