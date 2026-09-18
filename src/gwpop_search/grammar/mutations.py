@@ -266,16 +266,6 @@ DEFAULT_MUTATIONS: tuple[MutationSpec, ...] = (
         description="split chi_eff into two truncated-Gaussian components",
     ),
     MutationSpec(
-        "redshift.kappa.linear_m1",
-        "redshift",
-        "set_option",
-        "linear_m1",
-        option="kappa_dependence",
-        requires_family="powerlaw",
-        prior_updates={"kappa_m1_slope": _u(-0.2, 0.2)},
-        description="allow rate evolution to depend linearly on m1",
-    ),
-    MutationSpec(
         "redshift.family.madau_dickinson",
         "redshift",
         "change_family",
@@ -288,14 +278,5 @@ DEFAULT_MUTATIONS: tuple[MutationSpec, ...] = (
             "rate_z_peak": _u(0.1, 4.0),
         },
         description="replace power-law rate evolution with Madau-Dickinson form",
-    ),
-    MutationSpec(
-        "mixture.family.two_component",
-        "mixture",
-        "change_family",
-        "finite",
-        requires_family="single",
-        prior_updates={"mixture_fraction": _u(0.0, 1.0)},
-        description="allow two latent population components",
     ),
 )
