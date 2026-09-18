@@ -37,3 +37,41 @@ def test_synthetic_recovery_cli_parses_campaign_configuration():
     assert args.num_chains == 2
     assert args.selection_chunk_size == 1024
     assert callable(args.func)
+
+
+
+def test_synthetic_campaign_cli_parses_matrix_configuration():
+    args = build_parser().parse_args(
+        [
+            "synthetic-campaign",
+            "--root",
+            "runs/campaign",
+            "--n-runs",
+            "6",
+            "--root-seed",
+            "99",
+            "--num-chains",
+            "4",
+        ]
+    )
+    assert args.command == "synthetic-campaign"
+    assert args.root == "runs/campaign"
+    assert args.n_runs == 6
+    assert args.root_seed == 99
+    assert args.num_chains == 4
+    assert callable(args.func)
+
+
+def test_assess_synthetic_campaign_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "assess-synthetic-campaign",
+            "--root",
+            "runs/campaign",
+            "--min-runs",
+            "8",
+        ]
+    )
+    assert args.command == "assess-synthetic-campaign"
+    assert args.min_runs == 8
+    assert callable(args.func)
