@@ -14,6 +14,7 @@ from gwpop_search.inference.synthetic import (
     SyntheticSurveyConfig,
     generate_baseline_synthetic_dataset,
 )
+from gwpop_search.production.completion import complete_graph_evidence
 from gwpop_search.production.runner import collect_best_available_evidence
 from gwpop_search.search import (
     ModelEvidence,
@@ -82,6 +83,8 @@ def run_baseline_null_search_replay(
     fidelity_config: FidelityRunConfig,
     survey_config: SyntheticSurveyConfig | None = None,
     truth_hyperparameters=None,
+    completion_campaign=None,
+    completion_seed_root: int | None = None,
 ) -> SearchReplayResult:
     """Generate one baseline-null catalog and execute the same F0--F4 search."""
     declared_root = baseline_model_spec()
@@ -120,7 +123,25 @@ def run_baseline_null_search_replay(
         artifact_root=artifacts,
         config=execution_config,
     )
+    completion = None
+    if completion_campaign is not None:
+        completion = complete_graph_evidence(
+            graph,
+            dataset.posterior,
+            dataset.selection,
+            completion_campaign,
+            dataset_identity=f"baseline-null:{int(seed)}",
+            state_database=database,
+            artifact_root=artifacts,
+            root_seed=completion_seed_root,
+        )
+
     evidences = collect_best_available_evidence(database)
+    if completion_campaign is not None and len(evidences) != len(graph.nodes):
+        raise RuntimeError(
+            "exact null replay did not obtain valid evidence for every "
+            "declared graph node"
+        )
     stats = search_statistics_from_evidence(
         graph,
         evidences,
@@ -137,6 +158,7 @@ def run_baseline_null_search_replay(
             "null_model_hash": graph.root_hash,
             "n_evidence_edges": int(stats["n_evidence_edges"]),
             "execution": execution.to_dict(),
+            "evidence_completion": completion,
             "survey_config": asdict(survey_config),
             "truth_hyperparameters": dict(dataset.truth_hyperparameters),
         },
