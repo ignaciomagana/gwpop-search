@@ -183,7 +183,23 @@ def test_hsgp_scout_numerical_pass_allows_proposals(
     )
     raw = {
         "format_version": "test",
-        "proposals": [{"mutation_id": "pairing.beta.linear_m1"}],
+        "proposals": [
+            {
+                "proposal_id": "test-pairing-m1",
+                "mutation_id": "pairing.beta.linear_m1",
+                "target": "pairing",
+                "covariate": "m1",
+                "score": 5.0,
+                "evidence": {
+                    "z_score": 5.0,
+                    "slope": 0.1,
+                    "slope_error": 0.02,
+                    "n_effective": 60.0,
+                    "method": "test",
+                },
+                "status": "proposed",
+            }
+        ],
     }
 
     monkeypatch.setattr(
@@ -240,3 +256,8 @@ def test_hsgp_scout_numerical_pass_allows_proposals(
     assert summary["numerical"]["passed"]
     assert summary["validated_proposals"] == raw["proposals"]
     assert summary["proposal_firewall"] == "numerical_pass_required"
+    assert len(summary["validated_descendants"]) == 1
+    descendant = summary["validated_descendants"][0]
+    assert descendant["mutation_id"] == "pairing.beta.linear_m1"
+    assert descendant["parent_model_hash"] == baseline_model_spec().model_hash
+    assert descendant["child_model_hash"] != descendant["parent_model_hash"]
