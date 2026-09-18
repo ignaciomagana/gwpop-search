@@ -129,3 +129,91 @@ def test_run_production_search_cli_parses():
     assert args.base_dir == "data"
     assert args.work_dir == "work"
     assert callable(args.func)
+
+
+
+def test_freeze_dataset_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "freeze-dataset",
+            "--pe",
+            "pe.h5",
+            "--selection",
+            "selection.h5",
+            "--dataset-id",
+            "gwtc5-bbh-v1",
+            "--event-selection-json",
+            "event_selection.json",
+            "--waveform-policy-json",
+            "waveform_policy.json",
+            "--output",
+            "dataset_manifest.json",
+        ]
+    )
+    assert args.command == "freeze-dataset"
+    assert args.pe == "pe.h5"
+    assert args.selection == "selection.h5"
+    assert args.dataset_id == "gwtc5-bbh-v1"
+    assert args.output == "dataset_manifest.json"
+    assert callable(args.func)
+
+
+def test_write_default_fidelity_config_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "write-default-fidelity-config",
+            "--output",
+            "fidelity.json",
+        ]
+    )
+    assert args.command == "write-default-fidelity-config"
+    assert args.output == "fidelity.json"
+    assert callable(args.func)
+
+
+def test_freeze_production_campaign_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "freeze-production-campaign",
+            "--manifest",
+            "dataset_manifest.json",
+            "--graph",
+            "model_graph.json",
+            "--fidelity-config",
+            "fidelity.json",
+            "--campaign-id",
+            "gwtc5-bbh-v1",
+            "--model-prior",
+            "axis-complexity",
+            "--model-prior-penalty",
+            "0.7",
+            "--beam-width",
+            "8",
+            "--exploration-quota",
+            "2",
+            "--scheduler-seed",
+            "11",
+            "--root-seed",
+            "12",
+            "--max-gpu-hours",
+            "1000",
+            "--max-f3-models",
+            "20",
+            "--max-f4-models",
+            "8",
+            "--max-null-replays",
+            "200",
+            "--artifact-root",
+            "runs/prod",
+            "--state-database",
+            "runs/prod/state.sqlite",
+            "--output",
+            "campaign.json",
+        ]
+    )
+    assert args.command == "freeze-production-campaign"
+    assert args.campaign_id == "gwtc5-bbh-v1"
+    assert args.model_prior == "axis-complexity"
+    assert args.model_prior_penalty == 0.7
+    assert args.max_f4_models == 8
+    assert callable(args.func)
