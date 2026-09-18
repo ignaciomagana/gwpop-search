@@ -42,6 +42,7 @@ class NUTSConfig:
     max_tree_depth: int = 10
     dense_mass: bool = False
     chain_method: str = "sequential"
+    init_strategy: str = "median"
     progress_bar: bool = True
 
     def __post_init__(self) -> None:
@@ -54,6 +55,10 @@ class NUTSConfig:
         if self.chain_method not in {"sequential", "parallel", "vectorized"}:
             raise ValueError(
                 "chain_method must be one of 'sequential', 'parallel', or 'vectorized'"
+            )
+        if self.init_strategy not in {"median", "uniform", "sample", "feasible"}:
+            raise ValueError(
+                "init_strategy must be one of 'median', 'uniform', 'sample', or 'feasible'"
             )
 
 
@@ -143,8 +148,22 @@ def run_nuts(
         priors,
         hbi_config=hbi_config,
     )
+    from numpyro.infer.initialization import (
+        init_to_feasible,
+        init_to_median,
+        init_to_sample,
+        init_to_uniform,
+    )
+
+    init_strategies = {
+        "median": init_to_median,
+        "uniform": init_to_uniform,
+        "sample": init_to_sample,
+        "feasible": init_to_feasible,
+    }
     kernel = NUTS(
         model,
+        init_strategy=init_strategies[cfg.init_strategy](),
         target_accept_prob=cfg.target_accept_prob,
         max_tree_depth=cfg.max_tree_depth,
         dense_mass=cfg.dense_mass,
