@@ -1,5 +1,10 @@
 """Search-level null replay and calibration."""
 
+from .frozen_selection import (
+    FrozenSelectionNullDataset,
+    frozen_selection_resampling_probabilities,
+    generate_frozen_selection_null_dataset,
+)
 from .campaign import (
     ExactNullCampaignConfig,
     build_exact_null_campaign_plan,
@@ -22,10 +27,13 @@ from .replay import (
 
 __all__ = [
     "ExactNullCampaignConfig",
+    "FrozenSelectionNullDataset",
     "SearchReplayResult",
     "build_exact_null_campaign_plan",
     "calibrate_search_replays",
     "empirical_tail_probability",
+    "frozen_selection_resampling_probabilities",
+    "generate_frozen_selection_null_dataset",
     "load_exact_null_campaign_config",
     "null_replay_seed",
     "null_search_seed",
