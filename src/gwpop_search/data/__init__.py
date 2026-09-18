@@ -1,5 +1,6 @@
 """Canonical data contracts for gwpop-search."""
 
+from .canonicalize import canonicalize_gwcat_v2_pair
 from .pair import validate_pair
 from .posterior import PosteriorCatalog
 from .schema import (
@@ -19,6 +20,7 @@ from .thinning import (
 
 __all__ = [
     "BasisMismatchError",
+    "canonicalize_gwcat_v2_pair",
     "Campaign",
     "CoordinateBasis",
     "DataContractError",
