@@ -915,23 +915,24 @@ The exact final handover commit/test count is recorded in `PROJECT_STATE.md`
 after the last code/documentation commit is green.
 
 Claude must use the final handover revision supplied by the human operator.
-If GitHub Actions capacity has been restored, verify the exact revision in CI.
-If it has not, run the full `pytest -q` suite on the H100 host before any
-scientific computation and record that result in the validation report.
+The repository is public as of 2026-09-18 and standard GitHub-hosted Actions is
+running normally again. Verify that the exact handover revision has a green
+Actions run before starting H100 science, then still run `pytest -q` on the
+H100 checkout as an environment verification and record that result in the
+validation report.
 
-As of 2026-09-18 the repository's included GitHub Actions allowance is exhausted
-(3000/3000 minutes used). Workflow runs after the last real test checkpoint may
-show red immediately without starting pytest. Do not interpret those
-quota-blocked runs as software failures.
-
-At the time this execution contract was rewritten, the most recent completed
-integrated checkpoint was:
+The current fully integrated scientific/software checkpoint is:
 
 ```text
-commit: baf4726eda052a86b3445969e5fcc037994210d6
-tests:  268 passed
+commit: 6b05f764075900188e0edfa0016675a8a1a1b37f
+tests:  283 passed
 CI:     GitHub Actions / Python 3.12 / JAX x64
 ```
 
-Newer handover/confirmation commits supersede that checkpoint once their Actions
-runs are green.
+This checkpoint includes the frozen-selection exact-null path, v1.3 per-null
+compute ceiling, exact-null plan v1.1 budget accounting, array-safe
+prepare/index/finalize null execution, stricter injected-scout confirmation,
+and the indexed-finalization dataset-identity guard.
+
+Documentation/state synchronization commits after that checkpoint are acceptable
+only after their own full Actions runs are green.
