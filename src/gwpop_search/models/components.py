@@ -1,4 +1,4 @@
-"""Normalized JAX population components for the Phase-3 BBH baseline."""
+"""Normalized, autodiff-safe JAX population components for the BBH baseline."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import numpy as np
 
 try:
     import jax.numpy as jnp
-    from jax.scipy.special import logsumexp, ndtr
+    from jax.scipy.special import ndtr
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "baseline population models require JAX: install gwpop-search[inference]"
@@ -33,9 +33,11 @@ def _power_integral(lo, hi, exponent):
     lo = jnp.asarray(lo)
     hi = jnp.asarray(hi)
     exponent = jnp.asarray(exponent)
+    safe_lo = jnp.where(lo > 0.0, lo, 1.0)
+    safe_hi = jnp.where(hi > 0.0, hi, 1.0)
     a = exponent + 1.0
-    log_ratio = jnp.log(hi / lo)
-    return jnp.power(lo, a) * log_ratio * _exprel(a * log_ratio)
+    log_ratio = jnp.log(safe_hi / safe_lo)
+    return jnp.power(safe_lo, a) * log_ratio * _exprel(a * log_ratio)
 
 
 def powerlaw_logpdf(x, *, alpha, xmin, xmax):
@@ -44,8 +46,11 @@ def powerlaw_logpdf(x, *, alpha, xmin, xmax):
     alpha = jnp.asarray(alpha)
     norm = _power_integral(xmin, xmax, -alpha)
     valid_hyper = (xmin > 0.0) & (xmax > xmin) & jnp.isfinite(norm) & (norm > 0.0)
-    valid = valid_hyper & (x >= xmin) & (x <= xmax)
-    logp = -alpha * jnp.log(x) - jnp.log(norm)
+    valid = valid_hyper & (x >= xmin) & (x <= xmax) & (x > 0.0)
+
+    safe_x = jnp.where(x > 0.0, x, 1.0)
+    safe_norm = jnp.where(valid_hyper, norm, 1.0)
+    logp = -alpha * jnp.log(safe_x) - jnp.log(safe_norm)
     return jnp.where(valid, logp, -jnp.inf)
 
 
@@ -54,13 +59,27 @@ def truncated_normal_logpdf(x, *, mu, sigma, low, high):
     x = jnp.asarray(x)
     mu = jnp.asarray(mu)
     sigma = jnp.asarray(sigma)
-    a = (low - mu) / sigma
-    b = (high - mu) / sigma
-    z = (x - mu) / sigma
+
+    valid_sigma = jnp.isfinite(sigma) & (sigma > 0.0)
+    safe_sigma = jnp.where(valid_sigma, sigma, 1.0)
+    a = (low - mu) / safe_sigma
+    b = (high - mu) / safe_sigma
+    z = (x - mu) / safe_sigma
     norm = ndtr(b) - ndtr(a)
-    valid_hyper = (sigma > 0.0) & (high > low) & jnp.isfinite(norm) & (norm > 0.0)
+    valid_hyper = (
+        valid_sigma
+        & (high > low)
+        & jnp.isfinite(norm)
+        & (norm > 0.0)
+    )
+    safe_norm = jnp.where(valid_hyper, norm, 1.0)
     valid = valid_hyper & (x >= low) & (x <= high)
-    logp = -0.5 * z**2 - jnp.log(sigma) - 0.5 * LOG2PI - jnp.log(norm)
+    logp = (
+        -0.5 * z**2
+        - jnp.log(safe_sigma)
+        - 0.5 * LOG2PI
+        - jnp.log(safe_norm)
+    )
     return jnp.where(valid, logp, -jnp.inf)
 
 
@@ -77,17 +96,39 @@ def primary_mass_powerlaw_peak_logpdf(
     """Normalized power law + truncated Gaussian peak on [mmin, mmax]."""
     m1 = jnp.asarray(m1)
     f = jnp.asarray(peak_fraction)
+
     log_pl = powerlaw_logpdf(m1, alpha=alpha, xmin=mmin, xmax=mmax)
     log_peak = truncated_normal_logpdf(
-        m1, mu=peak_mu, sigma=peak_sigma, low=mmin, high=mmax
+        m1,
+        mu=peak_mu,
+        sigma=peak_sigma,
+        low=mmin,
+        high=mmax,
     )
-    terms = jnp.stack(
-        (jnp.log1p(-f) + log_pl, jnp.log(f) + log_peak),
-        axis=0,
+
+    # Outside common mass support both component log densities are -inf. Feeding
+    # an all--inf vector into logsumexp/logaddexp has undefined derivatives even
+    # if a later where masks it. Evaluate a finite surrogate first, then apply
+    # the exact support mask at the end.
+    safe_pl = jnp.where(jnp.isfinite(log_pl), log_pl, 0.0)
+    safe_peak = jnp.where(jnp.isfinite(log_peak), log_peak, 0.0)
+    safe_f = jnp.clip(f, 1e-12, 1.0 - 1e-12)
+    mixture = jnp.logaddexp(
+        jnp.log1p(-safe_f) + safe_pl,
+        jnp.log(safe_f) + safe_peak,
     )
-    mixture = logsumexp(terms, axis=0)
-    valid_f = (f >= 0.0) & (f <= 1.0)
-    return jnp.where(valid_f, mixture, -jnp.inf)
+    mixture = jnp.where(f <= 0.0, safe_pl, mixture)
+    mixture = jnp.where(f >= 1.0, safe_peak, mixture)
+
+    valid_f = jnp.isfinite(f) & (f >= 0.0) & (f <= 1.0)
+    valid_mass = (
+        (mmin > 0.0)
+        & (mmax > mmin)
+        & (m1 >= mmin)
+        & (m1 <= mmax)
+        & (m1 > 0.0)
+    )
+    return jnp.where(valid_f & valid_mass, mixture, -jnp.inf)
 
 
 def primary_mass_broken_powerlaw_logpdf(
@@ -105,12 +146,13 @@ def primary_mass_broken_powerlaw_logpdf(
     mb = mmin + bf * (mmax - mmin)
 
     i1 = _power_integral(mmin, mb, -alpha1)
-    continuity = jnp.power(mb, alpha2 - alpha1)
+    continuity = jnp.power(jnp.where(mb > 0.0, mb, 1.0), alpha2 - alpha1)
     i2 = continuity * _power_integral(mb, mmax, -alpha2)
     norm = i1 + i2
 
-    low = jnp.power(m1, -alpha1)
-    high = continuity * jnp.power(m1, -alpha2)
+    safe_m1 = jnp.where(m1 > 0.0, m1, 1.0)
+    low = jnp.power(safe_m1, -alpha1)
+    high = continuity * jnp.power(safe_m1, -alpha2)
     shape = jnp.where(m1 <= mb, low, high)
 
     valid_hyper = (
@@ -121,27 +163,34 @@ def primary_mass_broken_powerlaw_logpdf(
         & jnp.isfinite(norm)
         & (norm > 0.0)
     )
-    valid = valid_hyper & (m1 >= mmin) & (m1 <= mmax)
-    return jnp.where(valid, jnp.log(shape) - jnp.log(norm), -jnp.inf)
+    safe_norm = jnp.where(valid_hyper, norm, 1.0)
+    valid = valid_hyper & (m1 >= mmin) & (m1 <= mmax) & (m1 > 0.0)
+    logp = jnp.log(jnp.where(shape > 0.0, shape, 1.0)) - jnp.log(safe_norm)
+    return jnp.where(valid, logp, -jnp.inf)
 
 
 def mass_ratio_logpdf(q, m1, *, beta, mmin, q_floor=0.05):
     """Normalized q**beta conditional with m2=q*m1 >= mmin."""
     q = jnp.asarray(q)
     m1 = jnp.asarray(m1)
-    qmin = jnp.maximum(jnp.asarray(q_floor), jnp.asarray(mmin) / m1)
+
+    safe_m1 = jnp.where(m1 > 0.0, m1, 1.0)
+    qmin = jnp.maximum(jnp.asarray(q_floor), jnp.asarray(mmin) / safe_m1)
     norm = _power_integral(qmin, 1.0, beta)
 
     valid_hyper = (
         (q_floor > 0.0)
         & (q_floor < 1.0)
         & (mmin > 0.0)
+        & (m1 > 0.0)
         & (qmin < 1.0)
         & jnp.isfinite(norm)
         & (norm > 0.0)
     )
-    valid = valid_hyper & (q >= qmin) & (q <= 1.0)
-    logp = beta * jnp.log(q) - jnp.log(norm)
+    safe_norm = jnp.where(valid_hyper, norm, 1.0)
+    safe_q = jnp.where(q > 0.0, q, 1.0)
+    valid = valid_hyper & (q >= qmin) & (q <= 1.0) & (q > 0.0)
+    logp = beta * jnp.log(safe_q) - jnp.log(safe_norm)
     return jnp.where(valid, logp, -jnp.inf)
 
 
@@ -161,11 +210,29 @@ def redshift_rate_logpdf(z, *, kappa, zmax, cosmology, quadrature_order=96):
 
     shape_q = cosmology.dVc_dz(zq) * jnp.power(1.0 + zq, kappa - 1.0)
     norm = jnp.sum(wq * shape_q)
-    shape = cosmology.dVc_dz(z) * jnp.power(1.0 + z, kappa - 1.0)
+
+    safe_z = jnp.where(z >= 0.0, z, 0.0)
+    shape = cosmology.dVc_dz(safe_z) * jnp.power(
+        1.0 + safe_z,
+        kappa - 1.0,
+    )
 
     valid_hyper = (zmax > 0.0) & jnp.isfinite(norm) & (norm > 0.0)
-    valid = valid_hyper & (z >= 0.0) & (z <= zmax) & (shape > 0.0)
-    return jnp.where(valid, jnp.log(shape) - jnp.log(norm), -jnp.inf)
+    safe_norm = jnp.where(valid_hyper, norm, 1.0)
+    safe_shape = jnp.where(
+        jnp.isfinite(shape) & (shape > 0.0),
+        shape,
+        1.0,
+    )
+    valid = (
+        valid_hyper
+        & (z >= 0.0)
+        & (z <= zmax)
+        & jnp.isfinite(shape)
+        & (shape > 0.0)
+    )
+    logp = jnp.log(safe_shape) - jnp.log(safe_norm)
+    return jnp.where(valid, logp, -jnp.inf)
 
 
 def chi_eff_logpdf(chi_eff, *, mu, sigma):
