@@ -124,26 +124,97 @@ class ResultStore:
         self,
         decisions: tuple[PromotionDecision, ...] | list[PromotionDecision],
     ) -> None:
-        with self.connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO promotions(
-                    model_hash, from_fidelity, to_fidelity, decision,
-                    reason, scheduler_version
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        item.model_hash,
-                        item.from_fidelity.value,
-                        None if item.to_fidelity is None else item.to_fidelity.value,
-                        item.decision,
-                        item.reason,
-                        item.scheduler_version,
-                    )
-                    for item in decisions
-                ],
+        """Append one atomic promotion cohort, idempotently on exact replay.
+
+        A state database represents one deterministic search campaign. Replaying
+        the same scheduler decision is a no-op; attempting to record a different
+        decision for the same model/fidelity/scheduler version is rejected.
+        """
+        decisions = tuple(decisions)
+        if not decisions:
+            return
+        keys = [
+            (
+                item.model_hash,
+                item.from_fidelity.value,
+                item.scheduler_version,
             )
+            for item in decisions
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate promotion decision keys in one cohort")
+
+        with self.connect() as connection:
+            existing = {}
+            for model_hash, from_fidelity, scheduler_version in keys:
+                rows = connection.execute(
+                    """
+                    SELECT model_hash, from_fidelity, to_fidelity, decision,
+                           reason, scheduler_version
+                    FROM promotions
+                    WHERE model_hash = ?
+                      AND from_fidelity = ?
+                      AND scheduler_version = ?
+                    """,
+                    (model_hash, from_fidelity, scheduler_version),
+                ).fetchall()
+                if len(rows) > 1:
+                    raise RuntimeError(
+                        "state store contains duplicate historical promotion "
+                        f"decisions for {model_hash} {from_fidelity}"
+                    )
+                if rows:
+                    existing[(model_hash, from_fidelity, scheduler_version)] = dict(
+                        rows[0]
+                    )
+
+            new_rows = []
+            for item in decisions:
+                key = (
+                    item.model_hash,
+                    item.from_fidelity.value,
+                    item.scheduler_version,
+                )
+                expected = {
+                    "model_hash": item.model_hash,
+                    "from_fidelity": item.from_fidelity.value,
+                    "to_fidelity": (
+                        None
+                        if item.to_fidelity is None
+                        else item.to_fidelity.value
+                    ),
+                    "decision": item.decision,
+                    "reason": item.reason,
+                    "scheduler_version": item.scheduler_version,
+                }
+                if key in existing:
+                    if existing[key] != expected:
+                        raise ValueError(
+                            "promotion replay conflicts with durable search history "
+                            f"for {item.model_hash} {item.from_fidelity.value}"
+                        )
+                    continue
+                new_rows.append(
+                    (
+                        expected["model_hash"],
+                        expected["from_fidelity"],
+                        expected["to_fidelity"],
+                        expected["decision"],
+                        expected["reason"],
+                        expected["scheduler_version"],
+                    )
+                )
+
+            if new_rows:
+                connection.executemany(
+                    """
+                    INSERT INTO promotions(
+                        model_hash, from_fidelity, to_fidelity, decision,
+                        reason, scheduler_version
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    new_rows,
+                )
 
     def promotion_history(self) -> list[dict[str, object]]:
         with self.connect() as connection:
