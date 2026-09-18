@@ -120,6 +120,13 @@ def _record_from_row(row: Mapping[str, object]) -> EvaluationRecord:
     )
 
 
+def _total_compute_cost(store: ResultStore) -> float:
+    """Recompute cost from durable rows so live and resumed sums are identical."""
+    return float(
+        math.fsum(float(row["compute_cost"]) for row in store.evaluations())
+    )
+
+
 def _existing_evaluation(
     store: ResultStore,
     *,
@@ -158,9 +165,7 @@ def execute_search(
     promoted_by_fidelity: dict[str, int] = {}
     pruned_by_fidelity: dict[str, int] = {}
 
-    total_compute_cost = float(
-        math.fsum(float(row["compute_cost"]) for row in store.evaluations())
-    )
+    total_compute_cost = _total_compute_cost(store)
 
     fidelity = config.start_fidelity
     while True:
@@ -212,9 +217,7 @@ def execute_search(
                     },
                     artifact_path=str(run_dir),
                 )
-                total_compute_cost = math.fsum(
-                    (total_compute_cost, float(record.compute_cost))
-                )
+                total_compute_cost = _total_compute_cost(store)
                 if (
                     config.max_total_compute_cost is not None
                     and total_compute_cost > config.max_total_compute_cost
