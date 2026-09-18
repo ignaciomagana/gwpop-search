@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping, Any
+from typing import Any, Mapping
 
 try:
     import jax.numpy as jnp
@@ -51,9 +51,22 @@ class GwcatChiEffBBHModel:
 
     def __post_init__(self) -> None:
         if self.zmax <= 0 or self.zmax >= self.cosmology.interpolation_z_max:
-            raise ValueError("zmax must be positive and inside the cosmology interpolation grid")
+            raise ValueError(
+                "zmax must be positive and inside the cosmology interpolation grid"
+            )
         if not 0 < self.q_floor < 1:
             raise ValueError("q_floor must lie between 0 and 1")
+        if self.redshift_quadrature_order < 16:
+            raise ValueError("redshift_quadrature_order must be >= 16")
+
+    def to_config(self) -> dict[str, object]:
+        return {
+            "class": f"{type(self).__module__}.{type(self).__qualname__}",
+            "cosmology": self.cosmology.to_config(),
+            "zmax": float(self.zmax),
+            "q_floor": float(self.q_floor),
+            "redshift_quadrature_order": int(self.redshift_quadrature_order),
+        }
 
     def __call__(self, samples: Mapping[str, Any], hyperparameters: Mapping[str, Any]):
         m1det = jnp.asarray(samples["m1_detector"])
