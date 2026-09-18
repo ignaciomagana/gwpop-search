@@ -1,0 +1,212 @@
+import json
+
+import numpy as np
+
+from gwpop_search.grammar import baseline_model_spec
+from gwpop_search.inference.synthetic import SyntheticSurveyConfig
+from gwpop_search.models import DEFAULT_BASELINE_HYPERPARAMETERS, GwcatChiEffBBHModel
+from gwpop_search.scouts import (
+    StructuredScoutInjection,
+    assess_structured_scout_campaign,
+    build_structured_scout_campaign_plan,
+    default_scout_campaign_config,
+    generate_structured_scout_dataset,
+    reachable_mutation_ids,
+)
+from gwpop_search.scouts.synthetic import (
+    _sample_chi_with_mu_sigma,
+    _sample_q_with_beta,
+)
+
+
+def test_variable_beta_q_sampler_responds_to_injected_slope():
+    rng = np.random.default_rng(1)
+    n = 50_000
+    m1 = np.full(n, 40.0)
+    low_beta = _sample_q_with_beta(
+        rng,
+        m1,
+        beta=np.full(n, -2.0),
+        mmin=5.0,
+        q_floor=0.05,
+    )
+    high_beta = _sample_q_with_beta(
+        rng,
+        m1,
+        beta=np.full(n, 6.0),
+        mmin=5.0,
+        q_floor=0.05,
+    )
+    assert np.mean(high_beta) > np.mean(low_beta) + 0.25
+    assert np.all((low_beta >= 0.125) & (low_beta <= 1.0))
+    assert np.all((high_beta >= 0.125) & (high_beta <= 1.0))
+
+
+def test_variable_chieff_sampler_tracks_mean_and_width():
+    rng = np.random.default_rng(2)
+    n = 40_000
+
+    low = _sample_chi_with_mu_sigma(
+        rng,
+        np.full(n, -0.15),
+        np.full(n, 0.08),
+    )
+    high = _sample_chi_with_mu_sigma(
+        rng,
+        np.full(n, 0.20),
+        np.full(n, 0.22),
+    )
+    assert np.mean(high) > np.mean(low) + 0.30
+    assert np.std(high) > np.std(low) * 2.0
+    assert np.all(np.abs(low) <= 1.0)
+    assert np.all(np.abs(high) <= 1.0)
+
+
+def test_structured_dataset_uses_canonical_pe_selection_contract():
+    injection = StructuredScoutInjection(
+        "chieff.mean.linear_q",
+        0.4,
+    )
+    dataset = generate_structured_scout_dataset(
+        seed=8,
+        injection=injection,
+        survey_config=SyntheticSurveyConfig(
+            n_events=6,
+            posterior_samples_per_event=12,
+            n_injections=500,
+            population_batch_size=128,
+            redshift_sampling_grid=512,
+        ),
+    )
+
+    assert dataset.posterior.n_events == 6
+    assert dataset.posterior.basis.identity == dataset.selection.basis.identity
+    assert dataset.truth_hyperparameters["chi_mu_q_slope"] == 0.4
+    assert dataset.posterior.n_samples_total == 72
+    assert dataset.selection.n_selected > 0
+
+
+def test_structured_campaign_plan_has_deterministic_independent_seeds():
+    scout = default_scout_campaign_config("chi_eff", "q")
+    plan_a = build_structured_scout_campaign_plan(
+        n_runs=4,
+        root_seed=99,
+        injection=StructuredScoutInjection(
+            "chieff.mean.linear_q",
+            0.4,
+        ),
+        survey_config=SyntheticSurveyConfig(
+            n_events=8,
+            posterior_samples_per_event=16,
+            n_injections=500,
+        ),
+        scout_config=scout,
+        base_spec=baseline_model_spec(),
+        base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+    )
+    plan_b = build_structured_scout_campaign_plan(
+        n_runs=4,
+        root_seed=99,
+        injection=StructuredScoutInjection(
+            "chieff.mean.linear_q",
+            0.4,
+        ),
+        survey_config=SyntheticSurveyConfig(
+            n_events=8,
+            posterior_samples_per_event=16,
+            n_injections=500,
+        ),
+        scout_config=scout,
+        base_spec=baseline_model_spec(),
+        base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+    )
+    assert plan_a == plan_b
+    pairs = {
+        (item["data_seed"], item["sampler_seed"])
+        for item in plan_a["runs"]
+    }
+    assert len(pairs) == 4
+    assert all(a != b for a, b in pairs)
+
+
+def _write_fake_summary(path, *, passed, mutations):
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "scout_summary.json").write_text(
+        json.dumps(
+            {
+                "numerical": {"passed": passed},
+                "validated_proposals": [
+                    {"mutation_id": mutation}
+                    for mutation in mutations
+                ],
+            }
+        )
+    )
+
+
+def test_structured_campaign_assessment_separates_expected_and_offtarget(tmp_path):
+    scout = default_scout_campaign_config("chi_eff", "q")
+    plan = build_structured_scout_campaign_plan(
+        n_runs=3,
+        root_seed=2,
+        injection=StructuredScoutInjection(
+            "chieff.mean.linear_q",
+            0.4,
+        ),
+        survey_config=SyntheticSurveyConfig(),
+        scout_config=scout,
+        base_spec=baseline_model_spec(),
+        base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+    )
+    (tmp_path / "campaign_plan.json").write_text(json.dumps(plan))
+
+    _write_fake_summary(
+        tmp_path / "run_000" / "scout",
+        passed=True,
+        mutations=["chieff.mean.linear_q"],
+    )
+    _write_fake_summary(
+        tmp_path / "run_001" / "scout",
+        passed=True,
+        mutations=["chieff.width.linear_q"],
+    )
+    _write_fake_summary(
+        tmp_path / "run_002" / "scout",
+        passed=False,
+        mutations=["chieff.mean.linear_q"],
+    )
+
+    summary = assess_structured_scout_campaign(tmp_path)
+    assert summary["expected_mutation_reachable"]
+    assert summary["n_numerical_pass"] == 2
+    assert summary["n_expected_proposed"] == 1
+    assert summary["expected_proposal_fraction_among_numerical_pass"] == 0.5
+    assert summary["n_off_target_proposals"] == 1
+
+
+def test_offtarget_control_is_marked_not_failed_recovery(tmp_path):
+    scout = default_scout_campaign_config("chi_eff", "q")
+    assert "pairing.beta.linear_m1" not in reachable_mutation_ids(scout)
+    plan = build_structured_scout_campaign_plan(
+        n_runs=1,
+        root_seed=3,
+        injection=StructuredScoutInjection(
+            "pairing.beta.linear_m1",
+            0.1,
+        ),
+        survey_config=SyntheticSurveyConfig(),
+        scout_config=scout,
+        base_spec=baseline_model_spec(),
+        base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+    )
+    (tmp_path / "campaign_plan.json").write_text(json.dumps(plan))
+    _write_fake_summary(
+        tmp_path / "run_000" / "scout",
+        passed=True,
+        mutations=[],
+    )
+
+    summary = assess_structured_scout_campaign(tmp_path)
+    assert not summary["expected_mutation_reachable"]
+    assert summary["expected_proposal_fraction_among_numerical_pass"] is None
+    assert summary["interpretation"] == "off_target_control"
