@@ -8,9 +8,12 @@ from .frozen_selection import (
 from .campaign import (
     ExactNullCampaignConfig,
     build_exact_null_campaign_plan,
+    finalize_exact_null_campaign,
     load_exact_null_campaign_config,
     null_search_seed,
+    prepare_exact_null_campaign,
     run_exact_null_campaign,
+    run_exact_null_index,
     save_exact_null_campaign_config,
 )
 from .search_replay import (
@@ -34,11 +37,14 @@ __all__ = [
     "empirical_tail_probability",
     "frozen_selection_resampling_probabilities",
     "generate_frozen_selection_null_dataset",
+    "finalize_exact_null_campaign",
     "load_exact_null_campaign_config",
     "null_replay_seed",
     "null_search_seed",
+    "prepare_exact_null_campaign",
     "run_baseline_null_search_replay",
     "run_exact_null_campaign",
+    "run_exact_null_index",
     "run_null_replay_campaign",
     "save_exact_null_campaign_config",
     "search_statistics_from_evidence",
