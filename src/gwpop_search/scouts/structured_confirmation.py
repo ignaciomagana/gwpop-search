@@ -75,6 +75,11 @@ def confirm_structured_scout_descendant(
         if summary_path.exists()
         else assess_structured_scout_campaign(campaign_root)
     )
+    expected_mutation = str(campaign_summary["expected_mutation_id"])
+    if expected_mutation == "null":
+        raise ValueError(
+            "null scout campaigns have no injected descendant to confirm"
+        )
     if not bool(campaign_summary.get("engineering_acceptance_passed", False)):
         raise ValueError(
             "structured scout campaign has not passed its frozen engineering gate"
@@ -84,7 +89,6 @@ def confirm_structured_scout_descendant(
         campaign_summary,
         run_index=run_index,
     )
-    expected_mutation = str(campaign_summary["expected_mutation_id"])
     run_plan = [
         row
         for row in plan["runs"]
