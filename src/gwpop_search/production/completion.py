@@ -49,6 +49,14 @@ def complete_graph_evidence(
     define a normalized posterior over the declared model space. This function
     is the explicit completion stage required before full model probabilities.
     """
+    if len(graph.nodes) > campaign.budget.max_f3_models:
+        raise SearchBudgetExceeded(
+            f"declared graph has {len(graph.nodes)} models but the frozen "
+            f"F3 budget allows only {campaign.budget.max_f3_models}; "
+            "full model-posterior evidence completion is not permitted by "
+            "this campaign"
+        )
+
     store = ResultStore(state_database)
     artifact_root = Path(artifact_root)
     artifact_root.mkdir(parents=True, exist_ok=True)
