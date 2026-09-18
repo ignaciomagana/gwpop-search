@@ -75,6 +75,11 @@ def confirm_structured_scout_descendant(
         if summary_path.exists()
         else assess_structured_scout_campaign(campaign_root)
     )
+    if not bool(campaign_summary.get("engineering_acceptance_passed", False)):
+        raise ValueError(
+            "structured scout campaign has not passed its frozen engineering gate"
+        )
+
     selected_index = _select_confirmation_run(
         campaign_summary,
         run_index=run_index,
@@ -163,6 +168,7 @@ def confirm_structured_scout_descendant(
         "engineering_confirmation_passed": bool(
             comparison["both_numerically_valid"]
             and comparison["log_bayes_factor_child_over_parent"] is not None
+            and comparison["log_bayes_factor_child_over_parent"] > 0.0
         ),
         "interpretation": (
             "injected_descendant_independent_f3_confirmation_only; "
