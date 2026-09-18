@@ -11,6 +11,7 @@ from .numpyro import (
     run_resumable_chains,
     save_result,
 )
+from .model_spec import prior_specs_from_model_spec
 from .priors import BASELINE_SYNTHETIC_PRIORS, PriorSpec, serialize_prior_map
 
 
@@ -49,6 +50,7 @@ __all__ = [
     "build_run_manifest",
     "generate_baseline_synthetic_dataset",
     "load_result",
+    "prior_specs_from_model_spec",
     "run_nuts",
     "run_recovery_campaign",
     "run_resumable_chains",
