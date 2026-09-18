@@ -8,6 +8,7 @@ from .config import (
     save_production_campaign,
 )
 from .freeze import canonical_graph_json, model_graph_hash, verify_graph_file
+from .validate import validate_production_freeze
 from .manifest import (
     ArtifactEntry,
     DatasetManifest,
@@ -33,5 +34,6 @@ __all__ = [
     "save_production_campaign",
     "sha256_file",
     "validate_dataset_manifest_files",
+    "validate_production_freeze",
     "verify_graph_file",
 ]
