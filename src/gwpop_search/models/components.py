@@ -244,3 +244,185 @@ def chi_eff_logpdf(chi_eff, *, mu, sigma):
         low=-1.0,
         high=1.0,
     )
+
+
+
+def primary_mass_powerlaw_two_peak_logpdf(
+    m1,
+    *,
+    alpha,
+    mmin,
+    mmax,
+    peak1_fraction,
+    peak1_mu,
+    peak1_sigma,
+    peak2_fraction,
+    peak2_mu,
+    peak2_sigma,
+):
+    """Normalized power law plus two truncated Gaussian peaks."""
+    m1 = jnp.asarray(m1)
+    f1 = jnp.asarray(peak1_fraction)
+    f2 = jnp.asarray(peak2_fraction)
+    f0 = 1.0 - f1 - f2
+
+    log_pl = powerlaw_logpdf(m1, alpha=alpha, xmin=mmin, xmax=mmax)
+    log_p1 = truncated_normal_logpdf(
+        m1, mu=peak1_mu, sigma=peak1_sigma, low=mmin, high=mmax
+    )
+    log_p2 = truncated_normal_logpdf(
+        m1, mu=peak2_mu, sigma=peak2_sigma, low=mmin, high=mmax
+    )
+
+    safe_pl = jnp.where(jnp.isfinite(log_pl), log_pl, 0.0)
+    safe_p1 = jnp.where(jnp.isfinite(log_p1), log_p1, 0.0)
+    safe_p2 = jnp.where(jnp.isfinite(log_p2), log_p2, 0.0)
+
+    sf0 = jnp.clip(f0, 1e-12, 1.0)
+    sf1 = jnp.clip(f1, 1e-12, 1.0)
+    sf2 = jnp.clip(f2, 1e-12, 1.0)
+    mixture = jnp.logaddexp(
+        jnp.log(sf0) + safe_pl,
+        jnp.log(sf1) + safe_p1,
+    )
+    mixture = jnp.logaddexp(
+        mixture,
+        jnp.log(sf2) + safe_p2,
+    )
+
+    valid_f = (
+        jnp.isfinite(f1)
+        & jnp.isfinite(f2)
+        & (f1 >= 0.0)
+        & (f2 >= 0.0)
+        & (f0 >= 0.0)
+    )
+    valid_mass = (
+        (mmin > 0.0)
+        & (mmax > mmin)
+        & (m1 >= mmin)
+        & (m1 <= mmax)
+        & (m1 > 0.0)
+    )
+    return jnp.where(valid_f & valid_mass, mixture, -jnp.inf)
+
+
+def mass_ratio_truncated_normal_logpdf(
+    q,
+    m1,
+    *,
+    mu,
+    sigma,
+    mmin,
+    q_floor=0.05,
+):
+    """Truncated-Gaussian q conditional with the m2 >= mmin support."""
+    q = jnp.asarray(q)
+    m1 = jnp.asarray(m1)
+    safe_m1 = jnp.where(m1 > 0.0, m1, 1.0)
+    qmin = jnp.maximum(jnp.asarray(q_floor), jnp.asarray(mmin) / safe_m1)
+    logp = truncated_normal_logpdf(
+        q,
+        mu=mu,
+        sigma=sigma,
+        low=qmin,
+        high=1.0,
+    )
+    valid = (
+        (m1 > 0.0)
+        & (qmin < 1.0)
+        & (q >= qmin)
+        & (q <= 1.0)
+    )
+    return jnp.where(valid, logp, -jnp.inf)
+
+
+def chi_eff_mixture_logpdf(
+    chi_eff,
+    *,
+    mu1,
+    sigma1,
+    mu2,
+    sigma2,
+    fraction,
+):
+    """Two-component normalized truncated-Gaussian chi_eff mixture."""
+    f = jnp.asarray(fraction)
+    log1 = chi_eff_logpdf(chi_eff, mu=mu1, sigma=sigma1)
+    log2 = chi_eff_logpdf(chi_eff, mu=mu2, sigma=sigma2)
+    safe1 = jnp.where(jnp.isfinite(log1), log1, 0.0)
+    safe2 = jnp.where(jnp.isfinite(log2), log2, 0.0)
+    sf = jnp.clip(f, 1e-12, 1.0 - 1e-12)
+    mixture = jnp.logaddexp(
+        jnp.log1p(-sf) + safe1,
+        jnp.log(sf) + safe2,
+    )
+    mixture = jnp.where(f <= 0.0, safe1, mixture)
+    mixture = jnp.where(f >= 1.0, safe2, mixture)
+    valid = (
+        jnp.isfinite(f)
+        & (f >= 0.0)
+        & (f <= 1.0)
+        & (chi_eff >= -1.0)
+        & (chi_eff <= 1.0)
+    )
+    return jnp.where(valid, mixture, -jnp.inf)
+
+
+def redshift_madau_dickinson_logpdf(
+    z,
+    *,
+    a,
+    b,
+    z_turnover,
+    zmax,
+    cosmology,
+    quadrature_order=96,
+):
+    """Normalized dVc/dz/(1+z) times a Madau-Dickinson-like rate history."""
+    z = jnp.asarray(z)
+    nodes, weights = _legendre_nodes(int(quadrature_order))
+    zq = 0.5 * zmax * (jnp.asarray(nodes) + 1.0)
+    wq = 0.5 * zmax * jnp.asarray(weights)
+
+    safe_turnover = jnp.where(z_turnover > 0.0, z_turnover, 1.0)
+
+    def rate_shape(x):
+        one_plus = 1.0 + x
+        scale = 1.0 + safe_turnover
+        numerator = jnp.power(one_plus, a)
+        denominator = 1.0 + jnp.power(one_plus / scale, a + b)
+        return numerator / denominator
+
+    shape_q = cosmology.dVc_dz(zq) * rate_shape(zq) / (1.0 + zq)
+    norm = jnp.sum(wq * shape_q)
+
+    safe_z = jnp.where(z >= 0.0, z, 0.0)
+    shape = cosmology.dVc_dz(safe_z) * rate_shape(safe_z) / (1.0 + safe_z)
+
+    valid_hyper = (
+        (zmax > 0.0)
+        & (a >= 0.0)
+        & (b >= 0.0)
+        & (z_turnover > 0.0)
+        & jnp.isfinite(norm)
+        & (norm > 0.0)
+    )
+    safe_norm = jnp.where(valid_hyper, norm, 1.0)
+    safe_shape = jnp.where(
+        jnp.isfinite(shape) & (shape > 0.0),
+        shape,
+        1.0,
+    )
+    valid = (
+        valid_hyper
+        & (z >= 0.0)
+        & (z <= zmax)
+        & jnp.isfinite(shape)
+        & (shape > 0.0)
+    )
+    return jnp.where(
+        valid,
+        jnp.log(safe_shape) - jnp.log(safe_norm),
+        -jnp.inf,
+    )
