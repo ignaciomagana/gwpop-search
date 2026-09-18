@@ -78,6 +78,13 @@ def _run_synthetic_campaign(args: argparse.Namespace) -> None:
     )
 
 
+def _fingerprint_recovery_checkpoint(args: argparse.Namespace) -> None:
+    from .inference.campaign import checkpoint_fingerprints
+
+    payload = checkpoint_fingerprints(Path(args.run_dir))
+    print(json.dumps(payload, sort_keys=True, indent=2))
+
+
 def _assess_synthetic_campaign(args: argparse.Namespace) -> None:
     from .inference.campaign import (
         RecoveryAcceptanceCriteria,
@@ -1055,6 +1062,13 @@ def build_parser() -> argparse.ArgumentParser:
     campaign.add_argument("--root-seed", type=int, default=20260917)
     _add_common_recovery_arguments(campaign)
     campaign.set_defaults(func=_run_synthetic_campaign)
+
+    fingerprint = subparsers.add_parser(
+        "fingerprint-recovery-checkpoint",
+        help="hash completed Phase-3 chain checkpoints for resume-integrity review",
+    )
+    fingerprint.add_argument("--run-dir", required=True)
+    fingerprint.set_defaults(func=_fingerprint_recovery_checkpoint)
 
     assess = subparsers.add_parser(
         "assess-synthetic-campaign",
