@@ -227,7 +227,6 @@ def _scout_manifest(
         "n_events": int(posterior.n_events),
         "n_pe_samples": int(posterior.n_samples_total),
         "n_selected": int(selection.n_selected),
-        "dataset_identity": str(dataset_identity),
         "base_model_hash": base_spec.model_hash,
         "base_hyperparameters": {
             str(name): float(value)
@@ -340,6 +339,7 @@ def run_conditional_hsgp_scout(
     ]
     summary = {
         "format_version": "gwpop-search-conditional-hsgp-run-1.0",
+        "dataset_identity": str(dataset_identity),
         "base_model_hash": base_spec.model_hash,
         "base_hyperparameters": {
             str(name): float(value)
