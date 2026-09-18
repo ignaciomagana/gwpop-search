@@ -9,7 +9,11 @@ import math
 from pathlib import Path
 from typing import Mapping
 
-from gwpop_search.inference.evidence import NestedSamplingConfig
+from gwpop_search.inference.fidelity import (
+    FidelityRunConfig,
+    fidelity_run_config_from_dict,
+    fidelity_run_config_to_dict,
+)
 from gwpop_search.search import SchedulerConfig
 
 
@@ -46,7 +50,7 @@ class ProductionCampaignConfig:
     model_graph_root_hash: str
     git_commit: str
     model_prior: Mapping[str, object]
-    evidence: NestedSamplingConfig
+    fidelity: FidelityRunConfig
     scheduler: SchedulerConfig
     seed_policy: SeedPolicy
     budget: SearchBudget
@@ -80,7 +84,7 @@ class ProductionCampaignConfig:
             "model_graph_root_hash": self.model_graph_root_hash,
             "git_commit": self.git_commit,
             "model_prior": dict(self.model_prior),
-            "evidence": asdict(self.evidence),
+            "fidelity": fidelity_run_config_to_dict(self.fidelity),
             "scheduler": asdict(self.scheduler),
             "seed_policy": asdict(self.seed_policy),
             "budget": asdict(self.budget),
@@ -109,7 +113,7 @@ class ProductionCampaignConfig:
             model_graph_root_hash=str(payload["model_graph_root_hash"]),
             git_commit=str(payload["git_commit"]),
             model_prior=dict(payload["model_prior"]),
-            evidence=NestedSamplingConfig(**dict(payload["evidence"])),
+            fidelity=fidelity_run_config_from_dict(dict(payload["fidelity"])),
             scheduler=SchedulerConfig(**dict(payload["scheduler"])),
             seed_policy=SeedPolicy(**dict(payload["seed_policy"])),
             budget=SearchBudget(**dict(payload["budget"])),
