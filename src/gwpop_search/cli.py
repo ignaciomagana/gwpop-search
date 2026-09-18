@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from . import __version__
@@ -137,6 +138,43 @@ def _validate_model_spec(args: argparse.Namespace) -> None:
     print(f"valid model spec: {spec.model_hash}")
 
 
+def _validate_dataset_freeze(args: argparse.Namespace) -> None:
+    from .production import (
+        load_dataset_manifest,
+        validate_dataset_manifest_files,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    result = validate_dataset_manifest_files(
+        manifest,
+        base_dir=Path(args.base_dir),
+    )
+    print(json.dumps(result, sort_keys=True, indent=2))
+    if not result["valid"]:
+        raise SystemExit(2)
+
+
+def _validate_production_freeze(args: argparse.Namespace) -> None:
+    from .production import (
+        load_dataset_manifest,
+        load_production_campaign,
+        validate_production_freeze,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    result = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    print(json.dumps(result, sort_keys=True, indent=2))
+    if not result["valid"]:
+        raise SystemExit(2)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gwpop-search",
@@ -188,6 +226,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--spec", required=True)
     validate_parser.set_defaults(func=_validate_model_spec)
+
+    dataset_freeze = subparsers.add_parser(
+        "validate-dataset-manifest",
+        help="verify every frozen dataset artifact checksum and size",
+    )
+    dataset_freeze.add_argument("--manifest", required=True)
+    dataset_freeze.add_argument("--base-dir", default=".")
+    dataset_freeze.set_defaults(func=_validate_dataset_freeze)
+
+    production_freeze = subparsers.add_parser(
+        "validate-production-freeze",
+        help="cross-check frozen data, model graph, campaign config, and code revision",
+    )
+    production_freeze.add_argument("--manifest", required=True)
+    production_freeze.add_argument("--graph", required=True)
+    production_freeze.add_argument("--campaign", required=True)
+    production_freeze.add_argument("--base-dir", default=".")
+    production_freeze.add_argument("--ignore-current-commit", action="store_true")
+    production_freeze.set_defaults(func=_validate_production_freeze)
 
     return parser
 
