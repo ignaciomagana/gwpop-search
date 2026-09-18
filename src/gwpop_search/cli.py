@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from . import __version__
@@ -138,6 +139,115 @@ def _validate_model_spec(args: argparse.Namespace) -> None:
     print(f"valid model spec: {spec.model_hash}")
 
 
+def _read_json_mapping(path: str | Path) -> dict[str, object]:
+    payload = json.loads(Path(path).read_text())
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain one JSON object")
+    return payload
+
+
+def _freeze_dataset(args: argparse.Namespace) -> None:
+    from .production import (
+        build_dataset_manifest_from_canonical_files,
+        save_dataset_manifest,
+    )
+
+    output = Path(args.output)
+    base = output.parent.resolve()
+    pe = Path(args.pe).resolve()
+    selection = Path(args.selection).resolve()
+    metadata = (
+        {}
+        if args.metadata_json is None
+        else _read_json_mapping(args.metadata_json)
+    )
+    manifest = build_dataset_manifest_from_canonical_files(
+        pe,
+        selection,
+        dataset_id=args.dataset_id,
+        event_selection=_read_json_mapping(args.event_selection_json),
+        waveform_policy=_read_json_mapping(args.waveform_policy_json),
+        stored_pe_path=os.path.relpath(pe, base),
+        stored_selection_path=os.path.relpath(selection, base),
+        metadata=metadata,
+    )
+    save_dataset_manifest(output, manifest)
+    print(
+        f"dataset manifest frozen: {output} "
+        f"sha256={manifest.manifest_hash}"
+    )
+
+
+def _write_default_fidelity_config(args: argparse.Namespace) -> None:
+    from .inference.fidelity import (
+        FidelityRunConfig,
+        save_fidelity_run_config,
+    )
+
+    save_fidelity_run_config(Path(args.output), FidelityRunConfig())
+    print(f"default fidelity config written: {args.output}")
+
+
+def _freeze_production_campaign(args: argparse.Namespace) -> None:
+    from .grammar import load_model_graph
+    from .inference.fidelity import load_fidelity_run_config
+    from .inference.numpyro import _code_identity
+    from .production import (
+        SearchBudget,
+        SeedPolicy,
+        build_production_campaign,
+        load_dataset_manifest,
+        save_production_campaign,
+    )
+    from .search import SchedulerConfig
+
+    if args.model_prior == "axis-complexity":
+        if args.model_prior_penalty is None:
+            raise ValueError(
+                "--model-prior-penalty is required for axis-complexity"
+            )
+        model_prior = {
+            "version": "axis-complexity-v1",
+            "penalty_per_axis": float(args.model_prior_penalty),
+        }
+    else:
+        if args.model_prior_penalty is not None:
+            raise ValueError(
+                "--model-prior-penalty is invalid for a uniform model prior"
+            )
+        model_prior = {"version": "uniform-v1"}
+
+    git_commit = args.git_commit or str(_code_identity()["git_commit"])
+    campaign = build_production_campaign(
+        load_dataset_manifest(Path(args.manifest)),
+        load_model_graph(Path(args.graph)),
+        campaign_id=args.campaign_id,
+        git_commit=git_commit,
+        model_prior=model_prior,
+        fidelity=load_fidelity_run_config(Path(args.fidelity_config)),
+        scheduler=SchedulerConfig(
+            beam_width=args.beam_width,
+            exploration_quota=args.exploration_quota,
+            seed=args.scheduler_seed,
+        ),
+        seed_policy=SeedPolicy(root_seed=args.root_seed),
+        budget=SearchBudget(
+            max_gpu_hours=args.max_gpu_hours,
+            max_f3_models=args.max_f3_models,
+            max_f4_models=args.max_f4_models,
+            max_null_replays=args.max_null_replays,
+        ),
+        artifact_root=args.artifact_root,
+        state_database=args.state_database,
+        agents_enabled=False,
+    )
+    save_production_campaign(Path(args.output), campaign)
+    print(
+        f"production campaign frozen: {args.output} "
+        f"sha256={campaign.campaign_hash}"
+    )
+
+
 def _run_production_search(args: argparse.Namespace) -> None:
     from .production import (
         load_dataset_manifest,
@@ -246,6 +356,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--spec", required=True)
     validate_parser.set_defaults(func=_validate_model_spec)
+
+    freeze_dataset = subparsers.add_parser(
+        "freeze-dataset",
+        help="hash canonical PE/selection HDF5s into a frozen dataset manifest",
+    )
+    freeze_dataset.add_argument("--pe", required=True)
+    freeze_dataset.add_argument("--selection", required=True)
+    freeze_dataset.add_argument("--dataset-id", required=True)
+    freeze_dataset.add_argument("--event-selection-json", required=True)
+    freeze_dataset.add_argument("--waveform-policy-json", required=True)
+    freeze_dataset.add_argument("--metadata-json")
+    freeze_dataset.add_argument("--output", required=True)
+    freeze_dataset.set_defaults(func=_freeze_dataset)
+
+    fidelity_template = subparsers.add_parser(
+        "write-default-fidelity-config",
+        help="write the explicit default F0-F4 numerical configuration for review",
+    )
+    fidelity_template.add_argument("--output", required=True)
+    fidelity_template.set_defaults(func=_write_default_fidelity_config)
+
+    freeze_campaign = subparsers.add_parser(
+        "freeze-production-campaign",
+        help="freeze graph/data hashes, numerical settings, scheduler, prior, and budget",
+    )
+    freeze_campaign.add_argument("--manifest", required=True)
+    freeze_campaign.add_argument("--graph", required=True)
+    freeze_campaign.add_argument("--fidelity-config", required=True)
+    freeze_campaign.add_argument("--campaign-id", required=True)
+    freeze_campaign.add_argument("--model-prior", choices=("axis-complexity", "uniform"), required=True)
+    freeze_campaign.add_argument("--model-prior-penalty", type=float)
+    freeze_campaign.add_argument("--beam-width", type=int, required=True)
+    freeze_campaign.add_argument("--exploration-quota", type=int, required=True)
+    freeze_campaign.add_argument("--scheduler-seed", type=int, required=True)
+    freeze_campaign.add_argument("--root-seed", type=int, required=True)
+    freeze_campaign.add_argument("--max-gpu-hours", type=float, required=True)
+    freeze_campaign.add_argument("--max-f3-models", type=int, required=True)
+    freeze_campaign.add_argument("--max-f4-models", type=int, required=True)
+    freeze_campaign.add_argument("--max-null-replays", type=int, required=True)
+    freeze_campaign.add_argument("--artifact-root", required=True)
+    freeze_campaign.add_argument("--state-database", required=True)
+    freeze_campaign.add_argument("--git-commit")
+    freeze_campaign.add_argument("--output", required=True)
+    freeze_campaign.set_defaults(func=_freeze_production_campaign)
 
     run_production = subparsers.add_parser(
         "run-production-search",
