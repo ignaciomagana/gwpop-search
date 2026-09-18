@@ -13,6 +13,7 @@ from gwpop_search.grammar import ModelSpec
 from gwpop_search.hbi import HBIConfig, shape_log_likelihood
 from gwpop_search.inference.numpyro import (
     NUTSConfig,
+    _code_identity,
     run_resumable_chains,
     save_result,
 )
@@ -205,6 +206,50 @@ def assess_scout_numerics(
     }
 
 
+def _scout_manifest(
+    posterior,
+    selection,
+    *,
+    base_spec: ModelSpec,
+    base_hyperparameters: Mapping[str, float],
+    hsgp_config: ConditionalHSGPConfig,
+    seed: int,
+    config: ConditionalScoutRunConfig,
+    dataset_identity: str,
+) -> dict[str, object]:
+    return {
+        "format_version": "gwpop-search-conditional-hsgp-manifest-1.0",
+        "code": _code_identity(),
+        "dataset_identity": str(dataset_identity),
+        "pe_basis": posterior.basis.identity,
+        "selection_basis": selection.basis.identity,
+        "event_names": list(posterior.event_names),
+        "n_events": int(posterior.n_events),
+        "n_pe_samples": int(posterior.n_samples_total),
+        "n_selected": int(selection.n_selected),
+        "dataset_identity": str(dataset_identity),
+        "base_model_hash": base_spec.model_hash,
+        "base_hyperparameters": {
+            str(name): float(value)
+            for name, value in sorted(base_hyperparameters.items())
+        },
+        "hsgp_config": hsgp_config.to_dict(),
+        "seed": int(seed),
+        "run_config": {
+            "nuts": asdict(config.nuts),
+            "hbi": {
+                "rate_treatment": config.hbi.rate_treatment.value,
+                "raw_selection_use_observing_time": bool(
+                    config.hbi.raw_selection_use_observing_time
+                ),
+                "selection_chunk_size": config.hbi.selection_chunk_size,
+            },
+            "numerical": asdict(config.numerical),
+            "structure": asdict(config.structure),
+        },
+    }
+
+
 def run_conditional_hsgp_scout(
     run_dir: str | Path,
     posterior,
@@ -215,6 +260,7 @@ def run_conditional_hsgp_scout(
     hsgp_config: ConditionalHSGPConfig,
     seed: int,
     config: ConditionalScoutRunConfig | None = None,
+    dataset_identity: str = "unspecified",
 ) -> tuple[object, dict[str, object]]:
     """Run/resume one flexible conditional scout and summarize legal descendants."""
     config = (
@@ -224,6 +270,25 @@ def run_conditional_hsgp_scout(
     )
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest = _scout_manifest(
+        posterior,
+        selection,
+        base_spec=base_spec,
+        base_hyperparameters=base_hyperparameters,
+        hsgp_config=hsgp_config,
+        seed=seed,
+        config=config,
+        dataset_identity=dataset_identity,
+    )
+    manifest_path = run_dir / "manifest.json"
+    if manifest_path.exists():
+        if json.loads(manifest_path.read_text()) != manifest:
+            raise ValueError(
+                "existing scout manifest does not match the requested run"
+            )
+    else:
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2))
 
     model = ConditionalHSGPResidualModel(
         base_spec,
