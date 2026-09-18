@@ -2,6 +2,17 @@
 
 Last updated: 2026-09-17
 
+## HARD ACCEPTANCE GATE — DO NOT OVERRIDE
+
+**Phase 3 is NOT accepted until the H100 multi-seed recovery campaign is
+actually executed and reviewed.**
+
+Implementation, CI, synthetic smoke tests, downstream Phase-4--10 staging, or
+successful local/unit tests do **not** satisfy this gate. Future ChatGPT,
+Codex, Fable, and human work must continue to report Phase 3 as open until the
+H100 campaign results have been inspected against the acceptance criteria below
+and the durable state is explicitly updated after that review.
+
 ## Scientific acceptance state
 
 **Phase 3 remains the open scientific gate.**
