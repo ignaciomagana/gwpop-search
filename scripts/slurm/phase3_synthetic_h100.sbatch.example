@@ -1,0 +1,33 @@
+#!/bin/bash
+#SBATCH --job-name=gwpop-p3-recovery
+#SBATCH --output=slurm-%j.out
+#SBATCH --error=slurm-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gpus=1
+#SBATCH --time=24:00:00
+
+# Phase-3 synthetic baseline recovery.
+#
+# Site-specific partition/account/module directives belong above this line.
+# Activate an environment in which JAX sees the allocated H100 and NumPyro is
+# installed before submitting this script. Do not install a CPU-only JAX wheel
+# inside the batch job.
+
+set -euo pipefail
+
+: "${GWPOP_ENV:?Set GWPOP_ENV to the virtual/conda environment activation script}"
+: "${GWPOP_RUN_DIR:?Set GWPOP_RUN_DIR to a persistent run directory}"
+
+source "${GWPOP_ENV}"
+
+python - <<'PY'
+import jax
+devices = jax.devices()
+print("JAX devices:", devices)
+if not any(device.platform == "gpu" for device in devices):
+    raise SystemExit("No JAX GPU device visible; refusing H100 campaign")
+PY
+
+gwpop-search synthetic-recovery   --run-dir "${GWPOP_RUN_DIR}"   --data-seed "${GWPOP_DATA_SEED:-20260917}"   --sampler-seed "${GWPOP_SAMPLER_SEED:-20260918}"   --n-events "${GWPOP_N_EVENTS:-48}"   --pe-samples "${GWPOP_PE_SAMPLES:-256}"   --n-injections "${GWPOP_N_INJECTIONS:-20000}"   --num-warmup "${GWPOP_WARMUP:-1000}"   --num-samples "${GWPOP_SAMPLES:-1000}"   --num-chains "${GWPOP_CHAINS:-4}"   --target-accept "${GWPOP_TARGET_ACCEPT:-0.9}"   --selection-chunk-size "${GWPOP_SELECTION_CHUNK:-4096}"   --no-progress
