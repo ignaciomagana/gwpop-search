@@ -111,8 +111,8 @@ def run_baseline_null_search_replay(
             config=survey_config,
             hyperparameters=truth_hyperparameters,
         )
-        null_posterior = null_posterior
-        null_selection = null_selection
+        null_posterior = dataset.posterior
+        null_selection = dataset.selection
         null_truth_hyperparameters = dict(dataset.truth_hyperparameters)
         null_data_metadata = {
             "mode": data_mode,
@@ -138,8 +138,8 @@ def run_baseline_null_search_replay(
             min_resampling_ess=min_resampling_ess,
             model_spec=declared_root,
         )
-        null_posterior = null_posterior
-        null_selection = null_selection
+        null_posterior = dataset.posterior
+        null_selection = dataset.selection
         null_truth_hyperparameters = dict(dataset.truth_hyperparameters)
         null_data_metadata = dict(dataset.metadata)
         dataset_identity = (
