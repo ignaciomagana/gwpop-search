@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
 from typing import Any, Mapping
 
 import numpy as np
@@ -212,6 +214,33 @@ def _model_config(population_model) -> dict[str, object]:
     return payload
 
 
+def _code_identity() -> dict[str, object]:
+    """Best-effort code identity for checkpoint compatibility."""
+    from gwpop_search import __version__
+
+    commit = os.environ.get("GWPOP_GIT_COMMIT")
+    if not commit:
+        source = Path(__file__).resolve()
+        for parent in source.parents:
+            if (parent / ".git").exists():
+                try:
+                    commit = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=parent,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
+                except (OSError, subprocess.CalledProcessError):
+                    commit = None
+                break
+
+    return {
+        "package_version": str(__version__),
+        "git_commit": commit or "unknown",
+    }
+
+
 def build_run_manifest(
     posterior,
     selection,
@@ -226,6 +255,7 @@ def build_run_manifest(
     return {
         "format_version": "gwpop-search-nuts-1.0",
         "root_seed": int(seed),
+        "code": _code_identity(),
         "nuts_config": asdict(config),
         "hbi_config": _hbi_config_dict(hbi_config),
         "priors": serialize_prior_map(_validated_priors(priors)),
