@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 import math
@@ -42,10 +42,11 @@ class ExactNullCampaignConfig:
     )
     data_mode: str = "frozen_selection_resample"
     min_resampling_ess: float = 200.0
-    format_version: str = "gwpop-search-exact-null-campaign-1.2"
+    max_gpu_hours_per_null: float = 12.0
+    format_version: str = "gwpop-search-exact-null-campaign-1.3"
 
     def __post_init__(self) -> None:
-        if self.format_version != "gwpop-search-exact-null-campaign-1.2":
+        if self.format_version != "gwpop-search-exact-null-campaign-1.3":
             raise ValueError("unsupported exact null campaign format")
         if self.n_nulls <= 0:
             raise ValueError("n_nulls must be positive")
@@ -69,6 +70,13 @@ class ExactNullCampaignConfig:
             or self.min_resampling_ess <= 0.0
         ):
             raise ValueError("min_resampling_ess must be finite and positive")
+        if (
+            not math.isfinite(self.max_gpu_hours_per_null)
+            or self.max_gpu_hours_per_null <= 0.0
+        ):
+            raise ValueError(
+                "max_gpu_hours_per_null must be finite and positive"
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -79,6 +87,7 @@ class ExactNullCampaignConfig:
             "truth_hyperparameters": dict(self.truth_hyperparameters),
             "data_mode": self.data_mode,
             "min_resampling_ess": float(self.min_resampling_ess),
+            "max_gpu_hours_per_null": float(self.max_gpu_hours_per_null),
         }
 
     @classmethod
@@ -102,10 +111,13 @@ class ExactNullCampaignConfig:
             min_resampling_ess=float(
                 payload.get("min_resampling_ess", 200.0)
             ),
+            max_gpu_hours_per_null=float(
+                payload.get("max_gpu_hours_per_null", 12.0)
+            ),
             format_version=str(
                 payload.get(
                     "format_version",
-                    "gwpop-search-exact-null-campaign-1.2",
+                    "gwpop-search-exact-null-campaign-1.3",
                 )
             ),
         )
@@ -239,6 +251,13 @@ def run_exact_null_campaign(
     plan = build_exact_null_campaign_plan(graph, campaign, config)
     _write_plan_once(root / "null_campaign_plan.json", plan)
     model_prior = model_prior_from_config(campaign.model_prior)
+    null_campaign = replace(
+        campaign,
+        budget=replace(
+            campaign.budget,
+            max_gpu_hours=config.max_gpu_hours_per_null,
+        ),
+    )
 
     def replay(index: int, data_seed: int) -> SearchReplayResult:
         return run_baseline_null_search_replay(
@@ -255,12 +274,12 @@ def run_exact_null_campaign(
                     "F3": campaign.budget.max_f3_models,
                     "F4": campaign.budget.max_f4_models,
                 },
-                max_total_compute_cost=campaign.budget.max_gpu_hours,
+                max_total_compute_cost=config.max_gpu_hours_per_null,
             ),
             fidelity_config=campaign.fidelity,
             survey_config=config.survey,
             truth_hyperparameters=config.truth_hyperparameters,
-            completion_campaign=campaign,
+            completion_campaign=null_campaign,
             completion_seed_root=null_search_seed(config.root_seed, index),
             data_mode=config.data_mode,
             observed_posterior=production_posterior,
@@ -307,6 +326,7 @@ def run_exact_null_campaign(
         "format_version": "gwpop-search-exact-null-summary-1.0",
         "production_campaign_hash": campaign.campaign_hash,
         "null_data_mode": config.data_mode,
+        "max_gpu_hours_per_null": float(config.max_gpu_hours_per_null),
         "production_dataset_identity": production_dataset_identity,
         "observed_search_statistics": observed,
         "calibration": calibrated,
