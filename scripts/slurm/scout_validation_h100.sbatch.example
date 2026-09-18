@@ -1,0 +1,34 @@
+#!/bin/bash
+#SBATCH --job-name=gwpop-scout-validation
+#SBATCH --output=slurm-%j.out
+#SBATCH --error=slurm-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --gpus=1
+#SBATCH --time=48:00:00
+
+# Phase-7 HSGP engineering-validation matrix: 88 resumable scout runs.
+# Add site-specific partition/account/module directives above.
+
+set -euo pipefail
+
+: "${GWPOP_ENV:?Set GWPOP_ENV to the environment activation script}"
+: "${GWPOP_SCOUT_VALIDATION_ROOT:?Set GWPOP_SCOUT_VALIDATION_ROOT}"
+
+source "${GWPOP_ENV}"
+
+export JAX_ENABLE_X64=true
+export GWPOP_GIT_COMMIT="${GWPOP_GIT_COMMIT:-$(git rev-parse HEAD)}"
+
+python - <<'PY'
+import jax
+devices = jax.devices()
+print("JAX devices:", devices)
+if not any(device.platform == "gpu" for device in devices):
+    raise SystemExit("No JAX GPU device visible; refusing scout validation")
+if not bool(jax.config.x64_enabled):
+    raise SystemExit("JAX x64 is disabled; refusing scout validation")
+PY
+
+bash scripts/h100/structured_scout_validation_matrix.sh.example
