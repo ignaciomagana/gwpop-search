@@ -424,3 +424,29 @@ def test_run_null_search_calibration_cli_parses():
     assert args.command == "run-null-search-calibration"
     assert args.root == "runs/nulls"
     assert callable(args.func)
+
+
+
+def test_complete_production_evidence_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "complete-production-evidence",
+            "--manifest",
+            "dataset_manifest.json",
+            "--graph",
+            "model_graph.json",
+            "--campaign",
+            "campaign.json",
+            "--base-dir",
+            "data",
+            "--work-dir",
+            "work",
+        ]
+    )
+    assert args.command == "complete-production-evidence"
+    assert args.manifest == "dataset_manifest.json"
+    assert args.graph == "model_graph.json"
+    assert args.campaign == "campaign.json"
+    assert args.base_dir == "data"
+    assert args.work_dir == "work"
+    assert callable(args.func)
