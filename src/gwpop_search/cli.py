@@ -161,6 +161,58 @@ def _read_json_mapping(path: str | Path) -> dict[str, object]:
     return payload
 
 
+def _run_holdout_validation(args: argparse.Namespace) -> None:
+    from .grammar import load_model_graph
+    from .production import (
+        load_dataset_manifest,
+        load_frozen_dataset,
+        load_production_campaign,
+        validate_production_freeze,
+    )
+    from .validation import HoldoutCampaignConfig, run_holdout_campaign
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    freeze = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    if not freeze["valid"]:
+        raise ValueError("production freeze validation failed")
+
+    graph = load_model_graph(Path(args.graph))
+    missing = [
+        model_hash
+        for model_hash in args.model_hash
+        if model_hash not in graph.by_hash
+    ]
+    if missing:
+        raise ValueError(
+            f"holdout validation references unknown model hash(es) {missing}"
+        )
+
+    posterior, selection = load_frozen_dataset(
+        manifest,
+        data_base_dir=Path(args.base_dir),
+    )
+    summary = run_holdout_campaign(
+        Path(args.root),
+        posterior,
+        selection,
+        campaign,
+        dataset_identity=manifest.manifest_hash,
+        models=tuple(graph.by_hash[item] for item in args.model_hash),
+        config=HoldoutCampaignConfig(
+            n_folds=args.n_folds,
+            seed=args.fold_seed,
+        ),
+    )
+    print(json.dumps(summary, sort_keys=True, indent=2))
+
+
 def _write_exact_null_config(args: argparse.Namespace) -> None:
     from .inference.synthetic import SyntheticSurveyConfig
     from .models import DEFAULT_BASELINE_HYPERPARAMETERS
@@ -916,6 +968,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--spec", required=True)
     validate_parser.set_defaults(func=_validate_model_spec)
+
+    holdout = subparsers.add_parser(
+        "run-holdout-validation",
+        help="run/resume strict K-fold held-out detected-event prediction",
+    )
+    holdout.add_argument("--manifest", required=True)
+    holdout.add_argument("--graph", required=True)
+    holdout.add_argument("--campaign", required=True)
+    holdout.add_argument(
+        "--model-hash",
+        action="append",
+        required=True,
+        help="declared graph model to validate; repeat for multiple models",
+    )
+    holdout.add_argument("--n-folds", type=int, default=5)
+    holdout.add_argument("--fold-seed", type=int)
+    holdout.add_argument("--root", required=True)
+    holdout.add_argument("--base-dir", default=".")
+    holdout.add_argument("--ignore-current-commit", action="store_true")
+    holdout.set_defaults(func=_run_holdout_validation)
 
     null_template = subparsers.add_parser(
         "write-null-calibration-config",
