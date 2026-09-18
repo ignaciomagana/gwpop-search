@@ -42,8 +42,15 @@ CI:     GitHub Actions / Python 3.12 / JAX x64
 ~~~
 
 Commits after that checkpoint are handover/documentation synchronization unless
-this file is updated again. Consult current Actions before quoting a newer
-total.
+this file is updated again.
+
+**CI quota note (2026-09-18):** the repository's GitHub Actions included
+allowance is exhausted (3000/3000 minutes used). Push-triggered workflow runs
+after the 272-test checkpoint can terminate within seconds without starting
+pytest. Treat those quota-blocked red runs as infrastructure/billing failures,
+not test failures. The last actual integrated test result remains 272 passed at
+commit `e6d8aef86eac2b37478d1488a53f33d6d1ea5c7c` until Actions capacity is
+restored or the exact handover tree is independently tested elsewhere.
 
 ## Project intent
 
