@@ -8,7 +8,7 @@ from typing import Mapping
 
 import numpy as np
 
-from gwpop_search.grammar import DEFAULT_MUTATIONS, MutationSpec
+from gwpop_search.grammar import DEFAULT_MUTATIONS, ModelSpec, MutationSpec, apply_mutation
 
 
 @dataclass(frozen=True)
@@ -174,3 +174,26 @@ def mutation_for_proposal(
         raise ValueError(
             f"proposal references unknown mutation {proposal.mutation_id!r}"
         ) from exc
+
+
+
+def descendant_for_proposal(
+    parent: ModelSpec,
+    proposal: StructureProposal,
+) -> ModelSpec:
+    """Compile one typed scout proposal to its exact declarative child model."""
+    return apply_mutation(parent, mutation_for_proposal(proposal))
+
+
+def descendant_payload_for_proposal(
+    parent: ModelSpec,
+    proposal: StructureProposal,
+) -> dict[str, object]:
+    child = descendant_for_proposal(parent, proposal)
+    return {
+        "proposal_id": proposal.proposal_id,
+        "mutation_id": proposal.mutation_id,
+        "parent_model_hash": parent.model_hash,
+        "child_model_hash": child.model_hash,
+        "child_model_spec": child.to_dict(),
+    }
