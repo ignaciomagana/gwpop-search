@@ -13,6 +13,14 @@ from .numpyro import (
 )
 from .priors import BASELINE_SYNTHETIC_PRIORS, PriorSpec, serialize_prior_map
 
+
+def generate_baseline_synthetic_dataset(*args, **kwargs):
+    """Lazily import the JAX-backed Phase-3 synthetic dataset generator."""
+    from .synthetic import generate_baseline_synthetic_dataset as _generate
+
+    return _generate(*args, **kwargs)
+
+
 __all__ = [
     "BASELINE_SYNTHETIC_PRIORS",
     "NUTSConfig",
@@ -21,6 +29,7 @@ __all__ = [
     "PriorSpec",
     "build_numpyro_model",
     "build_run_manifest",
+    "generate_baseline_synthetic_dataset",
     "load_result",
     "run_nuts",
     "run_resumable_chains",
