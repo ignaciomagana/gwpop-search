@@ -8,6 +8,7 @@ in the population model rather than in the HBI engine or data adapter.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
 import numpy as np
 
 try:
@@ -16,6 +17,7 @@ except ImportError as exc:  # pragma: no cover - inference extra
     raise ImportError(
         "baseline population models require JAX: install gwpop-search[inference]"
     ) from exc
+
 
 C_KM_S = 299792.458
 
@@ -47,6 +49,14 @@ class FlatLambdaCDM:
         dL = (1.0 + z) * dc
         object.__setattr__(self, "_z_grid", z)
         object.__setattr__(self, "_dL_grid", dL)
+
+    def to_config(self) -> dict[str, float | int]:
+        return {
+            "H0": float(self.H0),
+            "Om0": float(self.Om0),
+            "interpolation_z_max": float(self.interpolation_z_max),
+            "interpolation_size": int(self.interpolation_size),
+        }
 
     def e(self, z):
         z = jnp.asarray(z)
