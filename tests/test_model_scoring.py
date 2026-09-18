@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-from gwpop_search.grammar import baseline_model_spec, enumerate_model_graph
+from gwpop_search.grammar import (\n    baseline_model_spec,\n    enumerate_model_graph,\n    structural_diff_axes,\n)
 from gwpop_search.search import (
     ComplexityModelPrior,
     ModelEvidence,
@@ -88,11 +88,13 @@ def test_structure_axis_posterior_mass_matches_direct_sum():
         "chieff.options.width_dependence",
     )
 
-    direct = 0.0
-    for item in scored.scores:
-        model = graph.by_hash[item.model_hash]
-        if model.chieff.options.get("width_dependence") != "constant":
-            direct += item.posterior_probability
+    root = graph.by_hash[graph.root_hash]
+    direct = sum(
+        item.posterior_probability
+        for item in scored.scores
+        if "chieff.options.width_dependence"
+        in structural_diff_axes(root, graph.by_hash[item.model_hash])
+    )
     assert np.isclose(mass, direct)
 
 
