@@ -187,6 +187,36 @@ def _redshift_logpdf(spec, z, hp, cosmology, zmax, quadrature_order):
     raise ValueError(f"unsupported redshift family {spec.family!r}")
 
 
+def pairing_logpdf_from_spec(spec, q, m1_source, hyperparameters, *, q_floor=0.05):
+    """Evaluate the normalized pairing block from a declarative model spec."""
+    return _pairing_logpdf(
+        spec,
+        q,
+        m1_source,
+        hyperparameters,
+        q_floor,
+    )
+
+
+def chieff_logpdf_from_spec(
+    spec,
+    chi_eff,
+    m1_source,
+    q,
+    z,
+    hyperparameters,
+):
+    """Evaluate the normalized chi_eff block from a declarative model spec."""
+    return _chieff_logpdf(
+        spec,
+        chi_eff,
+        m1_source,
+        q,
+        z,
+        hyperparameters,
+    )
+
+
 @dataclass(frozen=True)
 class DeclarativeGwcatChiEffModel:
     """A validated ModelSpec compiled to the gwcat-v2 chi_eff density basis."""
