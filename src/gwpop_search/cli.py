@@ -431,6 +431,18 @@ def _run_event_stress_suite(args: argparse.Namespace) -> None:
     print(json.dumps(summary, sort_keys=True, indent=2))
 
 
+def _export_scout_baseline(args: argparse.Namespace) -> None:
+    from .grammar import load_model_spec
+    from .scouts import export_scout_baseline_hyperparameters
+
+    provenance = export_scout_baseline_hyperparameters(
+        Path(args.evaluation),
+        load_model_spec(Path(args.model)),
+        Path(args.output),
+    )
+    print(json.dumps(provenance, sort_keys=True, indent=2))
+
+
 def _review_scout_proposal(args: argparse.Namespace) -> None:
     from .grammar import load_model_spec, save_model_spec
     from .scouts import review_scout_proposal, write_scout_review
@@ -1004,6 +1016,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_stress.add_argument("--reference-state-database")
     run_stress.add_argument("--ignore-current-commit", action="store_true")
     run_stress.set_defaults(func=_run_event_stress_suite)
+
+    export_scout = subparsers.add_parser(
+        "export-scout-baseline",
+        help="export frozen median hyperparameters from a valid F3/F4 model fit",
+    )
+    export_scout.add_argument("--evaluation", required=True)
+    export_scout.add_argument("--model", required=True)
+    export_scout.add_argument("--output", required=True)
+    export_scout.set_defaults(func=_export_scout_baseline)
 
     review_scout = subparsers.add_parser(
         "review-scout-proposal",
