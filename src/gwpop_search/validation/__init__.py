@@ -1,5 +1,6 @@
 """Validation utilities outside the production likelihood."""
 
+from .holdout_campaign import HoldoutCampaignConfig, run_holdout_campaign
 from .holdout import (
     compare_holdout_models,
     deterministic_event_folds,
@@ -9,6 +10,7 @@ from .holdout import (
 
 __all__ = [
     "compare_holdout_models",
+    "HoldoutCampaignConfig",
     "deterministic_event_folds",
     "heldout_detected_log_predictive",
     "validate_hyperposterior_samples",
@@ -21,6 +23,7 @@ __all__ = [
     "leave_one_out_scenarios",
     "load_event_stress_suite_spec",
     "run_event_drop_stress_suite",
+    "run_holdout_campaign",
     "save_event_stress_suite_spec",
     "stress_dataset_identity",
     "stress_seed",
