@@ -88,7 +88,7 @@ gwpop-search freeze-production-campaign \
   --scheduler-seed 20260917 \
   --root-seed 20260917 \
   --max-gpu-hours 1000 \
-  --max-f3-models 20 \
+  --max-f3-models 40 \
   --max-f4-models 8 \
   --max-null-replays 200 \
   --artifact-root runs/gwtc5-bbh-search-v1 \
@@ -183,12 +183,35 @@ resume fails rather than overwriting the old scientific state.
 
 No F1/F2 screening value is a Bayes factor or a reported scientific result.
 
-## Model probabilities
+## Evidence completion and model probabilities
+
+The adaptive F0--F4 search prioritizes expensive evaluations. Screening is not
+a substitute for integrating the evidence of every model in the declared model
+space.
 
 scored_graph.json is produced only if every node in the declared graph has a
-proper F3/F4 evidence estimate. If screening left some nodes without evidence,
-the runner writes evidence_coverage.json and refuses to renormalize the
-surviving subset as if it were the declared full model space.
+numerically valid F3/F4 evidence estimate. If screening left nodes without
+evidence, the runner writes evidence_coverage.json and does not renormalize the
+surviving subset.
+
+Run/resume the explicit completion stage on the same frozen campaign and state:
+
+~~~bash
+gwpop-search complete-production-evidence \
+  --manifest "$GWPOP_MANIFEST" \
+  --graph "$GWPOP_GRAPH" \
+  --campaign "$GWPOP_CAMPAIGN" \
+  --base-dir "$GWPOP_DATA_BASE" \
+  --work-dir "$GWPOP_WORK_DIR"
+~~~
+
+Completion reuses valid F3/F4 evidence, evaluates only missing nodes at F3, and
+refuses to silently rerun an existing numerically invalid frozen F3 result. A
+failed F4 does not erase a valid F3 fallback.
+
+For a full posterior over the declared graph, campaign.budget.max_f3_models must
+be at least the number of declared graph nodes. If it is smaller, the campaign
+is discovery-only and completion fails rather than bypassing the frozen budget.
 
 This is separate from search-level null calibration. Adaptive/broader searches
 must still be replayed under the declared null procedure before a search-level
@@ -219,7 +242,8 @@ A typical tree is:
       evaluation.json
     search_execution_summary.json
     evidence_coverage.json
-    scored_graph.json              # only with complete evidence coverage
+    evidence_completion_summary.json
+    scored_graph.json              # only with complete valid evidence coverage
     production_run_summary.json
 ~~~
 
@@ -235,8 +259,9 @@ The production campaign freezes:
 - maximum number of F4 models;
 - null-replay budget.
 
-A model-count limit is checked before launching that fidelity. Completed work is
-never discarded when a compute limit is hit.
+A model-count limit is checked before launching that fidelity. Evidence
+completion is subject to the same frozen cumulative GPU-hour budget and F3 model
+budget. Completed work is never discarded when a compute limit is hit.
 
 ## Slurm
 
