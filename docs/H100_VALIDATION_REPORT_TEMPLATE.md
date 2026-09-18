@@ -282,11 +282,20 @@ Null config:
 - measured selection-resampling ESS:
 - maximum resampling probability:
 - per-null GPU-hour ceiling:
+- exact-null plan path/hash:
+- Slurm array job ID:
+- array shape/concurrency:
+- failed/requeued task IDs:
+- missing indices before finalization:
 - observed production state database:
 
 Every null must replay:
 1. the frozen deterministic adaptive F0--F4 procedure; and
 2. full valid evidence completion over the declared graph.
+
+The production H100 workflow should use the prepared plan plus unique indexed
+array tasks. Finalization must refuse if any declared index is missing or has
+the wrong deterministic seed identity.
 
 Calibration:
 - nulls completed:
