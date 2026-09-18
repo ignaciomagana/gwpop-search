@@ -30,8 +30,12 @@ from gwpop_search.data import validate_pair
 _SUPPORTED = {
     "null",
     "pairing.beta.linear_m1",
+    "chieff.mean.linear_m1",
     "chieff.mean.linear_q",
+    "chieff.mean.linear_z",
+    "chieff.width.linear_m1",
     "chieff.width.linear_q",
+    "chieff.width.linear_z",
 }
 
 
@@ -130,16 +134,46 @@ def _draw_structured_population(
     else:
         q = _sample_q(rng, m1_source, hp, model.q_floor)
 
-    if injection.mutation_id == "chieff.mean.linear_q":
-        pivot = float(spec.chieff.options["q_pivot"])
-        mu = float(hp["chi_mu"]) + injection.strength * (q - pivot)
+    chi_mean_covariates = {
+        "chieff.mean.linear_m1": (
+            m1_source,
+            float(spec.chieff.options["m1_pivot"]),
+        ),
+        "chieff.mean.linear_q": (
+            q,
+            float(spec.chieff.options["q_pivot"]),
+        ),
+        "chieff.mean.linear_z": (
+            z,
+            float(spec.chieff.options["z_pivot"]),
+        ),
+    }
+    chi_width_covariates = {
+        "chieff.width.linear_m1": (
+            m1_source,
+            float(spec.chieff.options["m1_pivot"]),
+        ),
+        "chieff.width.linear_q": (
+            q,
+            float(spec.chieff.options["q_pivot"]),
+        ),
+        "chieff.width.linear_z": (
+            z,
+            float(spec.chieff.options["z_pivot"]),
+        ),
+    }
+    if injection.mutation_id in chi_mean_covariates:
+        covariate, pivot = chi_mean_covariates[injection.mutation_id]
+        mu = float(hp["chi_mu"]) + injection.strength * (
+            covariate - pivot
+        )
         sigma = np.full(n, float(hp["chi_sigma"]))
         chi_eff = _sample_chi_with_mu_sigma(rng, mu, sigma)
-    elif injection.mutation_id == "chieff.width.linear_q":
-        pivot = float(spec.chieff.options["q_pivot"])
+    elif injection.mutation_id in chi_width_covariates:
+        covariate, pivot = chi_width_covariates[injection.mutation_id]
         mu = np.full(n, float(hp["chi_mu"]))
         sigma = float(hp["chi_sigma"]) * np.exp(
-            injection.strength * (q - pivot)
+            injection.strength * (covariate - pivot)
         )
         chi_eff = _sample_chi_with_mu_sigma(rng, mu, sigma)
     else:
@@ -253,12 +287,17 @@ def generate_structured_scout_dataset(
     validate_pair(posterior, selection, model.required_fields)
 
     truth = {name: float(value) for name, value in hp.items()}
-    if injection.mutation_id == "pairing.beta.linear_m1":
-        truth["beta_q_m1_slope"] = float(injection.strength)
-    elif injection.mutation_id == "chieff.mean.linear_q":
-        truth["chi_mu_q_slope"] = float(injection.strength)
-    elif injection.mutation_id == "chieff.width.linear_q":
-        truth["log_chi_sigma_q_slope"] = float(injection.strength)
+    injected_parameter = {
+        "pairing.beta.linear_m1": "beta_q_m1_slope",
+        "chieff.mean.linear_m1": "chi_mu_m1_slope",
+        "chieff.mean.linear_q": "chi_mu_q_slope",
+        "chieff.mean.linear_z": "chi_mu_z_slope",
+        "chieff.width.linear_m1": "log_chi_sigma_m1_slope",
+        "chieff.width.linear_q": "log_chi_sigma_q_slope",
+        "chieff.width.linear_z": "log_chi_sigma_z_slope",
+    }.get(injection.mutation_id)
+    if injected_parameter is not None:
+        truth[injected_parameter] = float(injection.strength)
 
     return SyntheticDataset(
         posterior=posterior,
