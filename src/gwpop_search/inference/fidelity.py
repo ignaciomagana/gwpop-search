@@ -452,6 +452,66 @@ def screening_score(
 
 
 @dataclass
+def fidelity_run_config_to_dict(config: FidelityRunConfig) -> dict[str, object]:
+    def evidence_payload(value: EvidenceCampaignConfig) -> dict[str, object]:
+        return {
+            "repeats": int(value.repeats),
+            "nested_sampling": asdict(value.nested_sampling),
+        }
+
+    return {
+        "f0_pe_samples_per_event": int(config.f0_pe_samples_per_event),
+        "f0_selected_per_campaign": int(config.f0_selected_per_campaign),
+        "f1_pe_samples_per_event": int(config.f1_pe_samples_per_event),
+        "f1_selected_per_campaign": int(config.f1_selected_per_campaign),
+        "hbi": {
+            "rate_treatment": config.hbi.rate_treatment.value,
+            "raw_selection_use_observing_time": bool(
+                config.hbi.raw_selection_use_observing_time
+            ),
+            "selection_chunk_size": config.hbi.selection_chunk_size,
+        },
+        "f1_nuts": asdict(config.f1_nuts),
+        "f2_nuts": asdict(config.f2_nuts),
+        "f4_nuts": asdict(config.f4_nuts),
+        "f3_evidence": evidence_payload(config.f3_evidence),
+        "f4_evidence": evidence_payload(config.f4_evidence),
+        "f1_criteria": asdict(config.f1_criteria),
+        "f2_criteria": asdict(config.f2_criteria),
+        "f3_criteria": asdict(config.f3_criteria),
+        "f4_criteria": asdict(config.f4_criteria),
+    }
+
+
+def fidelity_run_config_from_dict(payload: Mapping[str, object]) -> FidelityRunConfig:
+    def evidence_from(value) -> EvidenceCampaignConfig:
+        value = dict(value)
+        return EvidenceCampaignConfig(
+            repeats=int(value["repeats"]),
+            nested_sampling=NestedSamplingConfig(
+                **dict(value["nested_sampling"])
+            ),
+        )
+
+    return FidelityRunConfig(
+        f0_pe_samples_per_event=int(payload["f0_pe_samples_per_event"]),
+        f0_selected_per_campaign=int(payload["f0_selected_per_campaign"]),
+        f1_pe_samples_per_event=int(payload["f1_pe_samples_per_event"]),
+        f1_selected_per_campaign=int(payload["f1_selected_per_campaign"]),
+        hbi=HBIConfig(**dict(payload["hbi"])),
+        f1_nuts=NUTSConfig(**dict(payload["f1_nuts"])),
+        f2_nuts=NUTSConfig(**dict(payload["f2_nuts"])),
+        f4_nuts=NUTSConfig(**dict(payload["f4_nuts"])),
+        f3_evidence=evidence_from(payload["f3_evidence"]),
+        f4_evidence=evidence_from(payload["f4_evidence"]),
+        f1_criteria=NumericalCriteria(**dict(payload["f1_criteria"])),
+        f2_criteria=NumericalCriteria(**dict(payload["f2_criteria"])),
+        f3_criteria=NumericalCriteria(**dict(payload["f3_criteria"])),
+        f4_criteria=NumericalCriteria(**dict(payload["f4_criteria"])),
+    )
+
+
+@dataclass
 class DeterministicHBIEvaluator:
     posterior: object
     selection: object
