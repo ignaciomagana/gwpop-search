@@ -68,6 +68,7 @@ def test_exact_null_campaign_config_roundtrip(tmp_path):
     payload = json.loads(path.read_text())
     assert payload["format_version"] == "gwpop-search-exact-null-campaign-1.0"
     assert payload["stop_fidelity"] == "F3"
+    assert payload["truth_hyperparameters"]["mmin"] == config.truth_hyperparameters["mmin"]
 
 
 def test_null_data_and_search_seeds_are_independent_and_deterministic():
@@ -100,3 +101,12 @@ def test_exact_null_plan_pins_search_and_seed_policy():
     assert plan["null_config"]["n_nulls"] == 3
     assert len(plan["seed_policy"]) == 3
     assert plan["seed_policy"][0]["data_seed"] != plan["seed_policy"][0]["search_seed"]
+
+
+
+def test_exact_null_config_rejects_missing_truth_parameter():
+    config = ExactNullCampaignConfig()
+    truth = dict(config.truth_hyperparameters)
+    truth.pop("mmin")
+    with pytest.raises(ValueError, match="missing"):
+        ExactNullCampaignConfig(truth_hyperparameters=truth)
