@@ -1,5 +1,11 @@
 """Flexible residual scouts that propose, but never auto-promote, structure."""
 
+from .config import (
+    ScoutCampaignConfig,
+    default_scout_campaign_config,
+    load_scout_campaign_config,
+    save_scout_campaign_config,
+)
 from .conditional import (
     ConditionalHSGPConfig,
     ConditionalHSGPResidualModel,
@@ -25,6 +31,8 @@ from .hsgp import (
 from .proposals import (
     ResidualDependenceSummary,
     StructureProposal,
+    descendant_for_proposal,
+    descendant_payload_for_proposal,
     mutation_for_proposal,
     proposal_from_summary,
     weighted_linear_dependence,
@@ -32,6 +40,7 @@ from .proposals import (
 
 __all__ = [
     "ConditionalHSGPConfig",
+    "ScoutCampaignConfig",
     "ConditionalHSGPResidualModel",
     "ConditionalMomentSummaryConfig",
     "ConditionalScoutRunConfig",
@@ -41,12 +50,17 @@ __all__ = [
     "ScoutNumericalCriteria",
     "StructureProposal",
     "assess_scout_numerics",
+    "default_scout_campaign_config",
+    "descendant_for_proposal",
+    "descendant_payload_for_proposal",
     "basis_matrix",
     "coefficient_priors",
     "laplacian_frequencies",
+    "load_scout_campaign_config",
     "mutation_for_proposal",
     "proposal_from_summary",
     "run_conditional_hsgp_scout",
+    "save_scout_campaign_config",
     "squared_exponential_spectral_weights",
     "summarize_conditional_hsgp",
     "weighted_linear_dependence",
