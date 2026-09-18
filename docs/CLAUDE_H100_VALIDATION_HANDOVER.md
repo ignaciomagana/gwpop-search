@@ -288,9 +288,14 @@ that proposed the injected mutation unless `--run-index` is explicitly
 supplied. It writes the engineering review, exact parent/child specs, independent
 F3 evaluations, and `confirmation_summary.json`.
 
-Require both parent and child F3 evaluations to pass numerical diagnostics.
-Record the child/parent log Bayes factor. This validates the mechanism; it is
-not an astrophysical claim.
+The command refuses to run unless the full structured-scout campaign passed its
+frozen engineering gate. Require both parent and child F3 evaluations to pass
+numerical diagnostics and require
+`log BF(child/parent) > 0` for
+`engineering_confirmation_passed=true`.
+
+Record the child/parent log Bayes factor. This validates the injected discovery
+and review/refit mechanism; it is not an astrophysical claim.
 
 If the scout matrix or confirmation fails, do not use the affected scout surface
 for production interpretation.
