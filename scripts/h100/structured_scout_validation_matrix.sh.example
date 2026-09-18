@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Predeclared Phase-7 HSGP engineering-validation matrix.
+#
+# This script is intentionally deterministic and resumable. It validates the
+# four production scout surfaces against nulls and every reachable linear
+# descendant using eight independent catalogs per matrix member.
+#
+# Required:
+#   GWPOP_SCOUT_VALIDATION_ROOT=/persistent/path
+#
+# Optional overrides are deliberately not provided for seeds/strengths: changing
+# those values means defining a new reviewed validation matrix.
+
+set -euo pipefail
+
+: "${GWPOP_SCOUT_VALIDATION_ROOT:?Set GWPOP_SCOUT_VALIDATION_ROOT}"
+
+ROOT="${GWPOP_SCOUT_VALIDATION_ROOT}"
+CONFIG_DIR="${ROOT}/configs"
+mkdir -p "${CONFIG_DIR}"
+
+write_config_once() {
+    local target="$1"
+    local covariate="$2"
+    local output="$3"
+    if [[ ! -f "${output}" ]]; then
+        gwpop-search write-default-scout-config             --target "${target}"             --covariate "${covariate}"             --output "${output}"
+    fi
+}
+
+run_case() {
+    local label="$1"
+    local seed="$2"
+    local mutation="$3"
+    local strength="$4"
+    local config="$5"
+
+    echo "=== structured scout: ${label} ==="
+    gwpop-search structured-scout-campaign         --root "${ROOT}/${label}"         --n-runs 8         --root-seed "${seed}"         --mutation-id "${mutation}"         --strength "${strength}"         --scout-config "${config}"         --n-events 64         --pe-samples 256         --n-injections 20000
+
+    gwpop-search assess-structured-scout-campaign         --root "${ROOT}/${label}"
+}
+
+Q_M1="${CONFIG_DIR}/q_given_m1.json"
+CHI_M1="${CONFIG_DIR}/chieff_given_m1.json"
+CHI_Q="${CONFIG_DIR}/chieff_given_q.json"
+CHI_Z="${CONFIG_DIR}/chieff_given_z.json"
+
+write_config_once q m1_source "${Q_M1}"
+write_config_once chi_eff m1_source "${CHI_M1}"
+write_config_once chi_eff q "${CHI_Q}"
+write_config_once chi_eff z "${CHI_Z}"
+
+# q | m1: null + the one reachable pairing descendant.
+run_case q_m1_null            20261001 null                       0.0    "${Q_M1}"
+run_case q_m1_beta_linear     20261002 pairing.beta.linear_m1     0.225  "${Q_M1}"
+
+# chi_eff | m1: null + mean and width descendants.
+run_case chieff_m1_null       20261011 null                       0.0     "${CHI_M1}"
+run_case chieff_m1_mean       20261012 chieff.mean.linear_m1      0.015   "${CHI_M1}"
+run_case chieff_m1_width      20261013 chieff.width.linear_m1     0.0375  "${CHI_M1}"
+
+# chi_eff | q: null + mean and width descendants.
+run_case chieff_q_null        20261021 null                       0.0   "${CHI_Q}"
+run_case chieff_q_mean        20261022 chieff.mean.linear_q       0.45  "${CHI_Q}"
+run_case chieff_q_width       20261023 chieff.width.linear_q      1.5   "${CHI_Q}"
+
+# chi_eff | z: null + mean and width descendants.
+run_case chieff_z_null        20261031 null                       0.0   "${CHI_Z}"
+run_case chieff_z_mean        20261032 chieff.mean.linear_z       0.30  "${CHI_Z}"
+run_case chieff_z_width       20261033 chieff.width.linear_z      0.75  "${CHI_Z}"
+
+echo "=== HSGP validation matrix complete ==="
+echo "Review every campaign_summary.json against the frozen engineering gate."
