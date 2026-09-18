@@ -370,6 +370,26 @@ def _nuts_summary(
     }
 
 
+def summarize_nuts_fit(
+    result,
+    posterior,
+    selection,
+    population_model,
+    *,
+    hbi_config: HBIConfig,
+    criteria: NumericalCriteria,
+) -> dict[str, object]:
+    """Public validation wrapper for the standard full-data NUTS diagnostics."""
+    return _nuts_summary(
+        result,
+        posterior,
+        selection,
+        population_model,
+        hbi_config=hbi_config,
+        criteria=criteria,
+    )
+
+
 def _combine_evidence_samples(
     results: list[EvidenceResult],
 ) -> dict[str, np.ndarray]:
