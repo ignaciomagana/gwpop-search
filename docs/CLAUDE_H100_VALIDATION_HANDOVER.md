@@ -788,19 +788,51 @@ gwpop-search write-null-calibration-config \
 The production campaign must have `max_null_replays >= 100` and
 `max_f3_models >= number_of_graph_nodes`.
 
-Run/resume:
+Prepare the immutable exact-null plan once:
 
 ```bash
-gwpop-search run-null-search-calibration \
+export GWPOP_NULL_CONFIG="$GWPOP_FREEZE_DIR/exact_nulls.json"
+export GWPOP_NULL_ROOT="$GWPOP_WORK_DIR/validation/exact_nulls"
+
+gwpop-search prepare-null-search-calibration \
   --manifest "$GWPOP_MANIFEST" \
   --graph "$GWPOP_GRAPH" \
   --campaign "$GWPOP_CAMPAIGN" \
-  --null-config "$GWPOP_FREEZE_DIR/exact_nulls.json" \
-  --root "$GWPOP_WORK_DIR/validation/exact_nulls" \
+  --null-config "$GWPOP_NULL_CONFIG" \
+  --root "$GWPOP_NULL_ROOT" \
+  --base-dir "$GWPOP_DATA_BASE"
+```
+
+For the declared 100-null / two-H100 campaign, submit the array-safe template:
+
+```bash
+export GWPOP_ENV=/path/to/environment/activate
+sbatch scripts/slurm/exact_nulls_h100_array.sbatch.example
+```
+
+The template uses `--array=0-99%2`: each task owns exactly one deterministic
+null index and its own `searches/null_XXXXX/{state.sqlite,artifacts}` subtree.
+Do not submit duplicate tasks for the same index concurrently.
+
+After the array is complete, finalize/calibrate:
+
+```bash
+gwpop-search finalize-null-search-calibration \
+  --manifest "$GWPOP_MANIFEST" \
+  --graph "$GWPOP_GRAPH" \
+  --campaign "$GWPOP_CAMPAIGN" \
+  --null-config "$GWPOP_NULL_CONFIG" \
+  --root "$GWPOP_NULL_ROOT" \
   --base-dir "$GWPOP_DATA_BASE" \
   --work-dir "$GWPOP_WORK_DIR" \
   --observed-state-database <PRODUCTION_STATE_SQLITE>
 ```
+
+Finalization refuses to proceed until every declared `null_XXXXX.json` exists
+with its deterministic index/seed identity. The older
+`run-null-search-calibration` command remains a serial convenience wrapper
+over the same prepare/index/finalize primitives and is appropriate only for
+small/debug campaigns.
 
 Each null draws detected truths from the frozen selected injections with
 relative probability
@@ -851,7 +883,7 @@ The package must contain or reference:
 - LOO and explicit event-drop configs/summaries;
 - nearby-baseline plans/summaries;
 - null resampling preflight;
-- exact-null plan, every replay result/state, and calibrated summary;
+- exact-null plan, Slurm array job/task IDs, every replay result/state, missing-index check, and calibrated summary;
 - all Slurm logs/job IDs;
 - every failed/abandoned run with reason.
 
