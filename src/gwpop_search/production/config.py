@@ -57,9 +57,11 @@ class ProductionCampaignConfig:
     artifact_root: str
     state_database: str
     agents_enabled: bool = False
-    format_version: str = "gwpop-search-production-campaign-1.0"
+    format_version: str = "gwpop-search-production-campaign-1.1"
 
     def __post_init__(self) -> None:
+        if self.format_version != "gwpop-search-production-campaign-1.1":
+            raise ValueError("unsupported production campaign format")
         if not self.campaign_id:
             raise ValueError("campaign_id cannot be empty")
         for name in (
@@ -123,7 +125,7 @@ class ProductionCampaignConfig:
             format_version=str(
                 payload.get(
                     "format_version",
-                    "gwpop-search-production-campaign-1.0",
+                    "gwpop-search-production-campaign-1.1",
                 )
             ),
         )
