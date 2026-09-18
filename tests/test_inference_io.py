@@ -5,6 +5,7 @@ import json
 import numpy as np
 import pytest
 
+from gwpop_search import __version__
 from gwpop_search.data.fixtures import (
     make_toy_posterior_catalog,
     make_toy_selection_catalog,
@@ -103,6 +104,8 @@ def test_run_manifest_contains_scientific_and_numerical_configuration():
         config=config,
     )
 
+    assert manifest["code"]["package_version"] == __version__
+    assert "git_commit" in manifest["code"]
     assert manifest["pe_basis"] == posterior.basis.identity
     assert manifest["selection_basis"] == selection.basis.identity
     assert manifest["model"]["cosmology"]["H0"] == model.cosmology.H0
