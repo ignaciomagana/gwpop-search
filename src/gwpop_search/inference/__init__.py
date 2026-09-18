@@ -21,6 +21,13 @@ def generate_baseline_synthetic_dataset(*args, **kwargs):
     return _generate(*args, **kwargs)
 
 
+def run_synthetic_baseline_recovery(*args, **kwargs):
+    """Lazily import the Phase-3 synthetic NUTS recovery campaign."""
+    from .recovery import run_synthetic_baseline_recovery as _run
+
+    return _run(*args, **kwargs)
+
+
 __all__ = [
     "BASELINE_SYNTHETIC_PRIORS",
     "NUTSConfig",
@@ -33,6 +40,7 @@ __all__ = [
     "load_result",
     "run_nuts",
     "run_resumable_chains",
+    "run_synthetic_baseline_recovery",
     "save_result",
     "serialize_prior_map",
 ]
