@@ -72,8 +72,6 @@ class ComponentRegistry:
         components = model.mixture.options.get("components", 1)
         if model.mixture.family == "single" and components != 1:
             raise ValueError("single mixture family requires components=1")
-        if model.mixture.family == "finite" and components not in (2, 3):
-            raise ValueError("finite mixture supports exactly 2 or 3 components")
 
 
 DEFAULT_COMPONENT_REGISTRY = ComponentRegistry(
@@ -141,23 +139,9 @@ DEFAULT_COMPONENT_REGISTRY = ComponentRegistry(
             "redshift",
             "powerlaw",
             {"kappa_dependence": "constant"},
-            {"kappa_dependence": ("constant", "linear_m1")},
+            {"kappa_dependence": ("constant",)},
         ),
         FamilyDefinition("redshift", "madau_dickinson"),
         FamilyDefinition("mixture", "single", {"components": 1}, {"components": (1,)}),
-        FamilyDefinition(
-            "mixture",
-            "finite",
-            {"components": 2, "fraction_dependence": "constant"},
-            {
-                "components": (2, 3),
-                "fraction_dependence": (
-                    "constant",
-                    "linear_m1",
-                    "linear_q",
-                    "linear_z",
-                ),
-            },
-        ),
     )
 )
