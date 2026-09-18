@@ -168,8 +168,6 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
         ExactNullCampaignConfig,
         save_exact_null_campaign_config,
     )
-    from .search import Fidelity
-
     truth = (
         dict(DEFAULT_BASELINE_HYPERPARAMETERS)
         if args.truth_hyperparameters_json is None
@@ -189,10 +187,6 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
             n_injections=args.n_injections,
         ),
         truth_hyperparameters=truth,
-        stop_fidelity=Fidelity(args.stop_fidelity),
-        max_gpu_hours_per_null=args.max_gpu_hours_per_null,
-        max_f3_models=args.max_f3_models,
-        max_f4_models=args.max_f4_models,
     )
     save_exact_null_campaign_config(Path(args.output), config)
     print(
@@ -816,18 +810,6 @@ def build_parser() -> argparse.ArgumentParser:
     null_template.add_argument("--pe-samples", type=int, default=256)
     null_template.add_argument("--n-injections", type=int, default=20_000)
     null_template.add_argument("--truth-hyperparameters-json")
-    null_template.add_argument(
-        "--stop-fidelity",
-        choices=("F3", "F4"),
-        default="F4",
-    )
-    null_template.add_argument(
-        "--max-gpu-hours-per-null",
-        type=float,
-        default=250.0,
-    )
-    null_template.add_argument("--max-f3-models", type=int, default=20)
-    null_template.add_argument("--max-f4-models", type=int, default=8)
     null_template.add_argument("--output", required=True)
     null_template.set_defaults(func=_write_exact_null_config)
 
