@@ -81,6 +81,7 @@ def run_baseline_null_search_replay(
     execution_config: SearchExecutionConfig,
     fidelity_config: FidelityRunConfig,
     survey_config: SyntheticSurveyConfig | None = None,
+    truth_hyperparameters=None,
 ) -> SearchReplayResult:
     """Generate one baseline-null catalog and execute the same F0--F4 search."""
     declared_root = baseline_model_spec()
@@ -98,6 +99,7 @@ def run_baseline_null_search_replay(
     dataset = generate_baseline_synthetic_dataset(
         seed=int(seed),
         config=survey_config,
+        hyperparameters=truth_hyperparameters,
     )
 
     root = Path(root)
@@ -136,5 +138,6 @@ def run_baseline_null_search_replay(
             "n_evidence_edges": int(stats["n_evidence_edges"]),
             "execution": execution.to_dict(),
             "survey_config": asdict(survey_config),
+            "truth_hyperparameters": dict(dataset.truth_hyperparameters),
         },
     )
