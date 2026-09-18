@@ -654,6 +654,49 @@ def _freeze_production_campaign(args: argparse.Namespace) -> None:
     )
 
 
+def _complete_production_evidence(args: argparse.Namespace) -> None:
+    from .grammar import load_model_graph
+    from .production import (
+        complete_graph_evidence,
+        load_dataset_manifest,
+        load_frozen_dataset,
+        load_production_campaign,
+        validate_production_freeze,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    freeze = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    if not freeze["valid"]:
+        raise ValueError("production freeze validation failed")
+
+    posterior, selection = load_frozen_dataset(
+        manifest,
+        data_base_dir=Path(args.base_dir),
+    )
+    graph = load_model_graph(Path(args.graph))
+    work_dir = Path(args.work_dir)
+    state_database = work_dir / campaign.state_database
+    artifact_root = work_dir / campaign.artifact_root
+
+    summary = complete_graph_evidence(
+        graph,
+        posterior,
+        selection,
+        campaign,
+        dataset_identity=manifest.manifest_hash,
+        state_database=state_database,
+        artifact_root=artifact_root,
+    )
+    print(json.dumps(summary, sort_keys=True, indent=2))
+
+
 def _run_production_search(args: argparse.Namespace) -> None:
     from .production import (
         load_dataset_manifest,
@@ -981,6 +1024,21 @@ def build_parser() -> argparse.ArgumentParser:
     freeze_campaign.add_argument("--git-commit")
     freeze_campaign.add_argument("--output", required=True)
     freeze_campaign.set_defaults(func=_freeze_production_campaign)
+
+    complete_evidence = subparsers.add_parser(
+        "complete-production-evidence",
+        help="run/resume valid F3 evidence for every declared graph model",
+    )
+    complete_evidence.add_argument("--manifest", required=True)
+    complete_evidence.add_argument("--graph", required=True)
+    complete_evidence.add_argument("--campaign", required=True)
+    complete_evidence.add_argument("--base-dir", default=".")
+    complete_evidence.add_argument("--work-dir", default=".")
+    complete_evidence.add_argument(
+        "--ignore-current-commit",
+        action="store_true",
+    )
+    complete_evidence.set_defaults(func=_complete_production_evidence)
 
     run_production = subparsers.add_parser(
         "run-production-search",
