@@ -300,6 +300,7 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
         truth_hyperparameters=truth,
         data_mode=args.data_mode,
         min_resampling_ess=args.min_resampling_ess,
+        max_gpu_hours_per_null=args.max_gpu_hours_per_null,
     )
     save_exact_null_campaign_config(Path(args.output), config)
     print(
@@ -1104,6 +1105,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-resampling-ess",
         type=float,
         default=200.0,
+    )
+    null_template.add_argument(
+        "--max-gpu-hours-per-null",
+        type=float,
+        default=12.0,
     )
     null_template.add_argument("--output", required=True)
     null_template.set_defaults(func=_write_exact_null_config)
