@@ -1194,7 +1194,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="run/resume a multi-seed structured-injection HSGP validation campaign",
     )
     structured_scout.add_argument("--root", required=True)
-    structured_scout.add_argument("--n-runs", type=int, default=4)
+    structured_scout.add_argument("--n-runs", type=int, default=8)
     structured_scout.add_argument("--root-seed", type=int, default=20260918)
     structured_scout.add_argument(
         "--mutation-id",
