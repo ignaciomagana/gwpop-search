@@ -88,6 +88,7 @@ def _write_campaign(root, *, mutation_id="chieff.mean.linear_q"):
     )
     campaign_summary = {
         "expected_mutation_id": mutation_id,
+        "engineering_acceptance_passed": mutation_id != "null",
         "runs": [
             {
                 "run_index": 0,
@@ -180,3 +181,56 @@ def test_confirm_structured_descendant_rejects_ineligible_requested_run(
             FidelityRunConfig(),
             run_index=0,
         )
+
+
+
+def test_confirm_structured_descendant_requires_campaign_gate(
+    tmp_path,
+):
+    campaign_root = tmp_path / "campaign"
+    _write_campaign(campaign_root)
+    summary = json.loads((campaign_root / "campaign_summary.json").read_text())
+    summary["engineering_acceptance_passed"] = False
+    (campaign_root / "campaign_summary.json").write_text(json.dumps(summary))
+
+    with pytest.raises(ValueError, match="frozen engineering gate"):
+        confirm_structured_scout_descendant(
+            campaign_root,
+            tmp_path / "confirmation",
+            FidelityRunConfig(),
+        )
+
+
+def test_negative_child_bayes_factor_does_not_pass_confirmation(
+    monkeypatch,
+    tmp_path,
+):
+    campaign_root = tmp_path / "campaign"
+    _write_campaign(campaign_root)
+
+    def fake_compare(
+        root,
+        posterior,
+        selection,
+        fidelity_config,
+        **kwargs,
+    ):
+        return {
+            "both_numerically_valid": True,
+            "log_bayes_factor_child_over_parent": -0.5,
+            "parent_model_hash": kwargs["parent"].model_hash,
+            "child_model_hash": kwargs["child"].model_hash,
+        }
+
+    monkeypatch.setattr(
+        "gwpop_search.scouts.structured_confirmation."
+        "compare_scout_descendant_evidence_config",
+        fake_compare,
+    )
+
+    result = confirm_structured_scout_descendant(
+        campaign_root,
+        tmp_path / "confirmation",
+        FidelityRunConfig(),
+    )
+    assert not result["engineering_confirmation_passed"]
