@@ -24,8 +24,12 @@ inference = [
     "numpyro",
     "arviz",
 ]
-dev = [
+evidence = [
     "gwpop-search[inference]",
+    "jaxns>=2.6.9",
+]
+dev = [
+    "gwpop-search[evidence]",
     "pytest>=8",
     "pytest-cov>=5",
     "ruff",
