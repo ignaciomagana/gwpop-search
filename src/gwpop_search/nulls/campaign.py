@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import math
@@ -11,6 +11,7 @@ from pathlib import Path
 from gwpop_search.grammar import ModelGraph, baseline_model_spec
 from gwpop_search.inference.numpyro import _code_identity
 from gwpop_search.inference.synthetic import SyntheticSurveyConfig
+from gwpop_search.models import DEFAULT_BASELINE_HYPERPARAMETERS
 from gwpop_search.production import ProductionCampaignConfig
 from gwpop_search.production.freeze import model_graph_hash
 from gwpop_search.production.runner import (
@@ -36,6 +37,9 @@ class ExactNullCampaignConfig:
     n_nulls: int = 100
     root_seed: int = 20260918
     survey: SyntheticSurveyConfig = SyntheticSurveyConfig()
+    truth_hyperparameters: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_BASELINE_HYPERPARAMETERS)
+    )
     stop_fidelity: Fidelity = Fidelity.F4_PRODUCTION
     max_gpu_hours_per_null: float = 250.0
     max_f3_models: int = 20
@@ -47,6 +51,16 @@ class ExactNullCampaignConfig:
             raise ValueError("unsupported exact null campaign format")
         if self.n_nulls <= 0:
             raise ValueError("n_nulls must be positive")
+        truth = {
+            str(name): float(value)
+            for name, value in self.truth_hyperparameters.items()
+        }
+        missing = set(DEFAULT_BASELINE_HYPERPARAMETERS) - set(truth)
+        if missing:
+            raise ValueError(
+                f"null truth hyperparameters missing {sorted(missing)}"
+            )
+        object.__setattr__(self, "truth_hyperparameters", truth)
         object.__setattr__(self, "stop_fidelity", Fidelity(self.stop_fidelity))
         if self.stop_fidelity.rank < Fidelity.F3_EVIDENCE.rank:
             raise ValueError(
@@ -66,6 +80,7 @@ class ExactNullCampaignConfig:
             "n_nulls": int(self.n_nulls),
             "root_seed": int(self.root_seed),
             "survey": asdict(self.survey),
+            "truth_hyperparameters": dict(self.truth_hyperparameters),
             "stop_fidelity": self.stop_fidelity.value,
             "max_gpu_hours_per_null": float(self.max_gpu_hours_per_null),
             "max_f3_models": int(self.max_f3_models),
@@ -81,6 +96,12 @@ class ExactNullCampaignConfig:
             n_nulls=int(payload["n_nulls"]),
             root_seed=int(payload["root_seed"]),
             survey=SyntheticSurveyConfig(**dict(payload["survey"])),
+            truth_hyperparameters={
+                str(name): float(value)
+                for name, value in dict(
+                    payload["truth_hyperparameters"]
+                ).items()
+            },
             stop_fidelity=Fidelity(str(payload["stop_fidelity"])),
             max_gpu_hours_per_null=float(payload["max_gpu_hours_per_null"]),
             max_f3_models=int(payload["max_f3_models"]),
@@ -206,6 +227,7 @@ def run_exact_null_campaign(
             ),
             fidelity_config=campaign.fidelity,
             survey_config=config.survey,
+            truth_hyperparameters=config.truth_hyperparameters,
         )
 
     run_null_replay_campaign(
