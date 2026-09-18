@@ -22,6 +22,31 @@ from .synthetic import (
 )
 
 
+def reachable_mutation_ids(
+    scout_config: ScoutCampaignConfig,
+) -> tuple[str, ...]:
+    target = scout_config.hsgp.target
+    covariate = scout_config.hsgp.covariate
+    if target == "q" and covariate == "m1_source":
+        return ("pairing.beta.linear_m1",)
+    if target == "chi_eff" and covariate == "m1_source":
+        return (
+            "chieff.mean.linear_m1",
+            "chieff.width.linear_m1",
+        )
+    if target == "chi_eff" and covariate == "q":
+        return (
+            "chieff.mean.linear_q",
+            "chieff.width.linear_q",
+        )
+    if target == "chi_eff" and covariate == "z":
+        return (
+            "chieff.mean.linear_z",
+            "chieff.width.linear_z",
+        )
+    return ()
+
+
 def structured_scout_seed(
     root_seed: int,
     run_index: int,
@@ -142,6 +167,9 @@ def assess_structured_scout_campaign(root: str | Path) -> dict[str, object]:
     root = Path(root)
     plan = json.loads((root / "campaign_plan.json").read_text())
     expected = str(plan["injection"]["mutation_id"])
+    scout_config = ScoutCampaignConfig.from_dict(plan["scout_config"])
+    reachable = reachable_mutation_ids(scout_config)
+    expected_reachable = expected == "null" or expected in reachable
 
     rows = []
     for run in plan["runs"]:
@@ -196,13 +224,19 @@ def assess_structured_scout_campaign(root: str | Path) -> dict[str, object]:
     result = {
         "format_version": "gwpop-search-structured-scout-assessment-1.0",
         "expected_mutation_id": expected,
+        "reachable_mutation_ids": list(reachable),
+        "expected_mutation_reachable": bool(expected_reachable),
         "n_runs": len(rows),
         "n_complete": len(complete),
         "n_numerical_pass": len(numerical),
         "n_expected_proposed": int(n_expected),
         "expected_proposal_fraction_among_numerical_pass": (
             None
-            if not numerical or expected == "null"
+            if (
+                not numerical
+                or expected == "null"
+                or not expected_reachable
+            )
             else float(n_expected / len(numerical))
         ),
         "n_runs_with_any_proposal": int(n_any),
@@ -212,8 +246,12 @@ def assess_structured_scout_campaign(root: str | Path) -> dict[str, object]:
         "n_off_target_proposals": int(n_off_target),
         "runs": rows,
         "interpretation": (
-            "diagnostic_only; acceptance thresholds require a declared "
-            "multi-seed validation design"
+            "off_target_control"
+            if expected != "null" and not expected_reachable
+            else (
+                "diagnostic_only; acceptance thresholds require a declared "
+                "multi-seed validation design"
+            )
         ),
     }
     (root / "campaign_summary.json").write_text(
