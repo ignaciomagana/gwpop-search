@@ -610,3 +610,23 @@ def test_fingerprint_recovery_checkpoint_cli_parses():
     assert args.command == "fingerprint-recovery-checkpoint"
     assert args.run_dir == "runs/phase3/run_000"
     assert callable(args.func)
+
+
+
+def test_confirm_structured_scout_descendant_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "confirm-structured-scout-descendant",
+            "--campaign-root",
+            "runs/chieff_q_mean",
+            "--fidelity-config",
+            "fidelity.json",
+            "--output-root",
+            "runs/chieff_q_mean_confirmation",
+        ]
+    )
+    assert args.command == "confirm-structured-scout-descendant"
+    assert args.campaign_root == "runs/chieff_q_mean"
+    assert args.fidelity_config == "fidelity.json"
+    assert args.run_index is None
+    assert callable(args.func)
