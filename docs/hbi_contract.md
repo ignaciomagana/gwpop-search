@@ -1,251 +1,175 @@
 # Standardized HBI contract
 
-The purpose of this module is to make all population models share one hierarchical likelihood. Model code provides population densities; it does not reimplement event reweighting, selection effects, rate treatment, or diagnostics.
+This is the implemented contract for the common hierarchical likelihood used by every population model. Model code supplies a population density; it does not reimplement event reweighting, selection effects, rate treatment, or numerical diagnostics.
 
-## 1. Inputs
+## Inputs
 
-The HBI engine consumes:
+The HBI engine consumes a `PosteriorCatalog`, a `SelectionCatalog`, a population log-density callable, hyperparameters, and an `HBIConfig`.
 
-```
-PosteriorCatalog
-SelectionCatalog
-PopulationModel
-RunSpec
-```
-
-A `PopulationModel` supplies a normalized population density in the same declared coordinate basis as the data adapters:
+A population callable has the form
 
 ```python
-model.log_prob(theta, hyperparameters, context) -> log_density
+log_density(samples, hyperparameters) -> log p_pop
 ```
 
-A model may be factored internally, but the HBI engine only sees the final log density and support.
+and must return the complete normalized population density in the **declared PE/selection density basis**. Plain callables receive the independent basis coordinates. A model object may declare `required_fields` when an explicit coordinate transformation/Jacobian also needs advisory columns; that declaration must still include every independent basis coordinate.
 
-## 2. Event likelihood
+The HBI layer never reconstructs a PE prior, injection draw density, or coordinate Jacobian.
 
-For event i with posterior samples `theta_ij` drawn under reference density `pi_i`,
+## Event likelihood
 
-```
-w_ij(Lambda) = p_pop(theta_ij | Lambda) / pi_i(theta_ij)
-```
+For event `i`, with posterior samples `theta_ij` and adapter-supplied reference density `pi_i`,
 
-and
+```text
+log w_ij = log p_pop(theta_ij | Lambda) - log pi_i(theta_ij)
 
-```
-log ell_i(Lambda)
-  = logsumexp_j(log w_ij) - log n_i.
+log ell_i = logsumexp_j(log w_ij) - log n_i
 ```
 
-The implementation must expose the per-event contributions `log ell_i`; only their sum enters the catalog term.
+`evaluate_events` returns every `log ell_i` separately plus importance diagnostics. Genuine zero population support is represented by `-inf`; NaN and `+inf` population densities are hard errors.
 
-No implicit renormalization of individual events is allowed beyond the Monte Carlo average above.
+## Selection estimator
 
-## 3. PE effective sample size
+There are two deliberately distinct contracts.
 
-For each event,
+### raw_draw
 
-```
-ESS_i = (sum_j w_ij)^2 / sum_j w_ij^2.
-```
+For campaign `k`, with `N_draw,k` generated draws, observing time `T_k`, and retained/detected rows,
 
-The implementation should also expose at least:
-
-- `ESS_i / n_i`;
-- max normalized importance weight;
-- number/fraction of non-finite or zero-support weights;
-- optionally Pareto-k diagnostics later.
-
-A model evaluation may be numerically valid but scientifically rejected by the run-quality policy if event ESS is too low.
-
-## 4. Selection estimator
-
-The selection layer evaluates the model-dependent detectable fraction/exposure `alpha(Lambda)` from the `SelectionCatalog`.
-
-There are two allowed input modes.
-
-### 4.1 Raw-draw mode
-
-For campaign k with `N_draw,k` generated injections and retained/detected injections `theta_ak` drawn from `p_draw,k`,
-
-```
-alpha_k(Lambda)
-  ~= (1 / N_draw,k)
-     sum_{a in detected,k}
-       p_pop(theta_ak | Lambda) / p_draw,k(theta_ak)
+```text
+A_k(Lambda)
+  = T_k / N_draw,k
+    * sum_a p_pop(theta_ak | Lambda) / p_draw,k(theta_ak)
 ```
 
-up to the explicitly declared exposure convention.
+and the combined exposure is
 
-Campaign combination and observing-time factors are part of the `SelectionEstimatorSpec`; they are not guessed from array lengths.
-
-### 4.2 Estimator-ready mode
-
-An adapter may provide a validated denominator/normalization that already encodes the campaign mixture/exposure convention. In this mode the adapter supplies the complete semantics and the HBI estimator applies exactly the documented Monte Carlo sum.
-
-This is the intended path for a stable gwcat export if parity testing confirms it.
-
-The two modes must have distinct types or enum values. Accidentally applying an `N_draw` factor twice must be impossible through the public API.
-
-## 5. Selection ESS
-
-For selection importance weights `u_a`,
-
-```
-ESS_sel = (sum_a u_a)^2 / sum_a u_a^2.
+```text
+A(Lambda) = sum_k A_k(Lambda).
 ```
 
-For multiple campaigns, report both per-campaign and combined diagnostics.
+`HBIConfig.raw_selection_use_observing_time=False` explicitly changes the campaign factor to `1/N_draw,k`; it is never inferred from missing metadata.
 
-The engine should expose the quantities required for a Talbot/Golomb-style likelihood-variance diagnostic rather than only a scalar pass/fail flag.
+### estimator_ready
 
-## 6. Shape / rate-marginalized likelihood
+For an adapter product whose denominator already encodes the complete campaign/exposure convention (the current gwcat-v2 path),
 
-For N observed events, a common shape likelihood has the form
-
+```text
+A(Lambda)
+  = sum_a p_pop(theta_a | Lambda) / pdraw(theta_a).
 ```
+
+There is **no second `1/ndraw`, observing-time, or campaign-mixture factor**. Phase 1 separately pins this adapter convention.
+
+## Shape likelihood
+
+The implemented shape likelihood is
+
+```text
 log L_shape(Lambda)
   = sum_i log ell_i(Lambda)
-    - N log alpha(Lambda)
-    + C
+    - N log A(Lambda)
 ```
 
-for the declared rate prior/convention.
+up to model-independent constants. The rate treatment is explicit in `HBIConfig`; a model component cannot choose it.
 
-The exact constant and rate-prior assumptions are irrelevant for posterior sampling only when they are truly parameter independent, but they matter for evidence. Therefore the rate convention must be part of `RunSpec` and the evidence implementation must retain all model-dependent normalization terms.
+## Poisson point-process likelihood
 
-## 7. Poisson point-process likelihood
+For an explicit positive rate `R`,
 
-With explicit rate parameter R and exposure `mu(Lambda, R)`,
-
-```
-log L_PPP
-  = -mu(Lambda, R)
-    + sum_i log [ R * ell_i(Lambda) ]
-    + declared constants.
+```text
+log L_PPP(Lambda, R)
+  = sum_i log ell_i(Lambda)
+    + N log R
+    - R A(Lambda).
 ```
 
-The implementation should factor rate and shape cleanly enough to analytically marginalize R where justified.
+This keeps rate and shape separate so later inference code can sample or analytically marginalize the rate under a declared prior.
 
-No model component is allowed to decide its own rate convention.
+## Importance diagnostics
 
-## 8. Log-space numerics
+For retained importance weights `w_j`, the HBI layer reports
 
-Use:
-
-- `logsumexp` for all sample sums;
-- explicit `-inf` for genuine zero support;
-- no artificial density floors in denominators;
-- stable chunked accumulation for large selection sets.
-
-Chunking must be mathematically invariant: changing chunk size cannot change the result beyond floating-point tolerance.
-
-## 9. JAX design
-
-Production implementation target:
-
-- JAX arrays;
-- jitted population density evaluation;
-- vectorized event likelihood where shapes permit;
-- ragged events handled by offsets, padding/masking, or segmented reductions chosen from benchmarks;
-- selection injections evaluated in chunks to fit accelerator memory;
-- no Python callbacks inside the compiled inner likelihood.
-
-A simple NumPy reference implementation should remain in tests as an oracle.
-
-## 10. Diagnostics object
-
-Every likelihood evaluation/run summary should be able to produce structured diagnostics:
-
-```
-event_ess
-event_ess_fraction
-event_max_weight_fraction
-selection_ess
-selection_ess_by_campaign
-selection_weight_variance
-log_likelihood_variance_estimate
-n_invalid_weights
-support_failures
+```text
+ESS = (sum w)^2 / sum w^2
+ESS / N_draw
+max normalized weight
+number of zero-support weights
 ```
 
-Sampler diagnostics are separate:
+and a delta-method Monte-Carlo variance estimate for the log integral,
 
-```
-rhat
-bulk_ess
-tail_ess
-divergences
-tree_depth
-acceptance
+```text
+Var[log I_hat] ~= 1/ESS - 1/N_draw.
 ```
 
-Do not conflate importance-sampling ESS with MCMC ESS.
+For event PE integrals, `N_draw` is the number of posterior samples for that event. For raw selection campaigns it is the actual generated injection count, so undetected injections enter as exact zero weights without being stored.
 
-## 11. Model normalization
+For multiple raw campaigns, the combined log-exposure variance is propagated from independent campaign estimates using squared exposure fractions. The shape-likelihood diagnostic is
 
-Each population component must be normalized over its declared support or carry an explicit normalization term.
-
-Tests should include numerical integration of each component at randomly selected hyperparameters.
-
-Truncation bounds that vary with another coordinate (e.g. q support conditional on m1) must be part of the density, not an after-the-fact sample cut.
-
-## 12. Hyperpriors
-
-Hyperpriors belong to the model/run specification and are evaluated separately from the catalog likelihood:
-
-```
-log posterior
-  = log likelihood
-    + log hyperprior.
+```text
+Var[log L_shape]
+  ~= sum_i Var[log ell_i]
+     + N^2 Var[log A].
 ```
 
-Evidence calculations must use the exact declared hyperprior and its normalized density.
+This is a diagnostic quantity, not a hard acceptance threshold yet. Production thresholds are deferred to the validation phase.
 
-The model prior `p(M)` is a different object again: it weights model structures after/with their evidences.
+## NumPy reference backend
 
-## 13. Evidence contract
+`gwpop_search.hbi.numpy_backend` is the correctness oracle. It provides:
 
-A backend must return at least
+- `evaluate_events`;
+- `evaluate_selection`;
+- `evaluate_catalog_terms`;
+- `shape_log_likelihood`;
+- `poisson_log_likelihood`;
+- `catalog_log_likelihood`.
 
-```
-logZ
-logZ_uncertainty
-backend
-backend_version
-seed
-settings
-diagnostics
-```
+Selection population densities may be evaluated in chunks. Chunk size is required to be numerically invariant within floating-point tolerance.
 
-All production model comparisons use one declared evidence backend/config family unless an explicit cross-backend validation is being performed.
+## JAX backend
 
-NUTS posterior samples alone are not treated as an evidence estimate.
+`gwpop_search.hbi.jax_backend` provides differentiable builders for the inner production likelihood:
 
-## 14. Reproducibility
+- ragged PE events are padded/masked once outside the jitted function;
+- selection samples are padded into fixed-size chunks;
+- chunk accumulation uses `lax.scan` and log-space `logaddexp`;
+- population density evaluation remains inside JAX;
+- shape and Poisson likelihoods are differentiable with respect to hyperparameters.
 
-A production run identity includes:
+The JAX backend is an optional dependency and is exposed lazily through the public `hbi` package so the NumPy reference path does not require JAX.
 
-```
-model_hash
-dataset_id
-run_spec_hash
-code commit
-seed
-backend version
-```
+## Numerical rules
 
-Changing sampler settings should create a new run but not a new scientific model hash.
+- All Monte-Carlo sums use log-space `logsumexp`.
+- Denominator densities are validated by the data layer and are never numerically floored.
+- `-inf` population density is valid zero support.
+- NaN and `+inf` population density are errors in the NumPy reference path.
+- A selection estimator with no finite population support is an explicit failure, not a large negative finite likelihood.
+- Sample ordering and selection chunking must not change the likelihood beyond floating-point tolerance.
 
-## 15. Minimum tests before real data
+## Phase-2 validation
 
-Before loading GWTC-5, the engine must pass:
+The Phase-2 reference tests cover:
 
-1. one-dimensional analytic event-reweighting tests;
-2. analytic/trivial selection integrals;
-3. multi-campaign selection parity fixture;
-4. NumPy vs JAX likelihood equality;
-5. sample-order permutation invariance;
-6. chunk-size invariance;
-7. deliberate zero-reference-density failure;
-8. recovery of known hyperparameters from simulated catalogs;
-9. stable behavior as PE/selection sample counts increase.
+1. analytic constant event reweighting;
+2. raw multi-campaign selection normalization with `T_k/N_draw,k`;
+3. explicit no-time raw selection convention;
+4. estimator-ready selection without a second `ndraw` factor;
+5. shape and Poisson formulas;
+6. selection chunk-size invariance;
+7. PE/selection permutation invariance;
+8. NaN/+inf rejection and valid `-inf` population support;
+9. event/selection likelihood-variance diagnostics;
+10. toy hyperparameter recovery;
+11. NumPy/JAX full-likelihood equality;
+12. NumPy/JAX event and selection term equality;
+13. JAX chunk-size invariance;
+14. JAX differentiability with `jax.grad`.
+
+The local Phase-2 reference run on 2026-09-17 used Python 3.13.5 and reported `14 passed` in approximately six seconds.
+
+## Still outside Phase 2
+
+The HBI engine does **not** yet define astrophysical population families, hyperpriors, NumPyro sampling, evidence estimation, model priors, production ESS/variance veto thresholds, or GWTC-5 data manifests. Those belong to later phases and must not leak into this common likelihood layer.
