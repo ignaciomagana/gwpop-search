@@ -7,6 +7,7 @@ from gwpop_search.grammar import baseline_model_spec
 from gwpop_search.inference.synthetic import SyntheticSurveyConfig
 from gwpop_search.models import DEFAULT_BASELINE_HYPERPARAMETERS, GwcatChiEffBBHModel
 from gwpop_search.scouts import (
+    StructuredScoutAcceptanceCriteria,
     StructuredScoutInjection,
     assess_structured_scout_campaign,
     build_structured_scout_campaign_plan,
@@ -18,6 +19,10 @@ from gwpop_search.scouts.synthetic import (
     _sample_chi_with_mu_sigma,
     _sample_q_with_beta,
 )
+
+
+def _criteria(min_runs=1):
+    return StructuredScoutAcceptanceCriteria(min_runs=min_runs)
 
 
 def test_variable_beta_q_sampler_responds_to_injected_slope():
@@ -104,6 +109,7 @@ def test_structured_campaign_plan_has_deterministic_independent_seeds():
         scout_config=scout,
         base_spec=baseline_model_spec(),
         base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+        criteria=_criteria(),
     )
     plan_b = build_structured_scout_campaign_plan(
         n_runs=4,
@@ -120,6 +126,7 @@ def test_structured_campaign_plan_has_deterministic_independent_seeds():
         scout_config=scout,
         base_spec=baseline_model_spec(),
         base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+        criteria=_criteria(),
     )
     assert plan_a == plan_b
     pairs = {
@@ -158,6 +165,7 @@ def test_structured_campaign_assessment_separates_expected_and_offtarget(tmp_pat
         scout_config=scout,
         base_spec=baseline_model_spec(),
         base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+        criteria=_criteria(),
     )
     (tmp_path / "campaign_plan.json").write_text(json.dumps(plan))
 
@@ -199,6 +207,7 @@ def test_offtarget_control_is_marked_not_failed_recovery(tmp_path):
         scout_config=scout,
         base_spec=baseline_model_spec(),
         base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+        criteria=_criteria(),
     )
     (tmp_path / "campaign_plan.json").write_text(json.dumps(plan))
     _write_fake_summary(
@@ -265,3 +274,94 @@ def test_structured_injection_rejects_strength_outside_child_prior(
 ):
     with pytest.raises(ValueError, match="outside registered prior support"):
         StructuredScoutInjection(mutation_id, strength)
+
+
+
+def test_structured_scout_engineering_gate_passes_recovery_at_declared_threshold(
+    tmp_path,
+):
+    scout = default_scout_campaign_config("chi_eff", "q")
+    criteria = StructuredScoutAcceptanceCriteria(min_runs=8)
+    plan = build_structured_scout_campaign_plan(
+        n_runs=8,
+        root_seed=91,
+        injection=StructuredScoutInjection(
+            "chieff.mean.linear_q",
+            0.4,
+        ),
+        survey_config=SyntheticSurveyConfig(),
+        scout_config=scout,
+        base_spec=baseline_model_spec(),
+        base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+        criteria=criteria,
+    )
+    (tmp_path / "campaign_plan.json").write_text(json.dumps(plan))
+
+    for index in range(8):
+        mutations = (
+            ["chieff.mean.linear_q"]
+            if index < 6
+            else []
+        )
+        _write_fake_summary(
+            tmp_path / f"run_{index:03d}" / "scout",
+            passed=True,
+            mutations=mutations,
+        )
+
+    summary = assess_structured_scout_campaign(tmp_path)
+    assert summary["expected_proposal_fraction_among_numerical_pass"] == 0.75
+    assert summary["engineering_acceptance_passed"]
+    assert summary["interpretation"] == "engineering_gate_passed"
+
+
+def test_structured_scout_engineering_gate_fails_excess_null_proposals(
+    tmp_path,
+):
+    scout = default_scout_campaign_config("chi_eff", "q")
+    criteria = StructuredScoutAcceptanceCriteria(min_runs=8)
+    plan = build_structured_scout_campaign_plan(
+        n_runs=8,
+        root_seed=92,
+        injection=StructuredScoutInjection("null", 0.0),
+        survey_config=SyntheticSurveyConfig(),
+        scout_config=scout,
+        base_spec=baseline_model_spec(),
+        base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+        criteria=criteria,
+    )
+    (tmp_path / "campaign_plan.json").write_text(json.dumps(plan))
+
+    for index in range(8):
+        mutations = (
+            ["chieff.mean.linear_q"]
+            if index < 3
+            else []
+        )
+        _write_fake_summary(
+            tmp_path / f"run_{index:03d}" / "scout",
+            passed=True,
+            mutations=mutations,
+        )
+
+    summary = assess_structured_scout_campaign(tmp_path)
+    assert summary["any_proposal_fraction_among_numerical_pass"] == 0.375
+    assert not summary["engineering_acceptance_passed"]
+    assert summary["interpretation"] == "engineering_gate_failed"
+
+
+def test_structured_scout_plan_rejects_too_few_runs_for_frozen_gate():
+    with pytest.raises(ValueError, match="below the frozen scout acceptance"):
+        build_structured_scout_campaign_plan(
+            n_runs=4,
+            root_seed=93,
+            injection=StructuredScoutInjection(
+                "chieff.mean.linear_q",
+                0.4,
+            ),
+            survey_config=SyntheticSurveyConfig(),
+            scout_config=default_scout_campaign_config("chi_eff", "q"),
+            base_spec=baseline_model_spec(),
+            base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+            criteria=StructuredScoutAcceptanceCriteria(min_runs=8),
+        )
