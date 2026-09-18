@@ -1,4 +1,5 @@
 import numpy as np
+from types import SimpleNamespace
 
 from gwpop_search.grammar import baseline_model_spec
 from gwpop_search.inference.numpyro import NUTSConfig, NUTSResult
@@ -13,6 +14,21 @@ from gwpop_search.scouts import (
     run_conditional_hsgp_scout,
     summarize_conditional_hsgp,
 )
+
+
+def _identity_catalogs():
+    basis = SimpleNamespace(identity="test-basis")
+    posterior = SimpleNamespace(
+        basis=basis,
+        event_names=("A", "B"),
+        n_events=2,
+        n_samples_total=40,
+    )
+    selection = SimpleNamespace(
+        basis=basis,
+        n_selected=100,
+    )
+    return posterior, selection
 
 
 def _q_m1_model():
@@ -130,10 +146,11 @@ def test_hsgp_scout_numerical_failure_suppresses_raw_proposals(
         lambda *args, **kwargs: raw,
     )
 
+    posterior, selection = _identity_catalogs()
     result, summary = run_conditional_hsgp_scout(
         tmp_path,
-        object(),
-        object(),
+        posterior,
+        selection,
         base_spec=baseline_model_spec(),
         base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
         hsgp_config=model.config,
@@ -230,10 +247,11 @@ def test_hsgp_scout_numerical_pass_allows_proposals(
         lambda *args, **kwargs: raw,
     )
 
+    posterior, selection = _identity_catalogs()
     _, summary = run_conditional_hsgp_scout(
         tmp_path,
-        object(),
-        object(),
+        posterior,
+        selection,
         base_spec=baseline_model_spec(),
         base_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
         hsgp_config=model.config,
