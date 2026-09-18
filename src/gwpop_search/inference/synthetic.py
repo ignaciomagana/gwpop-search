@@ -130,8 +130,8 @@ def _sample_q(rng, m1_source, hp: Mapping[str, float], q_floor: float):
 
 def _sample_redshift(rng, n: int, hp, model, grid_size: int):
     z_grid = np.linspace(1e-7, model.zmax, int(grid_size))
-    shape = np.asarray(model.cosmology.dVc_dz(z_grid), dtype=float)
-    shape *= np.power(1.0 + z_grid, float(hp["kappa"]) - 1.0)
+    shape = np.array(model.cosmology.dVc_dz(z_grid), dtype=float, copy=True)
+    shape = shape * np.power(1.0 + z_grid, float(hp["kappa"]) - 1.0)
 
     dz = np.diff(z_grid)
     cdf = np.concatenate(
@@ -244,11 +244,9 @@ def _truncated_normal_draw(rng, mean, sigma, low, high, size):
     )
 
 
-def _detector_prior_bounds(model, config):
+def _detector_prior_bounds(model, config, hp):
     d_l_max = float(model.cosmology.dL_of_z(model.zmax))
-    population_mass_max = (
-        float(DEFAULT_BASELINE_HYPERPARAMETERS["mmax"]) * (1.0 + model.zmax)
-    )
+    population_mass_max = float(hp["mmax"]) * (1.0 + model.zmax)
     m1_max = max(config.m1_detector_max, 1.1 * population_mass_max)
     return {
         "m1_min": config.m1_detector_min,
@@ -272,11 +270,11 @@ def _uniform_detector_log_density(bounds):
     )
 
 
-def _make_posterior_catalog(rng, truths, model, config):
+def _make_posterior_catalog(rng, truths, model, config, hp):
     n_event = config.n_events
     n_sample = config.posterior_samples_per_event
     n_total = n_event * n_sample
-    bounds = _detector_prior_bounds(model, config)
+    bounds = _detector_prior_bounds(model, config, hp)
 
     samples = {
         "m1_detector": np.empty(n_total),
@@ -354,8 +352,8 @@ def _make_posterior_catalog(rng, truths, model, config):
     )
 
 
-def _make_selection_catalog(rng, model, config):
-    bounds = _detector_prior_bounds(model, config)
+def _make_selection_catalog(rng, model, config, hp):
+    bounds = _detector_prior_bounds(model, config, hp)
     n = config.n_injections
 
     samples = {
@@ -423,8 +421,8 @@ def generate_baseline_synthetic_dataset(
 
     rng = np.random.default_rng(int(seed))
     truths = _detected_population_truths(rng, hp, model, config)
-    posterior = _make_posterior_catalog(rng, truths, model, config)
-    selection = _make_selection_catalog(rng, model, config)
+    posterior = _make_posterior_catalog(rng, truths, model, config, hp)
+    selection = _make_selection_catalog(rng, model, config, hp)
     validate_pair(posterior, selection, model.required_fields)
 
     return SyntheticDataset(
