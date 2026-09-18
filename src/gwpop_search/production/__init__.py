@@ -1,5 +1,9 @@
 """Production freeze manifests and campaign configuration."""
 
+from .builders import (
+    build_dataset_manifest_from_canonical_files,
+    build_production_campaign,
+)
 from .config import (
     ProductionCampaignConfig,
     SearchBudget,
@@ -28,6 +32,8 @@ from .manifest import (
 
 __all__ = [
     "ArtifactEntry",
+    "build_dataset_manifest_from_canonical_files",
+    "build_production_campaign",
     "DatasetManifest",
     "ProductionCampaignConfig",
     "SearchBudget",
