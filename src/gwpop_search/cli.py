@@ -96,6 +96,21 @@ def _assess_synthetic_campaign(args: argparse.Namespace) -> None:
     )
 
 
+def _add_stress_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--stop-fidelity",
+        choices=("F2", "F3", "F4"),
+        default="F3",
+    )
+    parser.add_argument(
+        "--max-gpu-hours-per-scenario",
+        type=float,
+        default=250.0,
+    )
+    parser.add_argument("--max-f3-models", type=int, default=20)
+    parser.add_argument("--max-f4-models", type=int, default=8)
+
+
 def _add_common_recovery_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--n-events", type=int, default=48)
     parser.add_argument("--pe-samples", type=int, default=256)
@@ -144,6 +159,114 @@ def _read_json_mapping(path: str | Path) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ValueError(f"{path} must contain one JSON object")
     return payload
+
+
+def _stress_config_from_args(args: argparse.Namespace):
+    from .search import Fidelity
+    from .validation import EventStressConfig
+
+    return EventStressConfig(
+        stop_fidelity=Fidelity(args.stop_fidelity),
+        max_gpu_hours_per_scenario=args.max_gpu_hours_per_scenario,
+        max_f3_models=args.max_f3_models,
+        max_f4_models=args.max_f4_models,
+    )
+
+
+def _write_loo_stress_config(args: argparse.Namespace) -> None:
+    from .production import load_dataset_manifest
+    from .validation import (
+        EventStressSuiteSpec,
+        leave_one_out_scenarios,
+        save_event_stress_suite_spec,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    spec = EventStressSuiteSpec(
+        scenarios=leave_one_out_scenarios(manifest.event_names),
+        config=_stress_config_from_args(args),
+    )
+    save_event_stress_suite_spec(Path(args.output), spec)
+    print(
+        "leave-one-out stress config written: "
+        f"{args.output} scenarios={len(spec.scenarios)}"
+    )
+
+
+def _write_event_drop_stress_config(args: argparse.Namespace) -> None:
+    from .validation import (
+        EventDropScenario,
+        EventStressSuiteSpec,
+        save_event_stress_suite_spec,
+    )
+
+    spec = EventStressSuiteSpec(
+        scenarios=(
+            EventDropScenario(
+                scenario_id=args.scenario_id,
+                drop_events=tuple(args.drop_event),
+                category=args.category,
+                note=args.note or "",
+            ),
+        ),
+        config=_stress_config_from_args(args),
+    )
+    save_event_stress_suite_spec(Path(args.output), spec)
+    print(
+        "event-drop stress config written: "
+        f"{args.output} scenario={args.scenario_id}"
+    )
+
+
+def _run_event_stress_suite(args: argparse.Namespace) -> None:
+    from .grammar import load_model_graph
+    from .production import (
+        load_dataset_manifest,
+        load_frozen_dataset,
+        load_production_campaign,
+        validate_production_freeze,
+    )
+    from .validation import (
+        load_event_stress_suite_spec,
+        run_event_drop_stress_suite,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    freeze = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    if not freeze["valid"]:
+        raise ValueError("production freeze validation failed")
+
+    posterior, selection = load_frozen_dataset(
+        manifest,
+        data_base_dir=Path(args.base_dir),
+    )
+    graph = load_model_graph(Path(args.graph))
+    spec = load_event_stress_suite_spec(Path(args.stress_config))
+
+    reference = args.reference_state_database
+    if reference is None:
+        candidate = Path(args.work_dir) / campaign.state_database
+        reference = str(candidate) if candidate.is_file() else None
+
+    summary = run_event_drop_stress_suite(
+        Path(args.root),
+        posterior,
+        selection,
+        graph,
+        campaign,
+        base_dataset_identity=manifest.manifest_hash,
+        scenarios=spec.scenarios,
+        config=spec.config,
+        reference_state_database=reference,
+    )
+    print(json.dumps(summary, sort_keys=True, indent=2))
 
 
 def _run_structured_scout_campaign(args: argparse.Namespace) -> None:
@@ -471,6 +594,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--spec", required=True)
     validate_parser.set_defaults(func=_validate_model_spec)
+
+    loo_stress = subparsers.add_parser(
+        "write-loo-stress-config",
+        help="write explicit leave-one-out scenarios for every frozen event",
+    )
+    loo_stress.add_argument("--manifest", required=True)
+    loo_stress.add_argument("--output", required=True)
+    _add_stress_arguments(loo_stress)
+    loo_stress.set_defaults(func=_write_loo_stress_config)
+
+    drop_stress = subparsers.add_parser(
+        "write-event-drop-stress-config",
+        help="write one explicit custom/loud-event drop stress scenario",
+    )
+    drop_stress.add_argument("--scenario-id", required=True)
+    drop_stress.add_argument(
+        "--drop-event",
+        action="append",
+        required=True,
+    )
+    drop_stress.add_argument(
+        "--category",
+        choices=("leave_one_out", "loud_event", "custom"),
+        default="custom",
+    )
+    drop_stress.add_argument("--note")
+    drop_stress.add_argument("--output", required=True)
+    _add_stress_arguments(drop_stress)
+    drop_stress.set_defaults(func=_write_event_drop_stress_config)
+
+    run_stress = subparsers.add_parser(
+        "run-event-stress-suite",
+        help="run/resume event-drop searches under the frozen production stack",
+    )
+    run_stress.add_argument("--manifest", required=True)
+    run_stress.add_argument("--graph", required=True)
+    run_stress.add_argument("--campaign", required=True)
+    run_stress.add_argument("--stress-config", required=True)
+    run_stress.add_argument("--base-dir", default=".")
+    run_stress.add_argument("--work-dir", default=".")
+    run_stress.add_argument("--root", required=True)
+    run_stress.add_argument("--reference-state-database")
+    run_stress.add_argument("--ignore-current-commit", action="store_true")
+    run_stress.set_defaults(func=_run_event_stress_suite)
 
     structured_scout = subparsers.add_parser(
         "structured-scout-campaign",
