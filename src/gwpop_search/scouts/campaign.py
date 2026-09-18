@@ -93,6 +93,11 @@ def build_structured_scout_campaign_plan(
 ) -> dict[str, object]:
     if n_runs <= 0:
         raise ValueError("n_runs must be positive")
+    if n_runs < criteria.min_runs:
+        raise ValueError(
+            f"n_runs={n_runs} is below the frozen scout acceptance minimum "
+            f"{criteria.min_runs}"
+        )
     runs = []
     for index in range(int(n_runs)):
         runs.append(
