@@ -77,6 +77,7 @@ def build_evidence_campaign_manifest(
     hbi_config=None,
     model_hashes: Iterable[str] | None = None,
     dataset_label: str = "unspecified",
+    dataset_identity: str = "unspecified",
 ) -> dict[str, object]:
     selected = (
         [model.model_hash for model in graph.nodes]
@@ -108,16 +109,59 @@ def build_evidence_campaign_manifest(
     }
 
 
-def _write_model_spec_once(model_dir: Path, spec: ModelSpec) -> None:
-    path = model_dir / "model_spec.json"
-    payload = spec.to_dict()
+def _write_json_once(path: Path, payload: dict[str, object], *, what: str) -> None:
     if path.exists():
         if json.loads(path.read_text()) != payload:
             raise ValueError(
-                f"model spec mismatch in existing evidence directory {model_dir}"
+                f"{what} mismatch in existing evidence directory {path.parent}"
             )
     else:
         path.write_text(json.dumps(payload, sort_keys=True, indent=2))
+
+
+def _write_model_spec_once(model_dir: Path, spec: ModelSpec) -> None:
+    _write_json_once(
+        model_dir / "model_spec.json",
+        spec.to_dict(),
+        what="model spec",
+    )
+
+
+def build_model_evidence_manifest(
+    spec: ModelSpec,
+    posterior,
+    selection,
+    *,
+    root_seed: int,
+    config: EvidenceCampaignConfig,
+    hbi_config=None,
+    dataset_identity: str = "unspecified",
+) -> dict[str, object]:
+    """Pin inputs that can make cached evidence scientifically incompatible.
+
+    Production callers should pass the frozen dataset-manifest hash as the
+    dataset identity. Synthetic/development runs still pin basis, event list,
+    counts, selection mode, code, HBI config, and evidence config.
+    """
+    return {
+        "format_version": "gwpop-search-model-evidence-1.0",
+        "code": _code_identity(),
+        "model_hash": spec.model_hash,
+        "dataset_identity": str(dataset_identity),
+        "pe_basis": posterior.basis.identity,
+        "selection_basis": selection.basis.identity,
+        "event_names": list(posterior.event_names),
+        "n_events": int(posterior.n_events),
+        "n_pe_samples": int(posterior.n_samples_total),
+        "n_selected": int(selection.n_selected),
+        "selection_mode": selection.mode.value,
+        "root_seed": int(root_seed),
+        "campaign_config": {
+            "repeats": int(config.repeats),
+            "nested_sampling": asdict(config.nested_sampling),
+        },
+        "hbi_config": _hbi_config_dict(hbi_config),
+    }
 
 
 def run_model_evidence_repeats(
@@ -129,10 +173,24 @@ def run_model_evidence_repeats(
     root_seed: int,
     config: EvidenceCampaignConfig,
     hbi_config=None,
+    dataset_identity: str = "unspecified",
 ) -> tuple[list[EvidenceResult], dict[str, object]]:
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
     _write_model_spec_once(model_dir, spec)
+    _write_json_once(
+        model_dir / "manifest.json",
+        build_model_evidence_manifest(
+            spec,
+            posterior,
+            selection,
+            root_seed=root_seed,
+            config=config,
+            hbi_config=hbi_config,
+            dataset_identity=dataset_identity,
+        ),
+        what="evidence manifest",
+    )
 
     model = compile_model_spec(spec)
     priors = prior_specs_from_model_spec(spec)
@@ -228,6 +286,7 @@ def run_graph_evidence_campaign(
             root_seed=root_seed,
             config=config,
             hbi_config=hbi_config,
+            dataset_identity=dataset_identity,
         )
         evidences[model_hash] = ModelEvidence(
             model_hash=model_hash,
