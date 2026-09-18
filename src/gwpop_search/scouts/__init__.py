@@ -1,5 +1,6 @@
 """Flexible residual scouts that propose, but never auto-promote, structure."""
 
+from .baseline import export_scout_baseline_hyperparameters
 from .comparison import (
     compare_scout_descendant_evidence,
     scout_comparison_seed_root,
@@ -62,6 +63,7 @@ from .proposals import (
 
 __all__ = [
     "ConditionalHSGPConfig",
+    "export_scout_baseline_hyperparameters",
     "ReviewedScoutProposal",
     "ScoutCampaignConfig",
     "StructuredScoutInjection",
