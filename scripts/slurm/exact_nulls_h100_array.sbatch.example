@@ -1,0 +1,46 @@
+#!/bin/bash
+#SBATCH --job-name=gwpop-exact-null
+#SBATCH --output=slurm-null-%A_%a.out
+#SBATCH --error=slurm-null-%A_%a.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=12
+#SBATCH --gpus=1
+#SBATCH --time=12:30:00
+#SBATCH --array=0-99%2
+
+# Exact-search null replay array for the frozen production campaign.
+#
+# This script assumes the immutable campaign plan has already been created with
+# `gwpop-search prepare-null-search-calibration`.
+#
+# The default array matches the handover's 100-null campaign and limits
+# concurrency to two H100s. Change the array shape only before the reviewed
+# campaign is launched, and keep each index unique.
+
+set -euo pipefail
+
+: "${GWPOP_ENV:?Set GWPOP_ENV to the environment activation script}"
+: "${GWPOP_MANIFEST:?Set GWPOP_MANIFEST}"
+: "${GWPOP_GRAPH:?Set GWPOP_GRAPH}"
+: "${GWPOP_CAMPAIGN:?Set GWPOP_CAMPAIGN}"
+: "${GWPOP_NULL_CONFIG:?Set GWPOP_NULL_CONFIG}"
+: "${GWPOP_NULL_ROOT:?Set GWPOP_NULL_ROOT}"
+: "${GWPOP_DATA_BASE:?Set GWPOP_DATA_BASE}"
+
+source "${GWPOP_ENV}"
+
+export JAX_ENABLE_X64=true
+export GWPOP_GIT_COMMIT="${GWPOP_GIT_COMMIT:-$(git rev-parse HEAD)}"
+
+python - <<'PY'
+import jax
+devices = jax.devices()
+print("JAX devices:", devices)
+if not any(device.platform == "gpu" for device in devices):
+    raise SystemExit("No JAX GPU visible; refusing exact-null replay")
+if not bool(jax.config.x64_enabled):
+    raise SystemExit("JAX x64 is disabled; refusing exact-null replay")
+PY
+
+gwpop-search run-null-search-index   --manifest "${GWPOP_MANIFEST}"   --graph "${GWPOP_GRAPH}"   --campaign "${GWPOP_CAMPAIGN}"   --null-config "${GWPOP_NULL_CONFIG}"   --root "${GWPOP_NULL_ROOT}"   --base-dir "${GWPOP_DATA_BASE}"   --null-index "${SLURM_ARRAY_TASK_ID}"
