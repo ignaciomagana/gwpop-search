@@ -522,3 +522,23 @@ def test_canonicalize_gwcat_v2_cli_parses():
     assert args.spin_basis == "chieff"
     assert args.output_dir == "canonical"
     assert callable(args.func)
+
+
+
+def test_export_scout_baseline_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "export-scout-baseline",
+            "--evaluation",
+            "evaluation.json",
+            "--model",
+            "baseline.json",
+            "--output",
+            "baseline_hp.json",
+        ]
+    )
+    assert args.command == "export-scout-baseline"
+    assert args.evaluation == "evaluation.json"
+    assert args.model == "baseline.json"
+    assert args.output == "baseline_hp.json"
+    assert callable(args.func)
