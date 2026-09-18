@@ -877,8 +877,15 @@ known.
 The exact final handover commit/test count is recorded in `PROJECT_STATE.md`
 after the last code/documentation commit is green.
 
-Claude must use the final green handover revision, not an earlier checkpoint
-quoted in chat.
+Claude must use the final handover revision supplied by the human operator.
+If GitHub Actions capacity has been restored, verify the exact revision in CI.
+If it has not, run the full `pytest -q` suite on the H100 host before any
+scientific computation and record that result in the validation report.
+
+As of 2026-09-18 the repository's included GitHub Actions allowance is exhausted
+(3000/3000 minutes used). Workflow runs after the last real test checkpoint may
+show red immediately without starting pytest. Do not interpret those
+quota-blocked runs as software failures.
 
 At the time this execution contract was rewritten, the most recent completed
 integrated checkpoint was:
