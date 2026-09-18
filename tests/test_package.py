@@ -217,3 +217,73 @@ def test_freeze_production_campaign_cli_parses():
     assert args.model_prior_penalty == 0.7
     assert args.max_f4_models == 8
     assert callable(args.func)
+
+
+
+def test_hsgp_scout_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "run-hsgp-scout",
+            "--manifest",
+            "dataset_manifest.json",
+            "--base-model",
+            "baseline.json",
+            "--base-hyperparameters-json",
+            "baseline_hp.json",
+            "--scout-config",
+            "scout.json",
+            "--run-dir",
+            "runs/scout",
+            "--seed",
+            "17",
+        ]
+    )
+    assert args.command == "run-hsgp-scout"
+    assert args.seed == 17
+    assert callable(args.func)
+
+
+def test_structured_scout_campaign_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "structured-scout-campaign",
+            "--root",
+            "runs/structured",
+            "--mutation-id",
+            "chieff.mean.linear_q",
+            "--strength",
+            "0.4",
+            "--scout-config",
+            "scout.json",
+        ]
+    )
+    assert args.command == "structured-scout-campaign"
+    assert args.mutation_id == "chieff.mean.linear_q"
+    assert args.strength == 0.4
+    assert callable(args.func)
+
+
+def test_assess_structured_scout_campaign_cli_parses():
+    args = build_parser().parse_args(
+        ["assess-structured-scout-campaign", "--root", "runs/structured"]
+    )
+    assert args.command == "assess-structured-scout-campaign"
+    assert callable(args.func)
+
+
+def test_write_default_scout_config_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "write-default-scout-config",
+            "--target",
+            "chi_eff",
+            "--covariate",
+            "q",
+            "--output",
+            "scout.json",
+        ]
+    )
+    assert args.command == "write-default-scout-config"
+    assert args.target == "chi_eff"
+    assert args.covariate == "q"
+    assert callable(args.func)
