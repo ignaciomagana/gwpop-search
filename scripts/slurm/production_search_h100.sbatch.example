@@ -50,3 +50,14 @@ gwpop-search run-production-search \
   --campaign "${GWPOP_CAMPAIGN}" \
   --base-dir "${GWPOP_DATA_BASE}" \
   --work-dir "${GWPOP_WORK_DIR}"
+
+
+# Final scientific scoring requires valid evidence for every declared model.
+# This reuses all valid F3/F4 work from the adaptive search and fills only
+# missing F3 nodes. It fails rather than bypassing frozen model/GPU budgets.
+gwpop-search complete-production-evidence \
+  --manifest "${GWPOP_MANIFEST}" \
+  --graph "${GWPOP_GRAPH}" \
+  --campaign "${GWPOP_CAMPAIGN}" \
+  --base-dir "${GWPOP_DATA_BASE}" \
+  --work-dir "${GWPOP_WORK_DIR}"
