@@ -256,6 +256,37 @@ def _run_holdout_validation(args: argparse.Namespace) -> None:
     print(json.dumps(summary, sort_keys=True, indent=2))
 
 
+def _diagnose_frozen_selection_null(args: argparse.Namespace) -> None:
+    from .grammar import load_model_spec
+    from .nulls import frozen_selection_resampling_probabilities
+    from .production import load_dataset_manifest, load_frozen_dataset
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    _, selection = load_frozen_dataset(
+        manifest,
+        data_base_dir=Path(args.base_dir),
+    )
+    model = load_model_spec(Path(args.model))
+    hyperparameters = {
+        str(name): float(value)
+        for name, value in _read_json_mapping(
+            args.hyperparameters_json
+        ).items()
+    }
+    _, diagnostics = frozen_selection_resampling_probabilities(
+        selection,
+        model,
+        hyperparameters,
+    )
+    diagnostics = {
+        "format_version": "gwpop-search-frozen-selection-null-preflight-1.0",
+        "dataset_manifest_hash": manifest.manifest_hash,
+        "model_hash": model.model_hash,
+        **diagnostics,
+    }
+    print(json.dumps(diagnostics, sort_keys=True, indent=2))
+
+
 def _write_exact_null_config(args: argparse.Namespace) -> None:
     from .inference.synthetic import SyntheticSurveyConfig
     from .models import DEFAULT_BASELINE_HYPERPARAMETERS
@@ -1084,6 +1115,16 @@ def build_parser() -> argparse.ArgumentParser:
     holdout.add_argument("--base-dir", default=".")
     holdout.add_argument("--ignore-current-commit", action="store_true")
     holdout.set_defaults(func=_run_holdout_validation)
+
+    null_preflight = subparsers.add_parser(
+        "diagnose-frozen-selection-null",
+        help="preflight estimator-ready selection support for production nulls",
+    )
+    null_preflight.add_argument("--manifest", required=True)
+    null_preflight.add_argument("--base-dir", default=".")
+    null_preflight.add_argument("--model", required=True)
+    null_preflight.add_argument("--hyperparameters-json", required=True)
+    null_preflight.set_defaults(func=_diagnose_frozen_selection_null)
 
     null_template = subparsers.add_parser(
         "write-null-calibration-config",
