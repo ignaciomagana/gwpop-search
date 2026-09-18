@@ -34,6 +34,7 @@ from .synthetic import (
 )
 from .review import (
     ReviewedScoutProposal,
+    load_scout_review,
     review_scout_proposal,
     select_validated_scout_proposal,
     write_scout_review,
@@ -83,6 +84,7 @@ __all__ = [
     "coefficient_priors",
     "laplacian_frequencies",
     "load_scout_campaign_config",
+    "load_scout_review",
     "mutation_for_proposal",
     "proposal_from_summary",
     "generate_structured_scout_dataset",
