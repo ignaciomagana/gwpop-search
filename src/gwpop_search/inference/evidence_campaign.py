@@ -93,6 +93,7 @@ def build_evidence_campaign_manifest(
         "graph_root_hash": graph.root_hash,
         "selected_model_hashes": selected,
         "dataset_label": str(dataset_label),
+        "dataset_identity": str(dataset_identity),
         "pe_basis": posterior.basis.identity,
         "selection_basis": selection.basis.identity,
         "event_names": list(posterior.event_names),
@@ -249,6 +250,7 @@ def run_graph_evidence_campaign(
     hbi_config=None,
     model_hashes: Iterable[str] | None = None,
     dataset_label: str = "unspecified",
+    dataset_identity: str = "unspecified",
 ) -> dict[str, object]:
     """Run/resume repeated evidence for selected nodes and score the resulting graph."""
     root = Path(root)
@@ -264,6 +266,7 @@ def run_graph_evidence_campaign(
         hbi_config=hbi_config,
         model_hashes=model_hashes,
         dataset_label=dataset_label,
+        dataset_identity=dataset_identity,
     )
     manifest_path = root / "manifest.json"
     if manifest_path.exists():
