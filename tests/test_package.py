@@ -287,3 +287,62 @@ def test_write_default_scout_config_cli_parses():
     assert args.target == "chi_eff"
     assert args.covariate == "q"
     assert callable(args.func)
+
+
+
+def test_write_loo_stress_config_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "write-loo-stress-config",
+            "--manifest",
+            "dataset_manifest.json",
+            "--output",
+            "stress.json",
+        ]
+    )
+    assert args.command == "write-loo-stress-config"
+    assert args.stop_fidelity == "F3"
+    assert callable(args.func)
+
+
+def test_write_event_drop_stress_config_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "write-event-drop-stress-config",
+            "--scenario-id",
+            "drop_loud",
+            "--drop-event",
+            "GW_A",
+            "--drop-event",
+            "GW_B",
+            "--category",
+            "loud_event",
+            "--output",
+            "stress.json",
+        ]
+    )
+    assert args.command == "write-event-drop-stress-config"
+    assert args.drop_event == ["GW_A", "GW_B"]
+    assert args.category == "loud_event"
+    assert callable(args.func)
+
+
+def test_run_event_stress_suite_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "run-event-stress-suite",
+            "--manifest",
+            "dataset_manifest.json",
+            "--graph",
+            "model_graph.json",
+            "--campaign",
+            "campaign.json",
+            "--stress-config",
+            "stress.json",
+            "--root",
+            "runs/stress",
+        ]
+    )
+    assert args.command == "run-event-stress-suite"
+    assert args.root == "runs/stress"
+    assert callable(args.func)
