@@ -36,21 +36,20 @@ Package version remains `0.2.0` until the Phase-3 acceptance gate is closed.
 Authoritative fully green integrated checkpoint:
 
 ~~~text
-commit: e6d8aef86eac2b37478d1488a53f33d6d1ea5c7c
-tests:  272 passed
+commit: 6b05f764075900188e0edfa0016675a8a1a1b37f
+tests:  283 passed
 CI:     GitHub Actions / Python 3.12 / JAX x64
 ~~~
 
 Commits after that checkpoint are handover/documentation synchronization unless
 this file is updated again.
 
-**CI quota note (2026-09-18):** the repository's GitHub Actions included
-allowance is exhausted (3000/3000 minutes used). Push-triggered workflow runs
-after the 272-test checkpoint can terminate within seconds without starting
-pytest. Treat those quota-blocked red runs as infrastructure/billing failures,
-not test failures. The last actual integrated test result remains 272 passed at
-commit `e6d8aef86eac2b37478d1488a53f33d6d1ea5c7c` until Actions capacity is
-restored or the exact handover tree is independently tested elsewhere.
+**CI/public-repository note (2026-09-18):** the repository is now public.
+Standard GitHub-hosted Actions is running again. The previously quota-blocked
+documentation runs were re-tested after the visibility change; the exact
+software tree above completed the full suite with 283 passing tests. Any final
+handover/documentation synchronization commit must itself have a green Actions
+run before being handed to Claude.
 
 ## Project intent
 
@@ -323,7 +322,10 @@ Implemented:
   m1, q, and z;
 - exact injected-descendant confirmation on the same structured PE/selection
   catalog through the normal review/materialization path plus independent F3
-  parent/child evidence.
+  parent/child evidence;
+- injected confirmation is blocked unless the full structured campaign passed
+  its frozen engineering gate, both F3 evaluations are numerically valid, and
+  log BF(child/parent) > 0.
 
 Still outstanding before Phase 7 scientific acceptance:
 
@@ -355,6 +357,13 @@ Implemented:
 - null-selection preflight reporting resampling ESS and maximum discrete weight;
 - default resampling ESS floor of 200 and independent 12 GPU-hour per-null
   ceiling frozen in exact-null config v1.3;
+- exact-null plan v1.1 records the actual per-null cap separately from the
+  source production campaign budget;
+- array-safe exact-null lifecycle: immutable prepare step, deterministic
+  per-index replay, strict finalization, and a two-H100 Slurm array template;
+- finalization verifies complete index coverage, deterministic replay seeds,
+  production dataset identity, and complete observed evidence before
+  calibration;
 - exact null replay of the **same final scientific procedure** as observed data:
   adaptive F0--F4 search plus full valid evidence completion;
 - observed-state calibration blocked until the observed graph has complete valid
@@ -413,6 +422,8 @@ Implemented:
 - final-form Claude H100 validation/computation execution contract;
 - H100 validation report/artifact template;
 - deterministic HSGP validation shell matrix + Slurm wrapper;
+- array-safe exact-null Slurm template for the declared 100-null/two-H100
+  calibration campaign;
 - explicit dataset/campaign freeze builders.
 
 Operator flow:
