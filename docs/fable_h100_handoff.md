@@ -37,12 +37,26 @@ and:
 {"pe_policy": "reviewed GWTC-5 gwcat export"}
 ~~~
 
+If starting from reviewed gwcat-v2 exports, first canonicalize them without
+reconstructing PE or selection denominators:
+
+~~~bash
+gwpop-search canonicalize-gwcat-v2 \
+  --pe-export /reviewed/gwcat_pe.h5 \
+  --selection-export /reviewed/gwcat_selection.h5 \
+  --spin-basis chieff \
+  --output-dir /frozen/canonical
+~~~
+
+Review `/frozen/canonical/canonicalization_report.json` before creating a
+manifest.
+
 Freeze the canonical gwpop-search HDF5 pair:
 
 ~~~bash
 gwpop-search freeze-dataset \
-  --pe /frozen/data/pe.h5 \
-  --selection /frozen/data/selection.h5 \
+  --pe /frozen/canonical/pe.h5 \
+  --selection /frozen/canonical/selection.h5 \
   --dataset-id gwtc5-bbh-v1 \
   --event-selection-json event_selection.json \
   --waveform-policy-json waveform_policy.json \
@@ -277,3 +291,23 @@ modules, or filesystem layout. It refuses to proceed unless JAX sees a GPU.
 The initial production runner is deliberately single-process with durable
 SQLite state. Parallel/distributed workers can be added later without changing
 the scientific model/HBI/evidence contracts.
+
+
+## Validation after production
+
+This file describes the frozen production search itself. The authoritative
+end-to-end H100 validation contract is
+`docs/CLAUDE_H100_VALIDATION_HANDOVER.md`.
+
+That contract additionally requires:
+
+- Phase-3 manual H100 acceptance before real-data production;
+- the 88-run structured HSGP validation matrix;
+- explicit scout review plus independent child F3 confirmation;
+- K-fold held-out prediction;
+- leave-one-out and explicit event-drop stress;
+- nearby-baseline robustness;
+- production exact-null calibration using the frozen estimator-ready selection
+  and full adaptive-search + evidence-completion replay.
+
+Use `docs/H100_VALIDATION_REPORT_TEMPLATE.md` as the audit record.
