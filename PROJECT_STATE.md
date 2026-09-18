@@ -36,13 +36,14 @@ Package version remains `0.2.0` until the Phase-3 acceptance gate is closed.
 Authoritative fully green integrated checkpoint:
 
 ~~~text
-commit: 015e73301a0976c7f934c62dd7e313955bf45c27
-tests:  249 passed
+commit: e6d8aef86eac2b37478d1488a53f33d6d1ea5c7c
+tests:  272 passed
 CI:     GitHub Actions / Python 3.12 / JAX x64
 ~~~
 
-Commits after that checkpoint add only operator ergonomics/tests unless this
-file is updated again. Consult current Actions before quoting a newer total.
+Commits after that checkpoint are handover/documentation synchronization unless
+this file is updated again. Consult current Actions before quoting a newer
+total.
 
 ## Project intent
 
@@ -177,7 +178,7 @@ Implemented:
 - multi-seed recovery campaign controller;
 - numerical campaign gate;
 - ensemble recovery/coverage summaries;
-- checkpoint fingerprints;
+- checkpoint fingerprints plus `fingerprint-recovery-checkpoint` CLI;
 - H100 Slurm entry point.
 
 Recommended command:
@@ -307,7 +308,15 @@ Implemented:
 - grammar-matched structured synthetic injections for every supported linear
   scout dependence versus `m1_source`, `q`, and `z`;
 - injection strengths constrained to the registered child-prior support;
-- resumable multi-seed structured-scout campaigns and null/off-target controls.
+- resumable multi-seed structured-scout campaigns and null/off-target controls;
+- frozen eight-seed engineering gate (100% numerical pass, >=75% recovery of
+  reachable strong injections, <=25% off-target-run fraction, <=25% null
+  proposal fraction);
+- deterministic 88-run H100 matrix covering q(m1) and chi_eff dependence on
+  m1, q, and z;
+- exact injected-descendant confirmation on the same structured PE/selection
+  catalog through the normal review/materialization path plus independent F3
+  parent/child evidence.
 
 Still outstanding before Phase 7 scientific acceptance:
 
@@ -315,7 +324,8 @@ Still outstanding before Phase 7 scientific acceptance:
 - verify each production-enabled scout axis recovers declared strong injections
   without unacceptable null/off-target proposal behavior;
 - verify at least one accepted injected proposal is independently refit and
-  evidence-compared successfully.
+  evidence-compared successfully using
+  `confirm-structured-scout-descendant`.
 
 No scout result automatically changes the production graph.
 
@@ -332,6 +342,12 @@ Implemented:
 - within-dataset edge-Bayes-factor and mutation-support comparisons;
 - search-level null replay storage and finite-sample empirical tail calibration;
 - frozen exact-null campaign configuration with explicit null population truth;
+- production exact-null mode that resamples detected truths from the frozen
+  estimator-ready production selection with relative weight
+  `p_pop(theta|Lambda_null)/pdraw(theta)`;
+- null-selection preflight reporting resampling ESS and maximum discrete weight;
+- default resampling ESS floor of 200 and independent 12 GPU-hour per-null
+  ceiling frozen in exact-null config v1.3;
 - exact null replay of the **same final scientific procedure** as observed data:
   adaptive F0--F4 search plus full valid evidence completion;
 - observed-state calibration blocked until the observed graph has complete valid
@@ -387,7 +403,9 @@ Implemented:
 - invalid F3/F4 evaluations excluded from scientific evidence;
 - H100 Slurm template runs adaptive search then evidence completion;
 - production/Fable runbook;
-- living Claude H100 validation/computation handover;
+- final-form Claude H100 validation/computation execution contract;
+- H100 validation report/artifact template;
+- deterministic HSGP validation shell matrix + Slurm wrapper;
 - explicit dataset/campaign freeze builders.
 
 Operator flow:
@@ -413,7 +431,9 @@ See `docs/fable_h100_handoff.md`,
 
 ### Still scientifically deferred for actual GWTC-5 production
 
-- final spin coordinate space;
+These are human scientific/data freezes, not missing software:
+
+- final spin coordinate space (initial handover assumes reviewed `chieff`);
 - exact GWTC-5 BBH event cut;
 - waveform/sample-set policy;
 - exact O3/O4 selection products;
@@ -422,23 +442,28 @@ See `docs/fable_h100_handoff.md`,
 - search budget;
 - final frozen data manifest and hashes.
 
+Claude is explicitly instructed not to infer these from filenames or to change
+them after seeing validation/search results.
+
 Those choices must be made explicitly at the production freeze. The code must
 not infer them from filenames or release conventions.
 
 ## Immediate next actions
 
-1. Finish the final Claude H100 command/acceptance matrix and pin the handover
-   commit after CI is green.
-2. On H100, run and **manually review** the Phase-3 multi-seed recovery campaign;
-   Phase 3 remains open until that review is recorded.
-3. Run the declared Phase-7 structured-scout validation matrix for every scout
-   axis intended for production use.
-4. Canonicalize the reviewed real gwcat-v2 PE/selection pair and freeze the
-   actual GWTC-5 scientific/data policies, graph, numerical settings, model
-   prior, and budgets.
-5. Run adaptive production search + mandatory evidence completion.
-6. Run the selected holdout, event-drop, nearby-baseline, scout, and exact-null
-   validation campaigns; preserve failures and review the complete package.
+1. Require a final green Actions run after the handover/state documentation
+   synchronization.
+2. Hand the exact green revision and
+   `docs/CLAUDE_H100_VALIDATION_HANDOVER.md` to Claude on H100.
+3. Run and **manually review** Phase 3. Phase 3 remains open until that review
+   is explicitly recorded.
+4. Run the frozen 88-run Phase-7 scout matrix and one injected descendant F3
+   confirmation.
+5. Only after Phase 3 acceptance, canonicalize/freeze the reviewed real data and
+   human-approved GWTC-5 scientific policies.
+6. Run production adaptive search + mandatory evidence completion.
+7. Run real-data scouts, holdout, event-drop, nearby-baseline, and v1.3
+   frozen-selection exact-null validation; preserve every failed run and fill
+   `docs/H100_VALIDATION_REPORT_TEMPLATE.md`.
 
 ## Rule for future ChatGPT/Codex/Fable work
 
