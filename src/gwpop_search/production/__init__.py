@@ -4,6 +4,7 @@ from .builders import (
     build_dataset_manifest_from_canonical_files,
     build_production_campaign,
 )
+from .completion import complete_graph_evidence
 from .config import (
     ProductionCampaignConfig,
     SearchBudget,
@@ -41,6 +42,7 @@ __all__ = [
     "artifact_entry_from_file",
     "canonical_graph_json",
     "collect_best_available_evidence",
+    "complete_graph_evidence",
     "load_dataset_manifest",
     "load_frozen_dataset",
     "load_production_campaign",
