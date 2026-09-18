@@ -1,6 +1,6 @@
 # Project state / durable handoff
 
-Last updated: 2026-09-17
+Last updated: 2026-09-18
 
 ## HARD ACCEPTANCE GATE — DO NOT OVERRIDE
 
@@ -36,13 +36,13 @@ Package version remains `0.2.0` until the Phase-3 acceptance gate is closed.
 Authoritative fully green integrated checkpoint:
 
 ~~~text
-commit: 001025b4fb76e5dc8d7225316ccad21e7272d2b4
-tests:  143 passed
+commit: 015e73301a0976c7f934c62dd7e313955bf45c27
+tests:  249 passed
 CI:     GitHub Actions / Python 3.12 / JAX x64
 ~~~
 
-Commits after that checkpoint add the explicit freeze CLI and freeze-builder
-tests. Consult current Actions before quoting a newer test total.
+Commits after that checkpoint add only operator ergonomics/tests unless this
+file is updated again. Consult current Actions before quoting a newer total.
 
 ## Project intent
 
@@ -289,42 +289,63 @@ Concrete evaluator:
 
 All stages use the same population compiler and standardized HBI likelihood.
 
-## Phase 7 - flexible scouts (partially staged)
+## Phase 7 - flexible scouts (software staged; H100 acceptance pending)
 
 Implemented:
 
-- HSGP Laplacian basis utilities;
-- squared-exponential spectral weights;
-- tensor basis construction;
-- weighted residual-dependence summaries;
-- typed `StructureProposal`;
-- mapping only to already registered legal mutations;
-- injected-dependence and null-proposal tests.
+- conditionally normalized HSGP residual population models;
+- Laplacian/tensor basis and squared-exponential spectral weights;
+- full standardized-HBI/selection-aware NumPyro scout inference;
+- versioned scout configurations and strict resume manifests;
+- MCMC + PE/selection importance diagnostics and proposal firewall;
+- posterior conditional-moment summaries;
+- typed `StructureProposal` objects mapped only to registered legal mutations;
+- exact descendant `ModelSpec` compilation;
+- explicit human accept/reject review records;
+- provenance-pinned export of baseline hyperparameters from valid F3/F4 fits;
+- independent full-HBI F3 parent/child evidence comparison after acceptance;
+- grammar-matched structured synthetic injections for every supported linear
+  scout dependence versus `m1_source`, `q`, and `z`;
+- injection strengths constrained to the registered child-prior support;
+- resumable multi-seed structured-scout campaigns and null/off-target controls.
 
-Still outstanding before Phase 7 acceptance:
+Still outstanding before Phase 7 scientific acceptance:
 
-- full flexible residual HBI inference model;
-- end-to-end injected-correlation recovery with selection/PE;
-- production scout diagnostics and compiled-descendant comparison.
+- run and review the declared multi-seed H100 structured-injection/null matrix;
+- verify each production-enabled scout axis recovers declared strong injections
+  without unacceptable null/off-target proposal behavior;
+- verify at least one accepted injected proposal is independently refit and
+  evidence-compared successfully.
 
-## Phase 8 - search calibration/adversarial validation (partially staged)
+No scout result automatically changes the production graph.
+
+## Phase 8 - search calibration/adversarial validation (software staged; H100 acceptance pending)
 
 Implemented:
 
-- deterministic event folds;
-- held-out detected-event predictive score using `ell_i/A`;
-- search-level null replay storage/calibration;
-- finite-sample corrected empirical tail probabilities;
-- exact-search baseline-null bridge:
-  baseline population -> synthetic PE/selection -> same F0--F4 search ->
-  maximum encountered BF/posterior-odds statistic.
+- deterministic event folds and detected-event predictive density `ell_i/A`;
+- resumable K-fold holdout campaigns that refit each selected model on training
+  folds with strict full-data NUTS diagnostics before scoring held-out events;
+- canonical event subsetting/drop operations for ragged PE catalogs;
+- versioned leave-one-out/custom/loud-event stress suites;
+- deterministic reruns from explicit nearby baseline `ModelSpec` roots;
+- within-dataset edge-Bayes-factor and mutation-support comparisons;
+- search-level null replay storage and finite-sample empirical tail calibration;
+- frozen exact-null campaign configuration with explicit null population truth;
+- exact null replay of the **same final scientific procedure** as observed data:
+  adaptive F0--F4 search plus full valid evidence completion;
+- observed-state calibration blocked until the observed graph has complete valid
+  evidence;
+- structured-scout injection/null campaigns described in Phase 7.
 
-Still outstanding before Phase 8 acceptance:
+Still outstanding before Phase 8 scientific acceptance:
 
-- large null replay campaign;
-- structured-injection recovery-frequency campaign;
-- production leave-one-out/loud-event stress orchestration;
-- nearby-baseline production suite.
+- execute the predeclared H100 structured-injection/null campaigns;
+- execute the selected production holdout/event-drop/nearby-baseline suites;
+- execute the frozen exact-search null campaign and inspect the empirical
+  maximum-BF/posterior-odds distribution;
+- document the measured false-proposal/search-tail behavior rather than
+  substituting nominal single-comparison thresholds.
 
 ## Phase 9 - optional agents (staged safety boundary)
 
@@ -348,10 +369,12 @@ can be added later without changing the scientific core.
 
 Implemented:
 
+- audited/idempotent gwcat-v2 -> canonical PE/selection HDF5 conversion with
+  explicit spin-basis requirement and source/output SHA-256 report;
 - SHA-256 dataset manifest;
 - explicit event-selection and waveform-policy metadata;
 - PE/selection artifact checksum and size verification;
-- canonical model-graph hash/root;
+- canonical model-graph hash/root plus graph inspection/exact model extraction;
 - versioned production campaign schema (`1.1`);
 - full frozen F0--F4 numerical config;
 - frozen model prior, scheduler, seed policy, compute budget;
@@ -359,24 +382,33 @@ Implemented:
 - exact git-commit binding;
 - freeze validation CLI;
 - deterministic production runner;
-- H100 Slurm template;
-- Fable runbook;
+- explicit full-graph evidence-completion stage required before normalized model
+  probabilities;
+- invalid F3/F4 evaluations excluded from scientific evidence;
+- H100 Slurm template runs adaptive search then evidence completion;
+- production/Fable runbook;
+- living Claude H100 validation/computation handover;
 - explicit dataset/campaign freeze builders.
 
 Operator flow:
 
 ~~~bash
+gwpop-search canonicalize-gwcat-v2 ...
 gwpop-search freeze-dataset ...
 gwpop-search write-default-fidelity-config --output fidelity.json
 # review/edit fidelity.json
 gwpop-search freeze-production-campaign ...
 gwpop-search validate-production-freeze ...
 gwpop-search run-production-search ...
+gwpop-search complete-production-evidence ...
 ~~~
 
-The final command is also the resume command.
+Both search and evidence-completion commands are resumable. A campaign whose
+frozen `max_f3_models` is smaller than the graph node count is intentionally
+discovery-only and cannot produce a normalized posterior over the full graph.
 
-See `docs/fable_h100_handoff.md` and
+See `docs/fable_h100_handoff.md`,
+`docs/CLAUDE_H100_VALIDATION_HANDOVER.md`, and
 `scripts/slurm/production_search_h100.sbatch.example`.
 
 ### Still scientifically deferred for actual GWTC-5 production
@@ -395,13 +427,18 @@ not infer them from filenames or release conventions.
 
 ## Immediate next actions
 
-1. Run/accept the Phase-3 H100 multi-seed recovery campaign.
-2. Finish the Phase-7 full HSGP residual inference scout.
-3. Add production stress-suite orchestration for Phase 8.
-4. Once the real GWTC-5/gwcat PE+selection products and scientific policies are
-   frozen, create `dataset_manifest.json`, reviewed `fidelity.json`,
-   `model_graph.json`, and `campaign.json`.
-5. Validate and hand the exact campaign/commit to Fable.
+1. Finish the final Claude H100 command/acceptance matrix and pin the handover
+   commit after CI is green.
+2. On H100, run and **manually review** the Phase-3 multi-seed recovery campaign;
+   Phase 3 remains open until that review is recorded.
+3. Run the declared Phase-7 structured-scout validation matrix for every scout
+   axis intended for production use.
+4. Canonicalize the reviewed real gwcat-v2 PE/selection pair and freeze the
+   actual GWTC-5 scientific/data policies, graph, numerical settings, model
+   prior, and budgets.
+5. Run adaptive production search + mandatory evidence completion.
+6. Run the selected holdout, event-drop, nearby-baseline, scout, and exact-null
+   validation campaigns; preserve failures and review the complete package.
 
 ## Rule for future ChatGPT/Codex/Fable work
 
