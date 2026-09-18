@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from .enumerate import ModelGraph
+from .enumerate import ModelEdge, ModelGraph
 from .schema import ModelSpec
 
 
