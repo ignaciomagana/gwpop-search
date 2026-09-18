@@ -1070,8 +1070,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(
             "null",
             "pairing.beta.linear_m1",
+            "chieff.mean.linear_m1",
             "chieff.mean.linear_q",
+            "chieff.mean.linear_z",
+            "chieff.width.linear_m1",
             "chieff.width.linear_q",
+            "chieff.width.linear_z",
         ),
         required=True,
     )
