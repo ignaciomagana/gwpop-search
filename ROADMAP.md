@@ -71,7 +71,7 @@ Acceptance:
 
 ## Phase 3 — baseline population components
 
-**Goal:** reproduce a small conventional BBH analysis without search.
+**Goal:** validate one conventional BBH model end-to-end before search.
 
 Implement normalized components for:
 
@@ -80,8 +80,7 @@ Implement normalized components for:
 - power-law q;
 - simple redshift evolution;
 - truncated chi_eff Gaussian;
-- simple chi_p or component-spin option;
-- mixture composition.
+- one declared baseline spin space (Phase 3 uses gwcat-v2 `chieff`);\n- mixture composition as required by the baseline.\n\nAdditional projected/component-spin alternatives belong to later model-family\nexpansion once this baseline is validated.
 
 Inference backend:
 
@@ -89,13 +88,7 @@ Inference backend:
 - posterior serialization;
 - restartable Slurm/H100 configuration.
 
-Acceptance:
-
-- simulation recovery;
-- baseline run stable under seeds;
-- selected reference baseline approximately reproduces the declared comparison analysis when the same data/cuts/priors are used.
-
-## Phase 4 — declarative model grammar
+Acceptance:\n\n- multi-chain synthetic recovery;\n- baseline recovery stable across multiple data/sampler seeds;\n- checkpoint/resume verified on an interrupted campaign;\n- no unresolved MCMC or HBI importance-sampling pathologies.\n\nThe real-data reference-baseline parity check is deferred to Phase 10 because\nproduction data provenance, event cuts, waveform policy, priors, and selection\ncampaigns are intentionally frozen together at that stage.\n\n## Phase 4 — declarative model grammar
 
 **Goal:** candidate models are data, not handwritten run scripts.
 
