@@ -77,6 +77,80 @@ class EventStressConfig:
             raise ValueError("stress model limits must be positive")
 
 
+@dataclass(frozen=True)
+class EventStressSuiteSpec:
+    scenarios: tuple[EventDropScenario, ...]
+    config: EventStressConfig
+    format_version: str = "gwpop-search-event-stress-suite-1.0"
+
+    def __post_init__(self) -> None:
+        if self.format_version != "gwpop-search-event-stress-suite-1.0":
+            raise ValueError("unsupported event stress suite format")
+        scenarios = tuple(self.scenarios)
+        if not scenarios:
+            raise ValueError("event stress suite requires at least one scenario")
+        ids = [item.scenario_id for item in scenarios]
+        if len(set(ids)) != len(ids):
+            raise ValueError("event stress scenario IDs must be unique")
+        object.__setattr__(self, "scenarios", scenarios)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "format_version": self.format_version,
+            "config": {
+                "stop_fidelity": self.config.stop_fidelity.value,
+                "max_gpu_hours_per_scenario": (
+                    self.config.max_gpu_hours_per_scenario
+                ),
+                "max_f3_models": self.config.max_f3_models,
+                "max_f4_models": self.config.max_f4_models,
+            },
+            "scenarios": [asdict(item) for item in self.scenarios],
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, object],
+    ) -> "EventStressSuiteSpec":
+        config = dict(payload["config"])
+        return cls(
+            scenarios=tuple(
+                EventDropScenario(**dict(item))
+                for item in payload["scenarios"]
+            ),
+            config=EventStressConfig(
+                stop_fidelity=Fidelity(str(config["stop_fidelity"])),
+                max_gpu_hours_per_scenario=float(
+                    config["max_gpu_hours_per_scenario"]
+                ),
+                max_f3_models=int(config["max_f3_models"]),
+                max_f4_models=int(config["max_f4_models"]),
+            ),
+            format_version=str(
+                payload.get(
+                    "format_version",
+                    "gwpop-search-event-stress-suite-1.0",
+                )
+            ),
+        )
+
+
+def save_event_stress_suite_spec(
+    path: str | Path,
+    spec: EventStressSuiteSpec,
+) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(spec.to_dict(), sort_keys=True, indent=2))
+
+
+def load_event_stress_suite_spec(
+    path: str | Path,
+) -> EventStressSuiteSpec:
+    return EventStressSuiteSpec.from_dict(json.loads(Path(path).read_text()))
+
+
 def leave_one_out_scenarios(
     event_names: Iterable[str],
 ) -> tuple[EventDropScenario, ...]:
