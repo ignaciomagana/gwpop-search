@@ -137,9 +137,22 @@ campaign directory. Do not proceed to production if this stage is not accepted.
 
 ### Stage C — real-data canonicalization and freeze
 
-Use the reviewed gwcat-v2 PE and selection exports. Convert them to the
-canonical `PosteriorCatalog`/`SelectionCatalog` HDF5 pair using the
-first-class CLI documented below once finalized.
+Use the reviewed gwcat-v2 PE and selection exports. Canonicalize them with an
+explicit density/spin space; for the initial `chieff` analysis:
+
+```bash
+gwpop-search canonicalize-gwcat-v2 \
+  --pe-export "$GWPOP_GWCAT_PE" \
+  --selection-export "$GWPOP_GWCAT_SELECTION" \
+  --spin-basis chieff \
+  --output-dir "$GWPOP_CANONICAL_DATA"
+```
+
+Read `$GWPOP_CANONICAL_DATA/canonicalization_report.json`. Verify the source
+hashes correspond to the reviewed gwcat products, the event list is the
+intended list, `selection_mode` is `estimator_ready`, the basis identity is
+the expected `chieff` basis, and the reported PE/selection counts are
+plausible before freezing anything.
 
 Then freeze:
 
@@ -220,11 +233,11 @@ Stop and report rather than improvising if any of the following occurs:
 
 These items are being closed by ChatGPT before handover:
 
-- [ ] first-class gwcat-v2 -> canonical HDF5 conversion CLI;
-- [ ] canonicalization validation/report artifact;
+- [x] first-class gwcat-v2 -> canonical HDF5 conversion CLI;
+- [x] canonicalization validation/report artifact;
 - [ ] refresh `PROJECT_STATE.md` for the current Phase-7/8/10 software;
-- [ ] ensure exact-null full-procedure tests are green after the v1.1 contract;
-- [ ] ensure scout review/refit tests are green;
+- [x] ensure exact-null full-procedure tests are green after the v1.1 contract;
+- [x] ensure scout review/refit tests are green;
 - [ ] add final reviewed H100 validation command matrix;
 - [ ] add final artifact checklist and decision template;
 - [ ] pin final handover commit and CI test count.
