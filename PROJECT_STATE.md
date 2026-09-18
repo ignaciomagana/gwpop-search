@@ -2,62 +2,82 @@
 
 Last updated: 2026-09-17
 
-## Current phase
+## Scientific acceptance state
 
-**Phase 3 - IN PROGRESS.**
+**Phase 3 remains the open scientific gate.**
 
-Phases 0-2 are complete. Phase 3 now has a conventional normalized BBH model,
-an explicit source-to-gwcat density transform, a working NumPyro/JAX inference
-path, a closed synthetic PE+selection dataset, checkpoint/resume, CI, and an
-H100/Slurm recovery entry point.
+Phases 0--2 are accepted. The software for Phases 4--10 has now been staged,
+integrated, and extensively CI-tested so development can continue without
+waiting for H100 access, but those later phases are **not declared
+scientifically accepted out of order**.
 
-The remaining Phase-3 gate is a statistically meaningful multi-chain,
-multi-seed synthetic recovery campaign on the H100. **Do not begin Phase 4
-(model grammar/search) until that recovery gate passes.**
+The remaining Phase-3 requirement is a statistically meaningful multi-chain,
+multi-seed synthetic recovery campaign on H100, followed by review of numerical
+diagnostics, ensemble recovery, and at least one checkpoint/resume integrity
+test.
 
 No production GWTC-5 population inference has been run from this repository.
 
-Package version remains `0.2.0` until Phase 3 is complete.
+Package version remains `0.2.0` until the Phase-3 acceptance gate is closed.
+
+## Current software checkpoint
+
+Authoritative fully green integrated checkpoint:
+
+~~~text
+commit: 001025b4fb76e5dc8d7225316ccad21e7272d2b4
+tests:  143 passed
+CI:     GitHub Actions / Python 3.12 / JAX x64
+~~~
+
+Commits after that checkpoint add the explicit freeze CLI and freeze-builder
+tests. Consult current Actions before quoting a newer test total.
 
 ## Project intent
 
-Build `gwpop-search`: a standardized HBI package plus model-graph search
-system for GW population structure, initially GWTC-5 BBHs. The eventual
-production workflow will be handed to Fable on H100-class compute.
+Build `gwpop-search`: a standardized HBI package plus deterministic
+model-graph search system for GW population structure, initially GWTC-5 BBHs.
+An optional agent/swarm layer sits above the deterministic core. Production
+inference will be handed to Fable on H100-class compute after the scientific
+and data freezes are accepted.
 
 ## Frozen architectural decisions
 
-- The repo owns its own HBI implementation.
-- Search/model-selection logic sits above HBI and cannot modify the production
-  likelihood during a search.
-- Population models will be declarative serialized specifications.
-- Model-graph edges represent exactly one controlled mutation.
-- Final scientific model scoring uses evidence + explicit model priors, not the
-  largest raw Bayes factor found by a broad search.
-- Search-level claims are ultimately calibrated by replaying the complete
-  search on null catalogs.
-- Flexible spline/GP/HSGP models are scouts for interpretable descendants.
-- Deterministic finite model search comes before agents.
-- Production data provenance/manifests remain intentionally deferred until the
-  internal data/HBI/model/search interfaces are validated.
-- PE priors and selection draw/reference densities are adapter inputs. HBI
-  never reconstructs them from filenames or release assumptions.
+- The repository owns one standardized HBI implementation.
+- Search/model-selection logic cannot modify the production likelihood.
+- Population models are declarative serialized specifications.
+- The model hash includes the scientific structure **and hyperpriors**.
+- Model-graph edges represent exactly one controlled structural mutation.
+- PE priors and selection draw/reference densities are explicit adapter inputs.
 - PE and selection products carry an exact `CoordinateBasis` identity.
-- Selection inputs have distinct `raw_draw` and `estimator_ready` semantics.
+- Selection inputs retain distinct `raw_draw` and `estimator_ready`
+  semantics.
 - Generic inference code never floors a zero denominator density.
-- A population model returns the complete normalized density in the declared
-  data basis and owns every coordinate transform/Jacobian needed to get there.
-- Phase-3 baseline inference uses the gwcat-v2 `chieff` space. The final
-  production spin space remains open.
-- Phase-4 search remains blocked until Phase-3 synthetic recovery is accepted.
+- A population model owns every transform/Jacobian required to return the
+  complete normalized density in the declared data basis.
+- Phase-3 baseline inference uses the gwcat-v2 `chieff` space.
+- F1/F2 scores are **compute-allocation statistics only** and are never reported
+  as Bayes factors.
+- Scientific model comparison uses evidence plus an explicit model prior.
+- Posterior model probabilities over a declared graph are written only when
+  every graph node has proper F3/F4 evidence.
+- Search-level null calibration replays the same frozen search procedure; it is
+  not a replacement for structural model priors.
+- Flexible HSGP/spline models are scouts for interpretable parametric
+  descendants, not automatic discoveries.
+- Agents may propose typed tasks but cannot inject code, arbitrary mutations, or
+  likelihood changes.
+- The deterministic pipeline remains valid with agents disabled.
+- Production data and campaign freezes are content/hash addressed and pinned to
+  an exact git revision.
 
 ## gwcat read-only reference
 
-```text
+~~~text
 repository: ignaciomagana/gwcat
 branch: master
 commit: 8f9e2f12b499a6b2bf16ed938f66d020b12c44c2
-```
+~~~
 
 Do not modify gwcat as part of this project.
 
@@ -81,17 +101,18 @@ Implemented:
 - `src/gwpop_search/data/pair.py`
 - `src/gwpop_search/data/fixtures.py`
 - `src/gwpop_search/data/adapters/gwcat_v2.py`
+- `src/gwpop_search/data/thinning.py`
 
-The gwcat-v2 basis constructor is now also exposed as
-`gwcat_v2_basis_for_spin` so synthetic and real adapter products literally use
-the same basis definition.
+The gwcat-v2 basis constructor is exposed as `gwcat_v2_basis_for_spin`.
 
-Historical Phase-1 local reference run:
+Screening reductions are explicit:
 
-```text
-Python 3.13.5
-16 passed
-```
+- PE samples are randomly thinned per event;
+- selection rows are stratified by campaign;
+- selection thinning carries an inclusion-probability/Horvitz--Thompson
+  correction by shifting the stored draw density by `log(f)`.
+
+Reduced catalogs are for F0/F1 screening only.
 
 ## Phase 2 - standardized HBI
 
@@ -99,238 +120,284 @@ Implemented:
 
 - NumPy reference event importance reweighting;
 - raw multi-campaign selection;
-- estimator-ready gwcat selection path;
+- estimator-ready gwcat selection;
 - rate-marginalized shape likelihood;
 - explicit-rate Poisson point-process likelihood;
-- event/selection importance ESS and maximum-weight diagnostics;
-- likelihood Monte-Carlo variance diagnostics;
+- differentiable JAX likelihood with NumPy parity;
 - selection chunking;
-- differentiable JAX likelihood with NumPy parity.
+- event/selection ESS;
+- maximum normalized importance weights;
+- likelihood Monte-Carlo variance diagnostics.
 
 Pinned raw campaign convention:
 
-```text
+~~~text
 A_k = T_k / N_draw,k * sum_detected p_pop / p_draw,k
 A   = sum_k A_k
-```
+~~~
 
 Pinned estimator-ready convention:
 
-```text
+~~~text
 A = sum p_pop / pdraw
-```
+~~~
 
 with no second `ndraw`, observing-time, or campaign-mixture factor.
 
 Likelihoods:
 
-```text
+~~~text
 shape:   log L = sum_i log ell_i - N log A
 Poisson: log L = sum_i log ell_i + N log R - R A
-```
+~~~
 
-## Phase 3 implementation landed
+## Phase 3 - implemented, acceptance run pending
 
-### Population components
+Implemented:
 
-`src/gwpop_search/models/components.py`
-
-Normalized JAX components:
-
-- power law;
-- broken power law;
-- power law + truncated Gaussian peak;
-- conditional `q^beta` with the secondary-mass lower bound;
-- redshift/rate density proportional to
-  `dVc/dz * (1+z)^(kappa-1)`;
-- truncated-Gaussian `chi_eff`.
-
-The masked support algebra is explicitly autodiff-safe. CI exposed and fixed an
-important bug here: undefined arithmetic inside masked-out support branches can
-poison gradients even when the final density is `-inf`. The components now
-use finite surrogate arithmetic internally and apply exact support masks last.
-
-### Fixed cosmology and source-to-data transform
-
-`src/gwpop_search/models/cosmology.py`
-
-`FlatLambdaCDM` supplies fixed-cosmology `dL(z)`, `z(dL)`, `ddL/dz`, and
-`dVc/dz`.
-
-`src/gwpop_search/models/baseline.py`
-
-`GwcatChiEffBBHModel` is normalized in source coordinates
-
-```text
-(m1_source, q, z, chi_eff)
-```
-
-and evaluates the gwcat detector-frame density
-
-```text
-(m1_detector, q, dL, dOmega, chi_eff)
-```
-
-with the explicit transformation
-
-```text
-p_det = p_src / [(1+z) * (ddL/dz)] * 1/(4*pi).
-```
-
-The model derives `z` from `dL` and `m1_source=m1_detector/(1+z)`; it does
-not define the density using advisory source-frame columns.
-
-### NumPyro inference
-
-`src/gwpop_search/inference/priors.py`
-
-Contains serializable `PriorSpec` objects and
-`BASELINE_SYNTHETIC_PRIORS`. These priors are for Phase-3 recovery only and
-are not the final GWTC-5 prior contract.
-
-`src/gwpop_search/inference/numpyro.py`
-
-Provides:
-
-- lazy NumPyro dependency loading;
-- explicit `NUTSConfig`;
-- current default initialization at the prior median;
-- shape-likelihood NumPyro model using the common JAX HBI engine;
-- chain-grouped samples and HMC extra fields;
-- deterministic per-chain seeds;
+- conventional normalized BBH baseline;
+- fixed flat-LambdaCDM source-to-gwcat transform;
+- explicit detector-frame Jacobian;
+- NumPyro NUTS;
+- deterministic chain seeds;
 - chain-granularity checkpoint/resume;
-- manifest mismatch protection;
-- package version + git commit in the resume identity.
+- code-pinned manifests;
+- closed synthetic PE + raw-selection survey;
+- multi-seed recovery campaign controller;
+- numerical campaign gate;
+- ensemble recovery/coverage summaries;
+- checkpoint fingerprints;
+- H100 Slurm entry point.
 
-The median initializer is a reproducibility choice, not a workaround for an
-invalid model: after the autodiff masking fix, the actual baseline NumPyro
-smoke passes even with the older random initializer.
+Recommended command:
 
-### Closed synthetic recovery dataset
+~~~bash
+gwpop-search synthetic-campaign \
+  --root runs/phase3-recovery/default \
+  --n-runs 4 \
+  --root-seed 20260917 \
+  --n-events 48 \
+  --pe-samples 256 \
+  --n-injections 20000 \
+  --num-warmup 1000 \
+  --num-samples 1000 \
+  --num-chains 4 \
+  --target-accept 0.9 \
+  --selection-chunk-size 4096 \
+  --no-progress
+~~~
 
-`src/gwpop_search/inference/synthetic.py`
+See `docs/phase3_recovery.md` and
+`scripts/slurm/phase3_synthetic_h100.sbatch.example`.
 
-Produces:
+### Phase-3 acceptance gate
 
-- baseline-population detected event truths;
-- PE posterior samples under an explicit detector-basis reference prior;
-- one raw-draw selection campaign under an explicit detector-basis draw
-  density;
-- exact gwcat-v2 `chieff` coordinate-basis identity;
-- a deterministic chirp-mass-scaled synthetic detection reach.
+Before declaring Phase 3 accepted:
 
-This is a validation survey, not a detector-realism model.
+1. run at least four independent synthetic catalogs with at least four chains;
+2. require no unresolved R-hat, MCMC ESS, divergence, PE/selection ESS,
+   maximum-weight, or likelihood-variance pathology;
+3. inspect recovery across the ensemble rather than one catalog;
+4. inspect standardized offsets for repeated bias;
+5. interrupt/resume at least one campaign and confirm completed chain
+   fingerprints are unchanged.
 
-### Recovery campaign / H100 path
+A few truth-in-credible-interval indicators are diagnostics, not a calibrated
+coverage measurement.
 
-`src/gwpop_search/inference/recovery.py`
+## Phase 4 - declarative model grammar (staged)
 
-`gwpop-search synthetic-recovery` generates the mock and runs/resumes NUTS.
+Implemented:
 
-Outputs include:
+- canonical `ModelSpec`;
+- canonical JSON/YAML serialization;
+- SHA-256 scientific model identity;
+- hyperprior schema;
+- component registry;
+- typed one-axis mutation registry;
+- deterministic breadth-first graph enumeration;
+- verified graph loader;
+- static component/option validation;
+- compilation of legal specs back to normalized JAX gwcat-basis densities.
 
-- combined posterior;
-- injected truth and 5/50/95 posterior summaries;
-- divergences;
-- split R-hat;
-- MCMC effective sample size;
-- PE event importance ESS;
-- selection ESS;
-- maximum normalized weights;
-- shape-likelihood Monte-Carlo variance;
-- the same HBI diagnostics at the injected truth and posterior median.
+Initial compiled families include:
 
-Runbook:
+- power law, PL+peak, broken power law, PL+two peaks;
+- power-law q and truncated-Gaussian q;
+- constant/linear/logistic q-mass structure where defined;
+- truncated-Gaussian `chi_eff` with selected mean/width dependencies;
+- two-component `chi_eff` mixture;
+- power-law and Madau--Dickinson-like redshift evolution.
 
-`docs/phase3_recovery.md`
+Underspecified generic latent-mixture mutations were deliberately excluded from
+the first graph.
 
-Site-neutral H100 Slurm example:
+## Phase 5 - evidence and model scoring (staged)
 
-`scripts/slurm/phase3_synthetic_h100.sbatch.example`
+Implemented:
 
-The template refuses to launch unless JAX sees a GPU and intentionally does
-not guess site-specific partition/account/CUDA/JAX setup.
+- JAXNS evidence through NumPyro's official nested-sampling bridge;
+- evidence result serialization;
+- repeated evidence estimates;
+- reported JAXNS uncertainty and between-repeat scatter;
+- evidence cache manifests pinned to model, data identity, basis, events,
+  counts, HBI config, evidence config, seed, and code;
+- explicit model-prior interface;
+- uniform and structural-complexity model priors;
+- edge log Bayes factors and posterior odds;
+- posterior model probabilities;
+- posterior mass for structural axes.
 
-## Integrated CI status
+The evidence backend has an analytic known-evidence CI test.
 
-GitHub Actions now installs `.[dev]`, including NumPyro, and runs the full
-repository test suite on Python 3.12 with JAX x64 enabled.
+Important: a production `scored_graph.json` is emitted only with complete
+F3/F4 evidence coverage over the declared graph.
 
-Authoritative green checkpoints during Phase 3:
+## Phase 6 - deterministic multi-fidelity search (staged)
 
-- autodiff-safe baseline + actual 10-parameter NumPyro smoke:
-  **55 passed**;
-- direct actual-baseline HBI value/gradient test:
-  **56 passed**;
-- recovery chain diagnostics:
-  **57 passed**.
+Implemented:
 
-The newest recovery-importance diagnostic test was added after those green
-checkpoints; consult the latest Actions run before quoting a newer total.
+- F0--F4 fidelity enum/contracts;
+- deterministic beam scheduling;
+- deterministic exploration quota;
+- diagnostic veto;
+- append-only SQLite state;
+- idempotent promotion history;
+- deterministic seeds;
+- resumable end-to-end executor;
+- per-fidelity model-count budgets;
+- durable cumulative compute budget.
 
-Tests now cover the Phase-1 data layer, Phase-2 NumPy/JAX HBI, component
-normalization/Jacobians, actual baseline finite gradients, NumPyro execution,
-checkpoint contracts, synthetic data generation, CLI parsing, and recovery
-diagnostic utilities.
+Concrete evaluator:
 
-## Phase 3 remaining acceptance gate
+- F0: reduced-data HBI sanity;
+- F1: short reduced-data NUTS, allocation-only BIC-like score;
+- F2: full-data NUTS, allocation-only BIC-like score;
+- F3: repeated full-data JAXNS evidence;
+- F4: strict full-data NUTS + repeated evidence.
 
-Before Phase 4:
+All stages use the same population compiler and standardized HBI likelihood.
 
-1. run the default synthetic campaign on H100 with at least 4 chains;
-2. inspect split R-hat, MCMC ESS, divergences, event PE ESS, selection ESS,
-   max weights, and likelihood Monte-Carlo variance;
-3. repeat across multiple independent data seeds and sampler seeds;
-4. verify recovery is statistically consistent across the ensemble, not just
-   one fortunate catalog;
-5. interrupt/resume at least one campaign and confirm completed chain artifacts
-   are unchanged.
+## Phase 7 - flexible scouts (partially staged)
 
-Do not declare coverage because every truth happens to land in one catalog's
-credible interval.
+Implemented:
 
-The real-data baseline parity check is intentionally deferred to the later
-GWTC-5 production freeze because production data manifests, event cuts,
-waveform policy, and selection campaigns were explicitly deferred by project
-design.
+- HSGP Laplacian basis utilities;
+- squared-exponential spectral weights;
+- tensor basis construction;
+- weighted residual-dependence summaries;
+- typed `StructureProposal`;
+- mapping only to already registered legal mutations;
+- injected-dependence and null-proposal tests.
 
-## Immediate next action
+Still outstanding before Phase 7 acceptance:
 
-Hand the current Phase-3 recovery command to the H100/Fable environment and
-execute the multi-seed recovery matrix described in
-`docs/phase3_recovery.md`.
+- full flexible residual HBI inference model;
+- end-to-end injected-correlation recovery with selection/PE;
+- production scout diagnostics and compiled-descendant comparison.
 
-**Do not start Phase 4 yet.**
+## Phase 8 - search calibration/adversarial validation (partially staged)
 
-## Questions deliberately left open
+Implemented:
 
-- final production spin space;
-- exact gwcat export/parameter space for production;
-- GWTC-5 BBH event cut and waveform policy;
-- final reference baseline family/priors for GWTC-5 parity;
-- evidence estimator;
-- model-prior hyperparameters;
-- PostgreSQL vs SQLite for distributed production state;
-- null-catalog PE approximation for search calibration.
+- deterministic event folds;
+- held-out detected-event predictive score using `ell_i/A`;
+- search-level null replay storage/calibration;
+- finite-sample corrected empirical tail probabilities;
+- exact-search baseline-null bridge:
+  baseline population -> synthetic PE/selection -> same F0--F4 search ->
+  maximum encountered BF/posterior-odds statistic.
 
-## Production/H100 handoff requirements still outstanding
+Still outstanding before Phase 8 acceptance:
 
-Before the later full-search Fable handoff:
+- large null replay campaign;
+- structured-injection recovery-frequency campaign;
+- production leave-one-out/loud-event stress orchestration;
+- nearby-baseline production suite.
 
-- target CUDA/JAX environment/bootstrap instructions;
-- frozen production dataset manifest and hashes;
-- data validation command;
-- real-data baseline reproduction command;
-- search launch/resume command;
-- production Slurm templates;
-- deterministic seed policy;
-- database/artifact locations;
-- full search checkpoint/restart;
-- final production acceptance tests.
+## Phase 9 - optional agents (staged safety boundary)
+
+Implemented:
+
+- typed roles/tasks;
+- inert JSON-like proposal payloads;
+- registered-model/mutation/validation checks;
+- deterministic task IDs;
+- append-only proposal/decision audit log;
+- agents-disabled path;
+- rejection of arbitrary executable/code payload fields.
+
+No agent is allowed to patch the production likelihood or create an
+unregistered scientific mutation.
+
+The deterministic pipeline is the source of truth. Agent-provider orchestration
+can be added later without changing the scientific core.
+
+## Phase 10 - production freeze/H100 handoff machinery (staged)
+
+Implemented:
+
+- SHA-256 dataset manifest;
+- explicit event-selection and waveform-policy metadata;
+- PE/selection artifact checksum and size verification;
+- canonical model-graph hash/root;
+- versioned production campaign schema (`1.1`);
+- full frozen F0--F4 numerical config;
+- frozen model prior, scheduler, seed policy, compute budget;
+- artifact/state locations;
+- exact git-commit binding;
+- freeze validation CLI;
+- deterministic production runner;
+- H100 Slurm template;
+- Fable runbook;
+- explicit dataset/campaign freeze builders.
+
+Operator flow:
+
+~~~bash
+gwpop-search freeze-dataset ...
+gwpop-search write-default-fidelity-config --output fidelity.json
+# review/edit fidelity.json
+gwpop-search freeze-production-campaign ...
+gwpop-search validate-production-freeze ...
+gwpop-search run-production-search ...
+~~~
+
+The final command is also the resume command.
+
+See `docs/fable_h100_handoff.md` and
+`scripts/slurm/production_search_h100.sbatch.example`.
+
+### Still scientifically deferred for actual GWTC-5 production
+
+- final spin coordinate space;
+- exact GWTC-5 BBH event cut;
+- waveform/sample-set policy;
+- exact O3/O4 selection products;
+- production population hyperpriors;
+- structural model-prior hyperparameter(s);
+- search budget;
+- final frozen data manifest and hashes.
+
+Those choices must be made explicitly at the production freeze. The code must
+not infer them from filenames or release conventions.
+
+## Immediate next actions
+
+1. Run/accept the Phase-3 H100 multi-seed recovery campaign.
+2. Finish the Phase-7 full HSGP residual inference scout.
+3. Add production stress-suite orchestration for Phase 8.
+4. Once the real GWTC-5/gwcat PE+selection products and scientific policies are
+   frozen, create `dataset_manifest.json`, reviewed `fidelity.json`,
+   `model_graph.json`, and `campaign.json`.
+5. Validate and hand the exact campaign/commit to Fable.
 
 ## Rule for future ChatGPT/Codex/Fable work
 
 Read this file, `SPEC.md`, `ROADMAP.md`, `docs/data_contract.md`,
-`docs/hbi_contract.md`, and `docs/phase3_recovery.md` before modifying the
-architecture. Update this file whenever a phase completes or a scientific or
-software contract changes.
+`docs/hbi_contract.md`, `docs/phase3_recovery.md`, and
+`docs/fable_h100_handoff.md` before modifying architecture.
+
+Do not silently change an accepted scientific contract. Update this file
+whenever a contract changes, a phase acceptance gate closes, or a major staged
+subsystem becomes runnable.
