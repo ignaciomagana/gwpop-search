@@ -3,7 +3,11 @@ import math
 import numpy as np
 import pytest
 
-from gwpop_search.grammar import (\n    baseline_model_spec,\n    enumerate_model_graph,\n    structural_diff_axes,\n)
+from gwpop_search.grammar import (
+    baseline_model_spec,
+    enumerate_model_graph,
+    structural_diff_axes,
+)
 from gwpop_search.search import (
     ComplexityModelPrior,
     ModelEvidence,
