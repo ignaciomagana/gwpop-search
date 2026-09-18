@@ -2,7 +2,7 @@
 
 from .baseline import baseline_model_spec
 from .enumerate import ModelEdge, ModelGraph, enumerate_model_graph
-from .io import load_model_spec, save_model_graph, save_model_spec
+from .io import load_model_graph, load_model_spec, save_model_graph, save_model_spec
 from .mutations import (
     DEFAULT_MUTATIONS,
     InapplicableMutation,
@@ -28,6 +28,7 @@ __all__ = [
     "DEFAULT_MUTATIONS",
     "FamilyDefinition",
     "InapplicableMutation",
+    "load_model_graph",
     "load_model_spec",
     "ModelEdge",
     "ModelGraph",
