@@ -58,9 +58,11 @@ The current repository includes:
 - explicit structural model priors and edge comparisons;
 - F0--F4 deterministic search with diagnostics, budgets, and SQLite state;
 - inclusion-probability-corrected Monte-Carlo screening reductions;
-- HSGP scout basis/residual proposal infrastructure;
+- conditionally normalized HSGP scout inference with typed descendants;
+- multi-seed grammar-matched scout injection validation;
 - held-out detected-event prediction;
-- exact-search null replay infrastructure;
+- event-drop and nearby-baseline search stress suites;
+- frozen exact-search null replay calibration;
 - typed non-executable agent proposal contracts;
 - frozen production manifests/configuration and an H100/Fable runner.
 
@@ -112,7 +114,7 @@ gwpop-search freeze-production-campaign \
   --scheduler-seed 20260917 \
   --root-seed 20260917 \
   --max-gpu-hours 1000 \
-  --max-f3-models 20 \
+  --max-f3-models 40 \
   --max-f4-models 8 \
   --max-null-replays 200 \
   --artifact-root runs/gwtc5-bbh-search-v1 \
@@ -133,7 +135,7 @@ gwpop-search validate-production-freeze \
   --base-dir frozen
 ~~~
 
-Run or resume:
+Run or resume the adaptive search:
 
 ~~~bash
 gwpop-search run-production-search \
@@ -143,6 +145,23 @@ gwpop-search run-production-search \
   --base-dir frozen \
   --work-dir /persistent/gwpop
 ~~~
+
+Screening prioritizes expensive evidence work; it does not define the final
+Bayesian model posterior. If evidence coverage is incomplete, finish valid F3
+evidence over every declared node before using posterior model probabilities:
+
+~~~bash
+gwpop-search complete-production-evidence \
+  --manifest frozen/dataset_manifest.json \
+  --graph frozen/model_graph.json \
+  --campaign frozen/campaign.json \
+  --base-dir frozen \
+  --work-dir /persistent/gwpop
+~~~
+
+For a full model posterior, the frozen max-f3-models budget must be at least the
+number of nodes in the declared graph. A smaller value intentionally defines a
+discovery-only campaign; evidence completion will refuse to bypass that budget.
 
 See docs/fable_h100_handoff.md and
 scripts/slurm/production_search_h100.sbatch.example.
