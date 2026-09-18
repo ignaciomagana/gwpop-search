@@ -40,14 +40,10 @@ class ExactNullCampaignConfig:
     truth_hyperparameters: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_BASELINE_HYPERPARAMETERS)
     )
-    stop_fidelity: Fidelity = Fidelity.F4_PRODUCTION
-    max_gpu_hours_per_null: float = 250.0
-    max_f3_models: int = 20
-    max_f4_models: int = 8
-    format_version: str = "gwpop-search-exact-null-campaign-1.0"
+    format_version: str = "gwpop-search-exact-null-campaign-1.1"
 
     def __post_init__(self) -> None:
-        if self.format_version != "gwpop-search-exact-null-campaign-1.0":
+        if self.format_version != "gwpop-search-exact-null-campaign-1.1":
             raise ValueError("unsupported exact null campaign format")
         if self.n_nulls <= 0:
             raise ValueError("n_nulls must be positive")
@@ -61,18 +57,6 @@ class ExactNullCampaignConfig:
                 f"null truth hyperparameters missing {sorted(missing)}"
             )
         object.__setattr__(self, "truth_hyperparameters", truth)
-        object.__setattr__(self, "stop_fidelity", Fidelity(self.stop_fidelity))
-        if self.stop_fidelity.rank < Fidelity.F3_EVIDENCE.rank:
-            raise ValueError(
-                "search-level null calibration must reach an evidence fidelity"
-            )
-        if (
-            not math.isfinite(self.max_gpu_hours_per_null)
-            or self.max_gpu_hours_per_null <= 0.0
-        ):
-            raise ValueError("max_gpu_hours_per_null must be positive")
-        if self.max_f3_models <= 0 or self.max_f4_models <= 0:
-            raise ValueError("null campaign model limits must be positive")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -81,10 +65,6 @@ class ExactNullCampaignConfig:
             "root_seed": int(self.root_seed),
             "survey": asdict(self.survey),
             "truth_hyperparameters": dict(self.truth_hyperparameters),
-            "stop_fidelity": self.stop_fidelity.value,
-            "max_gpu_hours_per_null": float(self.max_gpu_hours_per_null),
-            "max_f3_models": int(self.max_f3_models),
-            "max_f4_models": int(self.max_f4_models),
         }
 
     @classmethod
@@ -102,14 +82,10 @@ class ExactNullCampaignConfig:
                     payload["truth_hyperparameters"]
                 ).items()
             },
-            stop_fidelity=Fidelity(str(payload["stop_fidelity"])),
-            max_gpu_hours_per_null=float(payload["max_gpu_hours_per_null"]),
-            max_f3_models=int(payload["max_f3_models"]),
-            max_f4_models=int(payload["max_f4_models"]),
             format_version=str(
                 payload.get(
                     "format_version",
-                    "gwpop-search-exact-null-campaign-1.0",
+                    "gwpop-search-exact-null-campaign-1.1",
                 )
             ),
         )
@@ -151,6 +127,11 @@ def build_exact_null_campaign_plan(
             f"requested {config.n_nulls} nulls exceeds frozen campaign budget "
             f"{campaign.budget.max_null_replays}"
         )
+    if len(graph.nodes) > campaign.budget.max_f3_models:
+        raise ValueError(
+            "exact null calibration requires the production campaign to permit "
+            "full-graph F3 evidence completion"
+        )
     return {
         "format_version": "gwpop-search-exact-null-plan-1.0",
         "code": _code_identity(),
@@ -158,6 +139,14 @@ def build_exact_null_campaign_plan(
         "graph_hash": model_graph_hash(graph),
         "graph_root_hash": graph.root_hash,
         "null_config": config.to_dict(),
+        "replayed_production_search": {
+            "stop_fidelity": Fidelity.F4_PRODUCTION.value,
+            "scheduler": asdict(campaign.scheduler),
+            "max_gpu_hours": campaign.budget.max_gpu_hours,
+            "max_f3_models": campaign.budget.max_f3_models,
+            "max_f4_models": campaign.budget.max_f4_models,
+            "evidence_completion_required": True,
+        },
         "seed_policy": [
             {
                 "null_index": index,
@@ -218,16 +207,18 @@ def run_exact_null_campaign(
             execution_config=SearchExecutionConfig(
                 root_seed=null_search_seed(config.root_seed, index),
                 scheduler=campaign.scheduler,
-                stop_fidelity=config.stop_fidelity,
+                stop_fidelity=Fidelity.F4_PRODUCTION,
                 max_models_by_fidelity={
-                    "F3": config.max_f3_models,
-                    "F4": config.max_f4_models,
+                    "F3": campaign.budget.max_f3_models,
+                    "F4": campaign.budget.max_f4_models,
                 },
-                max_total_compute_cost=config.max_gpu_hours_per_null,
+                max_total_compute_cost=campaign.budget.max_gpu_hours,
             ),
             fidelity_config=campaign.fidelity,
             survey_config=config.survey,
             truth_hyperparameters=config.truth_hyperparameters,
+            completion_campaign=campaign,
+            completion_seed_root=null_search_seed(config.root_seed, index),
         )
 
     run_null_replay_campaign(
@@ -242,6 +233,11 @@ def run_exact_null_campaign(
     if observed_state_database is not None:
         evidence = collect_best_available_evidence(observed_state_database)
         if evidence:
+            if len(evidence) != len(graph.nodes):
+                raise ValueError(
+                    "observed production state lacks complete valid evidence; "
+                    "run complete-production-evidence before null calibration"
+                )
             observed = search_statistics_from_evidence(
                 graph,
                 evidence,
