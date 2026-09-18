@@ -630,3 +630,69 @@ def test_confirm_structured_scout_descendant_cli_parses():
     assert args.fidelity_config == "fidelity.json"
     assert args.run_index is None
     assert callable(args.func)
+
+
+
+def test_prepare_null_search_calibration_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "prepare-null-search-calibration",
+            "--manifest",
+            "dataset_manifest.json",
+            "--graph",
+            "model_graph.json",
+            "--campaign",
+            "campaign.json",
+            "--null-config",
+            "nulls.json",
+            "--root",
+            "runs/nulls",
+        ]
+    )
+    assert args.command == "prepare-null-search-calibration"
+    assert args.root == "runs/nulls"
+    assert callable(args.func)
+
+
+def test_run_null_search_index_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "run-null-search-index",
+            "--manifest",
+            "dataset_manifest.json",
+            "--graph",
+            "model_graph.json",
+            "--campaign",
+            "campaign.json",
+            "--null-config",
+            "nulls.json",
+            "--root",
+            "runs/nulls",
+            "--null-index",
+            "17",
+        ]
+    )
+    assert args.command == "run-null-search-index"
+    assert args.null_index == 17
+    assert callable(args.func)
+
+
+def test_finalize_null_search_calibration_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "finalize-null-search-calibration",
+            "--manifest",
+            "dataset_manifest.json",
+            "--graph",
+            "model_graph.json",
+            "--campaign",
+            "campaign.json",
+            "--null-config",
+            "nulls.json",
+            "--root",
+            "runs/nulls",
+        ]
+    )
+    assert args.command == "finalize-null-search-calibration"
+    assert args.root == "runs/nulls"
+    assert callable(args.func)
