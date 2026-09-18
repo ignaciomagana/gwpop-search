@@ -4,7 +4,7 @@ import pytest
 
 from gwpop_search.grammar import baseline_model_spec, enumerate_model_graph
 from gwpop_search.grammar.io import save_model_graph
-from gwpop_search.inference import NestedSamplingConfig
+from gwpop_search.inference.fidelity import FidelityRunConfig
 from gwpop_search.production import (
     DatasetManifest,
     ProductionCampaignConfig,
@@ -104,12 +104,7 @@ def test_production_campaign_roundtrip_freezes_search_contract(tmp_path):
             "version": prior.version,
             "penalty_per_axis": prior.penalty_per_axis,
         },
-        evidence=NestedSamplingConfig(
-            num_live_points=200,
-            max_samples=10000,
-            dlogz=0.05,
-            num_posterior_samples=1000,
-        ),
+        fidelity=FidelityRunConfig(),
         scheduler=SchedulerConfig(
             beam_width=8,
             exploration_quota=2,
@@ -133,7 +128,10 @@ def test_production_campaign_roundtrip_freezes_search_contract(tmp_path):
     assert restored == config
     assert restored.campaign_hash == config.campaign_hash
     assert restored.agents_enabled is False
-    assert json.loads(path.read_text())["budget"]["max_f4_models"] == 8
+    saved = json.loads(path.read_text())
+    assert saved["budget"]["max_f4_models"] == 8
+    assert saved["fidelity"]["f4_nuts"]["num_chains"] == 4
+    assert saved["fidelity"]["f4_evidence"]["repeats"] == 3
 
 
 def test_production_campaign_rejects_unknown_code_revision():
@@ -145,7 +143,7 @@ def test_production_campaign_rejects_unknown_code_revision():
             model_graph_root_hash="c" * 64,
             git_commit="unknown",
             model_prior={"version": "x"},
-            evidence=NestedSamplingConfig(),
+            fidelity=FidelityRunConfig(),
             scheduler=SchedulerConfig(),
             seed_policy=SeedPolicy(root_seed=1),
             budget=SearchBudget(10.0, 2, 1, 10),
