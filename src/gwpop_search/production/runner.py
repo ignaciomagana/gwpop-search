@@ -123,6 +123,8 @@ def collect_best_available_evidence(
     for row in rows:
         if row["fidelity"] not in {"F3", "F4"}:
             continue
+        if row["status"] != "complete" or not bool(row["diagnostics_pass"]):
+            continue
         artifact = row.get("artifact_path")
         if not artifact:
             continue
