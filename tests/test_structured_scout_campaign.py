@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+import pytest
 
 from gwpop_search.grammar import baseline_model_spec
 from gwpop_search.inference.synthetic import SyntheticSurveyConfig
@@ -210,3 +211,57 @@ def test_offtarget_control_is_marked_not_failed_recovery(tmp_path):
     assert not summary["expected_mutation_reachable"]
     assert summary["expected_proposal_fraction_among_numerical_pass"] is None
     assert summary["interpretation"] == "off_target_control"
+
+
+
+@pytest.mark.parametrize(
+    "mutation_id,strength,truth_key",
+    [
+        ("pairing.beta.linear_m1", 0.10, "beta_q_m1_slope"),
+        ("chieff.mean.linear_m1", 0.01, "chi_mu_m1_slope"),
+        ("chieff.mean.linear_q", 0.40, "chi_mu_q_slope"),
+        ("chieff.mean.linear_z", 0.20, "chi_mu_z_slope"),
+        ("chieff.width.linear_m1", 0.02, "log_chi_sigma_m1_slope"),
+        ("chieff.width.linear_q", 1.00, "log_chi_sigma_q_slope"),
+        ("chieff.width.linear_z", 0.50, "log_chi_sigma_z_slope"),
+    ],
+)
+def test_structured_generator_supports_every_registered_linear_scout_axis(
+    mutation_id,
+    strength,
+    truth_key,
+):
+    dataset = generate_structured_scout_dataset(
+        seed=13,
+        injection=StructuredScoutInjection(mutation_id, strength),
+        survey_config=SyntheticSurveyConfig(
+            n_events=3,
+            posterior_samples_per_event=8,
+            n_injections=300,
+            population_batch_size=96,
+            redshift_sampling_grid=256,
+        ),
+    )
+    assert dataset.posterior.n_events == 3
+    assert dataset.truth_hyperparameters[truth_key] == strength
+    assert np.all(np.isfinite(dataset.event_truths["chi_eff"]))
+
+
+@pytest.mark.parametrize(
+    "mutation_id,strength",
+    [
+        ("pairing.beta.linear_m1", 0.31),
+        ("chieff.mean.linear_m1", 0.021),
+        ("chieff.mean.linear_q", 0.61),
+        ("chieff.mean.linear_z", 0.41),
+        ("chieff.width.linear_m1", 0.051),
+        ("chieff.width.linear_q", 2.01),
+        ("chieff.width.linear_z", 1.01),
+    ],
+)
+def test_structured_injection_rejects_strength_outside_child_prior(
+    mutation_id,
+    strength,
+):
+    with pytest.raises(ValueError, match="outside registered prior support"):
+        StructuredScoutInjection(mutation_id, strength)
