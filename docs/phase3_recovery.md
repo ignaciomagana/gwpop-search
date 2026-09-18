@@ -84,6 +84,23 @@ offsets. With only a few catalogs, those coverage numbers are diagnostics, not
 a calibrated coverage measurement. The code deliberately does not turn them
 into an automatic pass/fail threshold.
 
+For the mandatory interruption/resume check, fingerprint completed chain
+payloads plus metadata before and after resubmitting the identical campaign:
+
+```bash
+gwpop-search fingerprint-recovery-checkpoint \
+  --run-dir runs/phase3-recovery/default/run_000 \
+  > fingerprints_before.json
+
+# interrupt/re-submit the exact same campaign, then:
+gwpop-search fingerprint-recovery-checkpoint \
+  --run-dir runs/phase3-recovery/default/run_000 \
+  > fingerprints_after.json
+```
+
+Every key present before the resume must retain exactly the same fingerprint.
+Newly completed chains may add keys.
+
 To reassess already completed runs without launching inference:
 
 ```bash
@@ -126,3 +143,15 @@ Before calling Phase 3 accepted:
 
 The repository may contain staged Phase-4--10 software while this scientific
 gate remains open. Staged downstream code is not evidence that Phase 3 passed.
+
+
+## H100 handover
+
+The authoritative end-to-end execution order, including the manual Phase-3
+decision, Phase-7 scout validation, real-data freeze, production search,
+robustness suites, and exact-search null calibration is:
+
+```text
+docs/CLAUDE_H100_VALIDATION_HANDOVER.md
+docs/H100_VALIDATION_REPORT_TEMPLATE.md
+```
