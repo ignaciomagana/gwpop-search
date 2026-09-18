@@ -124,6 +124,49 @@ def _add_common_recovery_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-progress", action="store_true")
 
 
+def _inspect_model_graph(args: argparse.Namespace) -> None:
+    from .grammar import load_model_graph
+
+    graph = load_model_graph(Path(args.graph))
+    incoming: dict[str, list[str]] = {model.model_hash: [] for model in graph.nodes}
+    for edge in graph.edges:
+        incoming[edge.child_hash].append(edge.mutation_id)
+    payload = {
+        "root_hash": graph.root_hash,
+        "n_nodes": len(graph.nodes),
+        "n_edges": len(graph.edges),
+        "nodes": [
+            {
+                "model_hash": model.model_hash,
+                "depth": int(graph.depths[model.model_hash]),
+                "incoming_mutations": sorted(incoming[model.model_hash]),
+                "mass": model.mass.to_dict(),
+                "pairing": model.pairing.to_dict(),
+                "chieff": model.chieff.to_dict(),
+                "redshift": model.redshift.to_dict(),
+                "prior_names": sorted(model.priors),
+            }
+            for model in sorted(graph.nodes, key=lambda item: item.model_hash)
+        ],
+    }
+    print(json.dumps(payload, sort_keys=True, indent=2))
+
+
+def _extract_model(args: argparse.Namespace) -> None:
+    from .grammar import load_model_graph, save_model_spec
+
+    graph = load_model_graph(Path(args.graph))
+    if args.model_hash not in graph.by_hash:
+        raise ValueError(f"unknown graph model hash {args.model_hash!r}")
+    model = graph.by_hash[args.model_hash]
+    save_model_spec(Path(args.output), model)
+    print(
+        "model extracted: "
+        f"hash={model.model_hash} depth={graph.depths[model.model_hash]} "
+        f"output={args.output}"
+    )
+
+
 def _enumerate_models(args: argparse.Namespace) -> None:
     from .grammar import (
         baseline_model_spec,
@@ -952,6 +995,22 @@ def build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--root", required=True)
     assess.add_argument("--min-runs", type=int, default=4)
     assess.set_defaults(func=_assess_synthetic_campaign)
+
+    inspect_graph = subparsers.add_parser(
+        "inspect-model-graph",
+        help="print a concise structural inventory of a frozen model graph",
+    )
+    inspect_graph.add_argument("--graph", required=True)
+    inspect_graph.set_defaults(func=_inspect_model_graph)
+
+    extract_model = subparsers.add_parser(
+        "extract-model",
+        help="materialize one exact model spec from a frozen graph by hash",
+    )
+    extract_model.add_argument("--graph", required=True)
+    extract_model.add_argument("--model-hash", required=True)
+    extract_model.add_argument("--output", required=True)
+    extract_model.set_defaults(func=_extract_model)
 
     enumerate_parser = subparsers.add_parser(
         "enumerate-models",
