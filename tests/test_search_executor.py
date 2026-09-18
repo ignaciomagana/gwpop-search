@@ -2,6 +2,7 @@ from pathlib import Path
 
 from gwpop_search.grammar import baseline_model_spec, enumerate_model_graph
 from gwpop_search.search.executor import (
+    SearchBudgetExceeded,
     SearchExecutionConfig,
     evaluation_seed,
     execute_search,
@@ -136,3 +137,67 @@ def test_promotion_replay_conflict_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="conflicts"):
         store.record_promotions([conflict])
+
+
+
+def test_search_executor_enforces_fidelity_model_budget(tmp_path):
+    graph = enumerate_model_graph(
+        baseline_model_spec(),
+        max_depth=1,
+        max_models=4,
+    )
+    evaluator = StubEvaluator()
+    config = SearchExecutionConfig(
+        scheduler=SchedulerConfig(
+            beam_width=4,
+            exploration_quota=0,
+        ),
+        stop_fidelity=Fidelity.F2_INFERENCE,
+        max_models_by_fidelity={"F1": 2},
+    )
+
+    import pytest
+
+    with pytest.raises(SearchBudgetExceeded, match="F1 has"):
+        execute_search(
+            graph,
+            evaluator,
+            state_database=tmp_path / "state.sqlite",
+            artifact_root=tmp_path / "artifacts",
+            config=config,
+        )
+
+    # F0 finished durably; the over-budget F1 cohort never launched.
+    store = ResultStore(tmp_path / "state.sqlite")
+    assert len(store.evaluations(fidelity="F0")) == len(graph.nodes)
+    assert store.evaluations(fidelity="F1") == []
+
+
+def test_search_executor_enforces_durable_compute_budget(tmp_path):
+    graph = enumerate_model_graph(
+        baseline_model_spec(),
+        max_depth=0,
+        max_models=1,
+    )
+    evaluator = StubEvaluator()
+    config = SearchExecutionConfig(
+        stop_fidelity=Fidelity.F0_SANITY,
+        max_total_compute_cost=0.005,
+    )
+
+    import pytest
+
+    with pytest.raises(SearchBudgetExceeded, match="exceeded"):
+        execute_search(
+            graph,
+            evaluator,
+            state_database=tmp_path / "state.sqlite",
+            artifact_root=tmp_path / "artifacts",
+            config=config,
+        )
+
+    # The completed over-budget evaluation is retained rather than lost.
+    store = ResultStore(tmp_path / "state.sqlite")
+    rows = store.evaluations()
+    assert len(rows) == 1
+    assert rows[0]["compute_cost"] == 0.01
