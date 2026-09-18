@@ -75,3 +75,31 @@ def test_assess_synthetic_campaign_cli_parses():
     assert args.command == "assess-synthetic-campaign"
     assert args.min_runs == 8
     assert callable(args.func)
+
+
+
+def test_enumerate_models_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "enumerate-models",
+            "--output",
+            "graph.json",
+            "--max-depth",
+            "2",
+            "--max-models",
+            "32",
+        ]
+    )
+    assert args.command == "enumerate-models"
+    assert args.output == "graph.json"
+    assert args.max_models == 32
+    assert callable(args.func)
+
+
+def test_validate_model_cli_parses():
+    args = build_parser().parse_args(
+        ["validate-model", "--spec", "model.yaml"]
+    )
+    assert args.command == "validate-model"
+    assert args.spec == "model.yaml"
+    assert callable(args.func)
