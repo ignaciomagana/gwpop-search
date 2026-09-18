@@ -451,7 +451,6 @@ def screening_score(
     )
 
 
-@dataclass
 def fidelity_run_config_to_dict(config: FidelityRunConfig) -> dict[str, object]:
     def evidence_payload(value: EvidenceCampaignConfig) -> dict[str, object]:
         return {
