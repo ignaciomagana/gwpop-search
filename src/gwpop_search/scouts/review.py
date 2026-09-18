@@ -38,6 +38,30 @@ class ReviewedScoutProposal:
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, object],
+    ) -> "ReviewedScoutProposal":
+        return cls(
+            proposal_id=str(payload["proposal_id"]),
+            mutation_id=str(payload["mutation_id"]),
+            decision=str(payload["decision"]),
+            parent_model_hash=str(payload["parent_model_hash"]),
+            child_model_hash=(
+                None
+                if payload.get("child_model_hash") is None
+                else str(payload["child_model_hash"])
+            ),
+            note=str(payload.get("note", "")),
+            format_version=str(
+                payload.get(
+                    "format_version",
+                    "gwpop-search-scout-review-1.0",
+                )
+            ),
+        )
+
 
 def _proposal_from_payload(payload: Mapping[str, object]) -> StructureProposal:
     return StructureProposal(
@@ -122,3 +146,8 @@ def write_scout_review(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(review.to_dict(), sort_keys=True, indent=2))
+
+
+
+def load_scout_review(path: str | Path) -> ReviewedScoutProposal:
+    return ReviewedScoutProposal.from_dict(json.loads(Path(path).read_text()))
