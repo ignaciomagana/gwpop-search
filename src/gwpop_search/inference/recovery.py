@@ -37,6 +37,37 @@ def posterior_summary(samples, truth):
     return summary
 
 
+def chain_diagnostics(samples):
+    """Return NumPyro split-Rhat and effective-sample-size diagnostics."""
+    from numpyro.diagnostics import summary as numpyro_summary
+
+    raw = numpyro_summary(samples, prob=0.90, group_by_chain=True)
+    per_parameter: dict[str, dict[str, float]] = {}
+    for name, stats in raw.items():
+        r_hat = np.asarray(stats["r_hat"], dtype=float)
+        n_eff = np.asarray(stats["n_eff"], dtype=float)
+        per_parameter[name] = {
+            "r_hat_max": float(np.nanmax(r_hat)),
+            "n_eff_min": float(np.nanmin(n_eff)),
+        }
+
+    finite_rhat = [
+        item["r_hat_max"]
+        for item in per_parameter.values()
+        if np.isfinite(item["r_hat_max"])
+    ]
+    finite_neff = [
+        item["n_eff_min"]
+        for item in per_parameter.values()
+        if np.isfinite(item["n_eff_min"])
+    ]
+    return {
+        "per_parameter": per_parameter,
+        "max_r_hat": max(finite_rhat) if finite_rhat else None,
+        "min_n_eff": min(finite_neff) if finite_neff else None,
+    }
+
+
 def run_synthetic_baseline_recovery(
     run_dir: str | Path,
     *,
@@ -75,6 +106,7 @@ def run_synthetic_baseline_recovery(
     save_result(run_dir / "posterior.npz", result)
 
     diverging = np.asarray(result.extra_fields.get("diverging", []), dtype=bool)
+    mcmc_diagnostics = chain_diagnostics(result.samples)
     summary = {
         "format_version": "gwpop-search-phase3-recovery-1.0",
         "data_seed": int(data_seed),
@@ -93,6 +125,9 @@ def run_synthetic_baseline_recovery(
         ),
         "diagnostics": {
             "n_divergent": int(diverging.sum()) if diverging.size else None,
+            "max_r_hat": mcmc_diagnostics["max_r_hat"],
+            "min_n_eff": mcmc_diagnostics["min_n_eff"],
+            "per_parameter": mcmc_diagnostics["per_parameter"],
             "n_events": int(dataset.posterior.n_events),
             "n_pe_samples": int(dataset.posterior.n_samples_total),
             "n_selected_injections": int(dataset.selection.n_selected),
