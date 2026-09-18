@@ -431,6 +431,99 @@ def _run_event_stress_suite(args: argparse.Namespace) -> None:
     print(json.dumps(summary, sort_keys=True, indent=2))
 
 
+def _review_scout_proposal(args: argparse.Namespace) -> None:
+    from .grammar import load_model_spec, save_model_spec
+    from .scouts import review_scout_proposal, write_scout_review
+
+    summary = json.loads(Path(args.scout_summary).read_text())
+    parent = load_model_spec(Path(args.parent_model))
+    review, child = review_scout_proposal(
+        summary,
+        parent,
+        proposal_id=args.proposal_id,
+        decision=args.decision,
+        note=args.note or "",
+    )
+    write_scout_review(Path(args.review_output), review)
+
+    if review.decision == "accepted":
+        if args.child_output is None:
+            raise ValueError(
+                "--child-output is required when accepting a scout proposal"
+            )
+        save_model_spec(Path(args.child_output), child)
+        print(
+            "scout proposal accepted: "
+            f"mutation={review.mutation_id} child={review.child_model_hash}"
+        )
+    else:
+        if args.child_output is not None:
+            raise ValueError(
+                "--child-output is invalid when rejecting a scout proposal"
+            )
+        print(
+            "scout proposal rejected: "
+            f"mutation={review.mutation_id}"
+        )
+
+
+def _compare_scout_descendant(args: argparse.Namespace) -> None:
+    from .grammar import load_model_graph, load_model_spec
+    from .production import (
+        load_dataset_manifest,
+        load_frozen_dataset,
+        load_production_campaign,
+        validate_production_freeze,
+    )
+    from .scouts import (
+        compare_scout_descendant_evidence,
+        load_scout_review,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    freeze = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    if not freeze["valid"]:
+        raise ValueError("production freeze validation failed")
+
+    graph = load_model_graph(Path(args.graph))
+    parent = load_model_spec(Path(args.parent_model))
+    child = load_model_spec(Path(args.child_model))
+    review = load_scout_review(Path(args.review))
+    if review.decision != "accepted":
+        raise ValueError("scout comparison requires an accepted review record")
+    if review.parent_model_hash != parent.model_hash:
+        raise ValueError("review parent hash does not match parent model")
+    if review.child_model_hash != child.model_hash:
+        raise ValueError("review child hash does not match child model")
+    if parent.model_hash not in graph.by_hash:
+        raise ValueError(
+            "reviewed scout parent is not a node in the frozen reference graph"
+        )
+
+    posterior, selection = load_frozen_dataset(
+        manifest,
+        data_base_dir=Path(args.base_dir),
+    )
+    summary = compare_scout_descendant_evidence(
+        Path(args.root),
+        posterior,
+        selection,
+        campaign,
+        dataset_identity=manifest.manifest_hash,
+        parent=parent,
+        child=child,
+        proposal_id=review.proposal_id,
+    )
+    print(json.dumps(summary, sort_keys=True, indent=2))
+
+
 def _run_structured_scout_campaign(args: argparse.Namespace) -> None:
     from .grammar import baseline_model_spec, load_model_spec
     from .inference.synthetic import SyntheticSurveyConfig
@@ -899,6 +992,38 @@ def build_parser() -> argparse.ArgumentParser:
     run_stress.add_argument("--reference-state-database")
     run_stress.add_argument("--ignore-current-commit", action="store_true")
     run_stress.set_defaults(func=_run_event_stress_suite)
+
+    review_scout = subparsers.add_parser(
+        "review-scout-proposal",
+        help="explicitly accept/reject one numerically validated HSGP proposal",
+    )
+    review_scout.add_argument("--scout-summary", required=True)
+    review_scout.add_argument("--parent-model", required=True)
+    review_scout.add_argument("--proposal-id", required=True)
+    review_scout.add_argument(
+        "--decision",
+        choices=("accepted", "rejected"),
+        required=True,
+    )
+    review_scout.add_argument("--note")
+    review_scout.add_argument("--review-output", required=True)
+    review_scout.add_argument("--child-output")
+    review_scout.set_defaults(func=_review_scout_proposal)
+
+    compare_scout = subparsers.add_parser(
+        "compare-scout-descendant",
+        help="independently refit/evidence-compare an accepted scout child",
+    )
+    compare_scout.add_argument("--manifest", required=True)
+    compare_scout.add_argument("--graph", required=True)
+    compare_scout.add_argument("--campaign", required=True)
+    compare_scout.add_argument("--review", required=True)
+    compare_scout.add_argument("--parent-model", required=True)
+    compare_scout.add_argument("--child-model", required=True)
+    compare_scout.add_argument("--root", required=True)
+    compare_scout.add_argument("--base-dir", default=".")
+    compare_scout.add_argument("--ignore-current-commit", action="store_true")
+    compare_scout.set_defaults(func=_compare_scout_descendant)
 
     structured_scout = subparsers.add_parser(
         "structured-scout-campaign",
