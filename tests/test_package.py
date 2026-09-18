@@ -596,3 +596,17 @@ def test_diagnose_frozen_selection_null_cli_parses():
     assert args.model == "baseline.json"
     assert args.hyperparameters_json == "baseline_hp.json"
     assert callable(args.func)
+
+
+
+def test_fingerprint_recovery_checkpoint_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "fingerprint-recovery-checkpoint",
+            "--run-dir",
+            "runs/phase3/run_000",
+        ]
+    )
+    assert args.command == "fingerprint-recovery-checkpoint"
+    assert args.run_dir == "runs/phase3/run_000"
+    assert callable(args.func)
