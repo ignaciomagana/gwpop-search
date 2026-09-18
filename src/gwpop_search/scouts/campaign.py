@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -20,6 +20,28 @@ from .synthetic import (
     StructuredScoutInjection,
     generate_structured_scout_dataset,
 )
+
+
+@dataclass(frozen=True)
+class StructuredScoutAcceptanceCriteria:
+    min_runs: int = 8
+    require_all_numerical_pass: bool = True
+    min_expected_proposal_fraction: float = 0.75
+    max_null_any_proposal_fraction: float = 0.25
+    max_off_target_run_fraction: float = 0.25
+    version: str = "structured-scout-engineering-gate-1.0"
+
+    def __post_init__(self) -> None:
+        if self.min_runs <= 0:
+            raise ValueError("min_runs must be positive")
+        for name in (
+            "min_expected_proposal_fraction",
+            "max_null_any_proposal_fraction",
+            "max_off_target_run_fraction",
+        ):
+            value = float(getattr(self, name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must lie in [0, 1]")
 
 
 def reachable_mutation_ids(
@@ -67,6 +89,7 @@ def build_structured_scout_campaign_plan(
     scout_config: ScoutCampaignConfig,
     base_spec: ModelSpec,
     base_hyperparameters: Mapping[str, float],
+    criteria: StructuredScoutAcceptanceCriteria,
 ) -> dict[str, object]:
     if n_runs <= 0:
         raise ValueError("n_runs must be positive")
@@ -88,7 +111,7 @@ def build_structured_scout_campaign_plan(
             }
         )
     return {
-        "format_version": "gwpop-search-structured-scout-campaign-1.0",
+        "format_version": "gwpop-search-structured-scout-campaign-1.1",
         "code": _code_identity(),
         "n_runs": int(n_runs),
         "root_seed": int(root_seed),
@@ -101,6 +124,7 @@ def build_structured_scout_campaign_plan(
             str(name): float(value)
             for name, value in sorted(base_hyperparameters.items())
         },
+        "acceptance_criteria": asdict(criteria),
         "runs": runs,
     }
 
@@ -167,6 +191,9 @@ def assess_structured_scout_campaign(root: str | Path) -> dict[str, object]:
     root = Path(root)
     plan = json.loads((root / "campaign_plan.json").read_text())
     expected = str(plan["injection"]["mutation_id"])
+    criteria = StructuredScoutAcceptanceCriteria(
+        **dict(plan["acceptance_criteria"])
+    )
     scout_config = ScoutCampaignConfig.from_dict(plan["scout_config"])
     reachable = reachable_mutation_ids(scout_config)
     expected_reachable = expected == "null" or expected in reachable
@@ -220,6 +247,101 @@ def assess_structured_scout_campaign(root: str | Path) -> dict[str, object]:
         )
         for row in numerical
     )
+    n_runs_with_off_target = sum(
+        bool(
+            [
+                mutation
+                for mutation in row["proposal_mutation_ids"]
+                if expected == "null" or mutation != expected
+            ]
+        )
+        for row in numerical
+    )
+    expected_fraction = (
+        None
+        if not numerical or expected == "null" or not expected_reachable
+        else float(n_expected / len(numerical))
+    )
+    any_fraction = (
+        None if not numerical else float(n_any / len(numerical))
+    )
+    off_target_run_fraction = (
+        None
+        if not numerical
+        else float(n_runs_with_off_target / len(numerical))
+    )
+
+    checks = [
+        {
+            "name": "minimum_runs",
+            "value": len(rows),
+            "limit": criteria.min_runs,
+            "passed": len(rows) >= criteria.min_runs,
+        },
+        {
+            "name": "all_runs_complete",
+            "value": len(complete),
+            "limit": len(rows),
+            "passed": len(complete) == len(rows),
+        },
+        {
+            "name": "numerical_pass",
+            "value": len(numerical),
+            "limit": len(rows),
+            "passed": (
+                len(numerical) == len(rows)
+                if criteria.require_all_numerical_pass
+                else len(numerical) >= criteria.min_runs
+            ),
+        },
+    ]
+    if expected == "null":
+        checks.append(
+            {
+                "name": "null_any_proposal_fraction",
+                "value": any_fraction,
+                "limit": criteria.max_null_any_proposal_fraction,
+                "passed": bool(
+                    any_fraction is not None
+                    and any_fraction
+                    <= criteria.max_null_any_proposal_fraction
+                ),
+            }
+        )
+    elif expected_reachable:
+        checks.extend(
+            [
+                {
+                    "name": "expected_proposal_fraction",
+                    "value": expected_fraction,
+                    "limit": criteria.min_expected_proposal_fraction,
+                    "passed": bool(
+                        expected_fraction is not None
+                        and expected_fraction
+                        >= criteria.min_expected_proposal_fraction
+                    ),
+                },
+                {
+                    "name": "off_target_run_fraction",
+                    "value": off_target_run_fraction,
+                    "limit": criteria.max_off_target_run_fraction,
+                    "passed": bool(
+                        off_target_run_fraction is not None
+                        and off_target_run_fraction
+                        <= criteria.max_off_target_run_fraction
+                    ),
+                },
+            ]
+        )
+    else:
+        checks.append(
+            {
+                "name": "expected_mutation_reachable",
+                "value": False,
+                "limit": True,
+                "passed": False,
+            }
+        )
 
     result = {
         "format_version": "gwpop-search-structured-scout-assessment-1.0",
@@ -230,27 +352,25 @@ def assess_structured_scout_campaign(root: str | Path) -> dict[str, object]:
         "n_complete": len(complete),
         "n_numerical_pass": len(numerical),
         "n_expected_proposed": int(n_expected),
-        "expected_proposal_fraction_among_numerical_pass": (
-            None
-            if (
-                not numerical
-                or expected == "null"
-                or not expected_reachable
-            )
-            else float(n_expected / len(numerical))
-        ),
+        "expected_proposal_fraction_among_numerical_pass": expected_fraction,
         "n_runs_with_any_proposal": int(n_any),
-        "any_proposal_fraction_among_numerical_pass": (
-            None if not numerical else float(n_any / len(numerical))
-        ),
+        "any_proposal_fraction_among_numerical_pass": any_fraction,
         "n_off_target_proposals": int(n_off_target),
+        "n_runs_with_off_target_proposals": int(n_runs_with_off_target),
+        "off_target_run_fraction_among_numerical_pass": off_target_run_fraction,
+        "acceptance_criteria": asdict(criteria),
+        "acceptance_checks": checks,
+        "engineering_acceptance_passed": bool(
+            all(item["passed"] for item in checks)
+        ),
         "runs": rows,
         "interpretation": (
             "off_target_control"
             if expected != "null" and not expected_reachable
             else (
-                "diagnostic_only; acceptance thresholds require a declared "
-                "multi-seed validation design"
+                "engineering_gate_passed"
+                if all(item["passed"] for item in checks)
+                else "engineering_gate_failed"
             )
         ),
     }
@@ -270,6 +390,7 @@ def run_structured_scout_campaign(
     scout_config: ScoutCampaignConfig,
     base_spec: ModelSpec | None = None,
     base_hyperparameters: Mapping[str, float] | None = None,
+    criteria: StructuredScoutAcceptanceCriteria | None = None,
 ) -> dict[str, object]:
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -279,6 +400,11 @@ def run_structured_scout_campaign(
         else survey_config
     )
     base_spec = baseline_model_spec() if base_spec is None else base_spec
+    criteria = (
+        StructuredScoutAcceptanceCriteria()
+        if criteria is None
+        else criteria
+    )
     base_hyperparameters = dict(
         DEFAULT_BASELINE_HYPERPARAMETERS
         if base_hyperparameters is None
@@ -293,6 +419,7 @@ def run_structured_scout_campaign(
         scout_config=scout_config,
         base_spec=base_spec,
         base_hyperparameters=base_hyperparameters,
+        criteria=criteria,
     )
     _write_plan_once(root / "campaign_plan.json", plan)
 
