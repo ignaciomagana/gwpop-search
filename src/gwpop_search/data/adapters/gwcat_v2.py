@@ -46,7 +46,8 @@ def _positive_log(values: np.ndarray, *, name: str) -> np.ndarray:
     return np.log(arr)
 
 
-def _basis(spin_basis: str) -> CoordinateBasis:
+def basis_for_spin(spin_basis: str) -> CoordinateBasis:
+    """Return the exact independent density basis used by gwcat-v2 exports."""
     if spin_basis not in _SUPPORTED_BASES:
         raise DataContractError(
             f"gwcat v2 spin_basis={spin_basis!r} is not supported by the Phase-1 "
@@ -70,6 +71,10 @@ def _basis(spin_basis: str) -> CoordinateBasis:
         density_measure=measure,
         version="gwcat-v2",
     )
+
+
+# Backward-compatible private alias used by the original Phase-1 implementation.
+_basis = basis_for_spin
 
 
 def _sample_columns(f: h5py.File, spin_basis: str) -> dict[str, np.ndarray]:
@@ -127,11 +132,13 @@ def load_pe(path: str | Path) -> PosteriorCatalog:
                 f"expected a gwcat v2 PE export, found format_version={fmt!r}"
             )
         spin_basis = _decode(_attr(f, "spin_basis"))
-        basis = _basis(spin_basis)
+        basis = basis_for_spin(spin_basis)
         nobs = int(_attr(f, "nobs"))
         nsamp = int(_attr(f, "nsamp"))
         if nobs <= 0 or nsamp <= 0:
-            raise DataContractError(f"invalid gwcat PE dimensions nobs={nobs}, nsamp={nsamp}")
+            raise DataContractError(
+                f"invalid gwcat PE dimensions nobs={nobs}, nsamp={nsamp}"
+            )
         if "p_pe" not in f:
             raise DataContractError("gwcat v2 PE product is missing p_pe")
         log_ref = _positive_log(f["p_pe"][:], name="p_pe")
@@ -185,7 +192,7 @@ def load_selection(path: str | Path) -> SelectionCatalog:
                 f"expected a gwcat v2 selection export, found format_version={fmt!r}"
             )
         spin_basis = _decode(_attr(f, "spin_basis"))
-        basis = _basis(spin_basis)
+        basis = basis_for_spin(spin_basis)
         if "pdraw" not in f:
             raise DataContractError("gwcat v2 selection product is missing pdraw")
         log_draw = _positive_log(f["pdraw"][:], name="pdraw")
