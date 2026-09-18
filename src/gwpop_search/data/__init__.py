@@ -10,6 +10,7 @@ from .schema import (
     ReferenceDensityError,
 )
 from .selection import Campaign, SelectionCatalog, SelectionMode
+from .subset import drop_posterior_events, subset_posterior_events
 from .thinning import (
     thin_catalog_pair,
     thin_posterior_catalog,
@@ -26,6 +27,8 @@ __all__ = [
     "ReferenceDensityError",
     "SelectionCatalog",
     "SelectionMode",
+    "drop_posterior_events",
+    "subset_posterior_events",
     "thin_catalog_pair",
     "thin_posterior_catalog",
     "thin_selection_catalog",
