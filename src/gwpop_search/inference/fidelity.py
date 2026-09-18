@@ -17,7 +17,6 @@ from gwpop_search.hbi import HBIConfig, shape_log_likelihood
 from gwpop_search.models import compile_model_spec
 from gwpop_search.search.scheduler import EvaluationRecord, Fidelity
 
-from .campaign import RecoveryAcceptanceCriteria
 from .evidence import EvidenceResult, NestedSamplingConfig
 from .evidence_campaign import (
     EvidenceCampaignConfig,
@@ -508,6 +507,25 @@ def fidelity_run_config_from_dict(payload: Mapping[str, object]) -> FidelityRunC
         f3_criteria=NumericalCriteria(**dict(payload["f3_criteria"])),
         f4_criteria=NumericalCriteria(**dict(payload["f4_criteria"])),
     )
+
+
+def save_fidelity_run_config(
+    path: str | Path,
+    config: FidelityRunConfig,
+) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            fidelity_run_config_to_dict(config),
+            sort_keys=True,
+            indent=2,
+        )
+    )
+
+
+def load_fidelity_run_config(path: str | Path) -> FidelityRunConfig:
+    return fidelity_run_config_from_dict(json.loads(Path(path).read_text()))
 
 
 @dataclass
