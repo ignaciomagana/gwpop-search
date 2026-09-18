@@ -11,6 +11,9 @@ from gwpop_search.grammar import (
     apply_mutation,
     baseline_model_spec,
     enumerate_model_graph,
+    save_model_graph,
+    save_model_spec,
+    load_model_spec,
     structural_diff_axes,
 )
 
@@ -146,3 +149,30 @@ def test_every_graph_edge_is_a_single_structural_mutation():
             by_hash[edge.child_hash],
         )
         assert len(axes) == 1
+
+
+
+def test_model_spec_json_and_yaml_roundtrip(tmp_path):
+    model = baseline_model_spec()
+    for suffix in (".json", ".yaml"):
+        path = tmp_path / f"model{suffix}"
+        save_model_spec(path, model)
+        restored = load_model_spec(path)
+        assert restored == model
+        assert restored.model_hash == model.model_hash
+
+
+def test_model_graph_serialization_contains_hashes_and_edges(tmp_path):
+    graph = enumerate_model_graph(
+        baseline_model_spec(),
+        max_depth=1,
+        max_models=20,
+    )
+    path = tmp_path / "graph.json"
+    save_model_graph(path, graph)
+    payload = json.loads(path.read_text())
+
+    assert payload["root_hash"] == graph.root_hash
+    assert len(payload["nodes"]) == len(graph.nodes)
+    assert len(payload["edges"]) == len(graph.edges)
+    assert payload["nodes"][0]["model_hash"] == graph.root_hash
