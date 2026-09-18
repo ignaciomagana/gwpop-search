@@ -757,6 +757,19 @@ def _run_structured_scout_campaign(args: argparse.Namespace) -> None:
     )
 
 
+def _confirm_structured_scout_descendant(args: argparse.Namespace) -> None:
+    from .inference.fidelity import load_fidelity_run_config
+    from .scouts import confirm_structured_scout_descendant
+
+    summary = confirm_structured_scout_descendant(
+        Path(args.campaign_root),
+        Path(args.output_root),
+        load_fidelity_run_config(Path(args.fidelity_config)),
+        run_index=args.run_index,
+    )
+    print(json.dumps(summary, sort_keys=True, indent=2))
+
+
 def _assess_structured_scout_campaign(args: argparse.Namespace) -> None:
     from .scouts import assess_structured_scout_campaign
 
@@ -1326,6 +1339,19 @@ def build_parser() -> argparse.ArgumentParser:
     structured_scout.add_argument("--base-model")
     structured_scout.add_argument("--base-hyperparameters-json")
     structured_scout.set_defaults(func=_run_structured_scout_campaign)
+
+    confirm_structured = subparsers.add_parser(
+        "confirm-structured-scout-descendant",
+        help=(
+            "materialize and independently F3-confirm an injected scout "
+            "descendant on the same structured mock"
+        ),
+    )
+    confirm_structured.add_argument("--campaign-root", required=True)
+    confirm_structured.add_argument("--fidelity-config", required=True)
+    confirm_structured.add_argument("--output-root", required=True)
+    confirm_structured.add_argument("--run-index", type=int)
+    confirm_structured.set_defaults(func=_confirm_structured_scout_descendant)
 
     assess_structured = subparsers.add_parser(
         "assess-structured-scout-campaign",
