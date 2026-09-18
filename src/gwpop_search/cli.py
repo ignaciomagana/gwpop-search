@@ -161,6 +161,95 @@ def _read_json_mapping(path: str | Path) -> dict[str, object]:
     return payload
 
 
+def _nearby_baseline_config_from_args(args: argparse.Namespace):
+    from .search import Fidelity
+    from .validation import NearbyBaselineConfig
+
+    return NearbyBaselineConfig(
+        stop_fidelity=Fidelity(args.stop_fidelity),
+        max_gpu_hours_per_scenario=args.max_gpu_hours_per_scenario,
+        max_f3_models=args.max_f3_models,
+        max_f4_models=args.max_f4_models,
+    )
+
+
+def _write_nearby_baseline_config(args: argparse.Namespace) -> None:
+    from .grammar import load_model_spec
+    from .validation import (
+        NearbyBaselineScenario,
+        NearbyBaselineSuiteSpec,
+        save_nearby_baseline_suite_spec,
+    )
+
+    spec = NearbyBaselineSuiteSpec(
+        scenarios=(
+            NearbyBaselineScenario(
+                scenario_id=args.scenario_id,
+                root_spec=load_model_spec(Path(args.root_model)),
+                max_depth=args.max_depth,
+                max_models=args.max_models,
+                note=args.note or "",
+            ),
+        ),
+        config=_nearby_baseline_config_from_args(args),
+    )
+    save_nearby_baseline_suite_spec(Path(args.output), spec)
+    print(
+        "nearby-baseline config written: "
+        f"{args.output} scenario={args.scenario_id}"
+    )
+
+
+def _run_nearby_baseline_suite(args: argparse.Namespace) -> None:
+    from .grammar import load_model_graph
+    from .production import (
+        load_dataset_manifest,
+        load_frozen_dataset,
+        load_production_campaign,
+        validate_production_freeze,
+    )
+    from .validation import (
+        load_nearby_baseline_suite_spec,
+        run_nearby_baseline_suite,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    freeze = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    if not freeze["valid"]:
+        raise ValueError("production freeze validation failed")
+
+    posterior, selection = load_frozen_dataset(
+        manifest,
+        data_base_dir=Path(args.base_dir),
+    )
+    reference_graph = load_model_graph(Path(args.graph))
+    suite = load_nearby_baseline_suite_spec(Path(args.nearby_config))
+
+    reference = args.reference_state_database
+    if reference is None:
+        candidate = Path(args.work_dir) / campaign.state_database
+        reference = str(candidate) if candidate.is_file() else None
+
+    summary = run_nearby_baseline_suite(
+        Path(args.root),
+        posterior,
+        selection,
+        reference_graph,
+        campaign,
+        base_dataset_identity=manifest.manifest_hash,
+        suite=suite,
+        reference_state_database=reference,
+    )
+    print(json.dumps(summary, sort_keys=True, indent=2))
+
+
 def _stress_config_from_args(args: argparse.Namespace):
     from .search import Fidelity
     from .validation import EventStressConfig
@@ -594,6 +683,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--spec", required=True)
     validate_parser.set_defaults(func=_validate_model_spec)
+
+    nearby_template = subparsers.add_parser(
+        "write-nearby-baseline-config",
+        help="write one explicit alternative-root model robustness scenario",
+    )
+    nearby_template.add_argument("--scenario-id", required=True)
+    nearby_template.add_argument("--root-model", required=True)
+    nearby_template.add_argument("--max-depth", type=int, default=1)
+    nearby_template.add_argument("--max-models", type=int, default=20)
+    nearby_template.add_argument("--note")
+    nearby_template.add_argument("--output", required=True)
+    _add_stress_arguments(nearby_template)
+    nearby_template.set_defaults(func=_write_nearby_baseline_config)
+
+    nearby_run = subparsers.add_parser(
+        "run-nearby-baseline-suite",
+        help="run/resume explicit nearby-baseline search robustness scenarios",
+    )
+    nearby_run.add_argument("--manifest", required=True)
+    nearby_run.add_argument("--graph", required=True)
+    nearby_run.add_argument("--campaign", required=True)
+    nearby_run.add_argument("--nearby-config", required=True)
+    nearby_run.add_argument("--base-dir", default=".")
+    nearby_run.add_argument("--work-dir", default=".")
+    nearby_run.add_argument("--root", required=True)
+    nearby_run.add_argument("--reference-state-database")
+    nearby_run.add_argument("--ignore-current-commit", action="store_true")
+    nearby_run.set_defaults(func=_run_nearby_baseline_suite)
 
     loo_stress = subparsers.add_parser(
         "write-loo-stress-config",
