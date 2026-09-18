@@ -7,7 +7,10 @@ import json
 from pathlib import Path
 
 from gwpop_search.grammar import ModelSpec
-from gwpop_search.inference.fidelity import DeterministicHBIEvaluator
+from gwpop_search.inference.fidelity import (
+    DeterministicHBIEvaluator,
+    FidelityRunConfig,
+)
 from gwpop_search.production import ProductionCampaignConfig
 from gwpop_search.search import Fidelity, evaluation_seed
 
@@ -36,31 +39,33 @@ def _write_manifest_once(path: Path, payload: dict[str, object]) -> None:
         path.write_text(json.dumps(payload, sort_keys=True, indent=2))
 
 
-def compare_scout_descendant_evidence(
+def compare_scout_descendant_evidence_config(
     root: str | Path,
     posterior,
     selection,
-    campaign: ProductionCampaignConfig,
+    fidelity_config: FidelityRunConfig,
     *,
+    root_seed: int,
+    comparison_identity: str,
     dataset_identity: str,
     parent: ModelSpec,
     child: ModelSpec,
     proposal_id: str,
 ) -> dict[str, object]:
-    """Refit parent and child independently at the frozen F3 evidence fidelity."""
+    """Refit parent and child independently at one explicit F3 configuration."""
     if parent.model_hash == child.model_hash:
         raise ValueError("parent and child model hashes must differ")
 
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     seed_root = scout_comparison_seed_root(
-        campaign.seed_policy.root_seed,
+        root_seed,
         parent.model_hash,
         child.model_hash,
     )
     manifest = {
-        "format_version": "gwpop-search-scout-descendant-comparison-1.0",
-        "campaign_hash": campaign.campaign_hash,
+        "format_version": "gwpop-search-scout-descendant-comparison-1.1",
+        "comparison_identity": str(comparison_identity),
         "dataset_identity": str(dataset_identity),
         "proposal_id": str(proposal_id),
         "parent_model_hash": parent.model_hash,
@@ -73,7 +78,7 @@ def compare_scout_descendant_evidence(
     evaluator = DeterministicHBIEvaluator(
         posterior,
         selection,
-        config=campaign.fidelity,
+        config=fidelity_config,
         dataset_identity=dataset_identity,
     )
     records = {}
@@ -127,3 +132,30 @@ def compare_scout_descendant_evidence(
         json.dumps(summary, sort_keys=True, indent=2)
     )
     return summary
+
+
+
+def compare_scout_descendant_evidence(
+    root: str | Path,
+    posterior,
+    selection,
+    campaign: ProductionCampaignConfig,
+    *,
+    dataset_identity: str,
+    parent: ModelSpec,
+    child: ModelSpec,
+    proposal_id: str,
+) -> dict[str, object]:
+    """Production wrapper using the frozen campaign F3 configuration."""
+    return compare_scout_descendant_evidence_config(
+        root,
+        posterior,
+        selection,
+        campaign.fidelity,
+        root_seed=campaign.seed_policy.root_seed,
+        comparison_identity=campaign.campaign_hash,
+        dataset_identity=dataset_identity,
+        parent=parent,
+        child=child,
+        proposal_id=proposal_id,
+    )
