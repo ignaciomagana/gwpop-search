@@ -347,6 +347,133 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
     )
 
 
+def _load_exact_null_cli_context(
+    args: argparse.Namespace,
+    *,
+    load_data: bool,
+):
+    from .grammar import load_model_graph
+    from .nulls import load_exact_null_campaign_config
+    from .production import (
+        load_dataset_manifest,
+        load_frozen_dataset,
+        load_production_campaign,
+        validate_production_freeze,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    freeze = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    if not freeze["valid"]:
+        raise ValueError("production freeze validation failed")
+
+    graph = load_model_graph(Path(args.graph))
+    config = load_exact_null_campaign_config(Path(args.null_config))
+    posterior = None
+    selection = None
+    dataset_identity = None
+    if config.data_mode == "frozen_selection_resample":
+        dataset_identity = manifest.manifest_hash
+        if load_data:
+            posterior, selection = load_frozen_dataset(
+                manifest,
+                data_base_dir=Path(args.base_dir),
+            )
+    return (
+        manifest,
+        campaign,
+        graph,
+        config,
+        posterior,
+        selection,
+        dataset_identity,
+    )
+
+
+def _prepare_exact_null_calibration(args: argparse.Namespace) -> None:
+    from .nulls import prepare_exact_null_campaign
+
+    (
+        _,
+        campaign,
+        graph,
+        config,
+        posterior,
+        selection,
+        dataset_identity,
+    ) = _load_exact_null_cli_context(args, load_data=True)
+    plan = prepare_exact_null_campaign(
+        Path(args.root),
+        graph,
+        campaign,
+        config,
+        production_posterior=posterior,
+        production_selection=selection,
+        production_dataset_identity=dataset_identity,
+    )
+    print(json.dumps(plan, sort_keys=True, indent=2))
+
+
+def _run_exact_null_index(args: argparse.Namespace) -> None:
+    from .nulls import run_exact_null_index
+
+    (
+        _,
+        campaign,
+        graph,
+        config,
+        posterior,
+        selection,
+        dataset_identity,
+    ) = _load_exact_null_cli_context(args, load_data=True)
+    result = run_exact_null_index(
+        Path(args.root),
+        graph,
+        campaign,
+        config,
+        null_index=args.null_index,
+        production_posterior=posterior,
+        production_selection=selection,
+        production_dataset_identity=dataset_identity,
+    )
+    print(json.dumps(result.to_dict(), sort_keys=True, indent=2))
+
+
+def _finalize_exact_null_calibration(args: argparse.Namespace) -> None:
+    from .nulls import finalize_exact_null_campaign
+
+    (
+        manifest,
+        campaign,
+        graph,
+        config,
+        _,
+        _,
+        dataset_identity,
+    ) = _load_exact_null_cli_context(args, load_data=False)
+
+    observed = args.observed_state_database
+    if observed is None:
+        candidate = Path(args.work_dir) / campaign.state_database
+        observed = str(candidate) if candidate.is_file() else None
+
+    summary = finalize_exact_null_campaign(
+        Path(args.root),
+        graph,
+        campaign,
+        config,
+        observed_state_database=observed,
+        production_dataset_identity=dataset_identity,
+    )
+    print(json.dumps(summary, sort_keys=True, indent=2))
+
+
 def _run_exact_null_calibration(args: argparse.Namespace) -> None:
     from .grammar import load_model_graph
     from .nulls import (
@@ -1181,6 +1308,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     null_template.add_argument("--output", required=True)
     null_template.set_defaults(func=_write_exact_null_config)
+
+    null_prepare = subparsers.add_parser(
+        "prepare-null-search-calibration",
+        help="freeze the exact-null plan before serial or Slurm-array replay",
+    )
+    null_prepare.add_argument("--manifest", required=True)
+    null_prepare.add_argument("--graph", required=True)
+    null_prepare.add_argument("--campaign", required=True)
+    null_prepare.add_argument("--null-config", required=True)
+    null_prepare.add_argument("--root", required=True)
+    null_prepare.add_argument("--base-dir", default=".")
+    null_prepare.add_argument("--ignore-current-commit", action="store_true")
+    null_prepare.set_defaults(func=_prepare_exact_null_calibration)
+
+    null_index = subparsers.add_parser(
+        "run-null-search-index",
+        help="run/resume one deterministic exact-null replay by index",
+    )
+    null_index.add_argument("--manifest", required=True)
+    null_index.add_argument("--graph", required=True)
+    null_index.add_argument("--campaign", required=True)
+    null_index.add_argument("--null-config", required=True)
+    null_index.add_argument("--root", required=True)
+    null_index.add_argument("--null-index", type=int, required=True)
+    null_index.add_argument("--base-dir", default=".")
+    null_index.add_argument("--ignore-current-commit", action="store_true")
+    null_index.set_defaults(func=_run_exact_null_index)
+
+    null_finalize = subparsers.add_parser(
+        "finalize-null-search-calibration",
+        help="aggregate a complete indexed exact-null campaign and calibrate",
+    )
+    null_finalize.add_argument("--manifest", required=True)
+    null_finalize.add_argument("--graph", required=True)
+    null_finalize.add_argument("--campaign", required=True)
+    null_finalize.add_argument("--null-config", required=True)
+    null_finalize.add_argument("--root", required=True)
+    null_finalize.add_argument("--base-dir", default=".")
+    null_finalize.add_argument("--work-dir", default=".")
+    null_finalize.add_argument("--observed-state-database")
+    null_finalize.add_argument("--ignore-current-commit", action="store_true")
+    null_finalize.set_defaults(func=_finalize_exact_null_calibration)
 
     null_run = subparsers.add_parser(
         "run-null-search-calibration",
