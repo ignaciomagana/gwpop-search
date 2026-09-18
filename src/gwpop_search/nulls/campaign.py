@@ -24,7 +24,6 @@ from .replay import (
     SearchReplayResult,
     calibrate_search_replays,
     null_replay_seed,
-    run_null_replay_campaign,
 )
 from .search_replay import (
     run_baseline_null_search_replay,
@@ -380,6 +379,13 @@ def finalize_exact_null_campaign(
 ) -> dict[str, object]:
     """Aggregate a complete indexed campaign and calibrate the observed search."""
     root = Path(root)
+    if (
+        config.data_mode == "frozen_selection_resample"
+        and production_dataset_identity != campaign.dataset_manifest_hash
+    ):
+        raise ValueError(
+            "production dataset identity does not match the frozen campaign"
+        )
     _require_exact_null_plan(root, graph, campaign, config)
 
     missing = [
