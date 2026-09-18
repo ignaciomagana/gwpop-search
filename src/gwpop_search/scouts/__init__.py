@@ -3,6 +3,7 @@
 from .baseline import export_scout_baseline_hyperparameters
 from .comparison import (
     compare_scout_descendant_evidence,
+    compare_scout_descendant_evidence_config,
     scout_comparison_seed_root,
 )
 from .campaign import (
