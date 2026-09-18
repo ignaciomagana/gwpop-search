@@ -244,3 +244,21 @@ def test_indexed_and_serial_null_campaigns_finalize_identically(
     assert indexed["format_version"] == serial["format_version"]
     assert indexed["calibration"]["n_null_replays"] == 2
     assert indexed_calls == serial_calls
+
+
+
+def test_frozen_selection_finalize_requires_matching_dataset_identity(tmp_path):
+    graph = _graph()
+    campaign = _campaign(graph)
+    config = ExactNullCampaignConfig(
+        n_nulls=1,
+        data_mode="frozen_selection_resample",
+    )
+    with pytest.raises(ValueError, match="dataset identity"):
+        finalize_exact_null_campaign(
+            tmp_path,
+            graph,
+            campaign,
+            config,
+            production_dataset_identity="wrong-dataset",
+        )
