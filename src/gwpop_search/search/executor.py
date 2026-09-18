@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Mapping, Protocol
 
@@ -158,7 +159,7 @@ def execute_search(
     pruned_by_fidelity: dict[str, int] = {}
 
     total_compute_cost = float(
-        sum(float(row["compute_cost"]) for row in store.evaluations())
+        math.fsum(float(row["compute_cost"]) for row in store.evaluations())
     )
 
     fidelity = config.start_fidelity
@@ -211,7 +212,9 @@ def execute_search(
                     },
                     artifact_path=str(run_dir),
                 )
-                total_compute_cost += float(record.compute_cost)
+                total_compute_cost = math.fsum(
+                    (total_compute_cost, float(record.compute_cost))
+                )
                 if (
                     config.max_total_compute_cost is not None
                     and total_compute_cost > config.max_total_compute_cost
