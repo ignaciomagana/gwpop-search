@@ -10,6 +10,11 @@ from .schema import (
     ReferenceDensityError,
 )
 from .selection import Campaign, SelectionCatalog, SelectionMode
+from .thinning import (
+    thin_catalog_pair,
+    thin_posterior_catalog,
+    thin_selection_catalog,
+)
 
 __all__ = [
     "BasisMismatchError",
@@ -21,5 +26,8 @@ __all__ = [
     "ReferenceDensityError",
     "SelectionCatalog",
     "SelectionMode",
+    "thin_catalog_pair",
+    "thin_posterior_catalog",
+    "thin_selection_catalog",
     "validate_pair",
 ]
