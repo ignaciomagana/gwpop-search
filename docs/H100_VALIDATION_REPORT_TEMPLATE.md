@@ -195,11 +195,14 @@ review API and independently F3 evidence-compared to its parent. Record:
 - parent hash:
 - child hash:
 - independent comparison path:
+- campaign engineering gate passed before confirmation: yes / no
 - both numerically valid: yes / no
 - log BF child/parent:
+- log BF child/parent > 0: yes / no
+- `engineering_confirmation_passed`: yes / no
 
-This injected-descendant comparison validates the review/refit mechanism; it is
-not a GWTC-5 discovery claim.
+This injected-descendant comparison validates the injected discovery and
+review/refit mechanism; it is not a GWTC-5 discovery claim.
 
 ## 7. Production HSGP scouts
 
