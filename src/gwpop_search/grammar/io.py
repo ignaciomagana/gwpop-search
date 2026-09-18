@@ -80,8 +80,10 @@ def load_model_graph(path: str | Path) -> ModelGraph:
     for edge in edges:
         if edge.parent_hash not in node_hashes or edge.child_hash not in node_hashes:
             raise ValueError("stored model graph edge references an unknown node")
-        if depths[edge.child_hash] != edge.depth:
-            raise ValueError("stored model graph edge depth disagrees with child node")
+        if depths[edge.parent_hash] + 1 != edge.depth:
+            raise ValueError("stored model graph edge depth disagrees with parent depth")
+        if depths[edge.child_hash] > edge.depth:
+            raise ValueError("stored model graph child depth exceeds edge depth")
 
     root_hash = str(payload["root_hash"])
     if root_hash not in node_hashes:
