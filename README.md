@@ -47,7 +47,8 @@ See docs/phase3_recovery.md.
 
 The current repository includes:
 
-- canonical gwcat-style PE and selection containers;
+- canonical gwcat-style PE and selection containers plus audited/idempotent
+  gwcat-v2 canonicalization with source/output hashes;
 - raw-draw and estimator-ready selection semantics;
 - NumPy and differentiable JAX HBI backends;
 - NumPyro NUTS with chain-granularity resume;
@@ -59,10 +60,12 @@ The current repository includes:
 - F0--F4 deterministic search with diagnostics, budgets, and SQLite state;
 - inclusion-probability-corrected Monte-Carlo screening reductions;
 - conditionally normalized HSGP scout inference with typed descendants;
-- multi-seed grammar-matched scout injection validation;
+- frozen eight-seed grammar-matched scout validation, an 88-run H100 matrix,
+  and injected-descendant independent F3 confirmation;
 - held-out detected-event prediction;
 - event-drop and nearby-baseline search stress suites;
-- frozen exact-search null replay calibration;
+- exact-search null replay calibration, with production nulls resampled from
+  the frozen estimator-ready selection and an explicit resampling-ESS gate;
 - typed non-executable agent proposal contracts;
 - frozen production manifests/configuration and an H100/Fable runner.
 
@@ -75,12 +78,23 @@ every node in the declared graph has proper F3/F4 evidence.
 Once the Phase-3 gate and GWTC-5 scientific/data choices are accepted, freeze
 the production inputs explicitly.
 
-Create a dataset manifest from the canonical HDF5s:
+Starting from reviewed gwcat-v2 exports, canonicalize first:
+
+~~~bash
+gwpop-search canonicalize-gwcat-v2 \
+  --pe-export /reviewed/gwcat_pe.h5 \
+  --selection-export /reviewed/gwcat_selection.h5 \
+  --spin-basis chieff \
+  --output-dir frozen/canonical
+~~~
+
+Review `frozen/canonical/canonicalization_report.json`, then create the
+dataset manifest:
 
 ~~~bash
 gwpop-search freeze-dataset \
-  --pe /path/to/pe.h5 \
-  --selection /path/to/selection.h5 \
+  --pe frozen/canonical/pe.h5 \
+  --selection frozen/canonical/selection.h5 \
   --dataset-id gwtc5-bbh-v1 \
   --event-selection-json event_selection.json \
   --waveform-policy-json waveform_policy.json \
@@ -163,8 +177,13 @@ For a full model posterior, the frozen max-f3-models budget must be at least the
 number of nodes in the declared graph. A smaller value intentionally defines a
 discovery-only campaign; evidence completion will refuse to bypass that budget.
 
-See docs/fable_h100_handoff.md and
-scripts/slurm/production_search_h100.sbatch.example.
+The complete validation sequence is in
+`docs/CLAUDE_H100_VALIDATION_HANDOVER.md`; use
+`docs/H100_VALIDATION_REPORT_TEMPLATE.md` as the audit record.
+
+The production-only runbook remains `docs/fable_h100_handoff.md`, with
+`scripts/slurm/production_search_h100.sbatch.example` as the site-neutral
+batch template.
 
 ## Key documents
 
@@ -175,6 +194,9 @@ scripts/slurm/production_search_h100.sbatch.example.
 - docs/hbi_contract.md - standardized likelihood contract.
 - docs/phase3_recovery.md - current Phase-3 H100 recovery runbook.
 - docs/fable_h100_handoff.md - production freeze and H100/Fable handoff.
+- docs/CLAUDE_H100_VALIDATION_HANDOVER.md - authoritative end-to-end H100
+  execution/validation contract.
+- docs/H100_VALIDATION_REPORT_TEMPLATE.md - required H100 review/audit record.
 
 ## Design rule
 
