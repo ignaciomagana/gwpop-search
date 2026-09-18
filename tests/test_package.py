@@ -346,3 +346,43 @@ def test_run_event_stress_suite_cli_parses():
     assert args.command == "run-event-stress-suite"
     assert args.root == "runs/stress"
     assert callable(args.func)
+
+
+
+def test_write_nearby_baseline_config_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "write-nearby-baseline-config",
+            "--scenario-id",
+            "broken_mass",
+            "--root-model",
+            "broken.json",
+            "--output",
+            "nearby.json",
+        ]
+    )
+    assert args.command == "write-nearby-baseline-config"
+    assert args.scenario_id == "broken_mass"
+    assert args.max_depth == 1
+    assert callable(args.func)
+
+
+def test_run_nearby_baseline_suite_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "run-nearby-baseline-suite",
+            "--manifest",
+            "dataset_manifest.json",
+            "--graph",
+            "model_graph.json",
+            "--campaign",
+            "campaign.json",
+            "--nearby-config",
+            "nearby.json",
+            "--root",
+            "runs/nearby",
+        ]
+    )
+    assert args.command == "run-nearby-baseline-suite"
+    assert args.root == "runs/nearby"
+    assert callable(args.func)
