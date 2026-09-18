@@ -8,7 +8,7 @@ from typing import Mapping
 import numpy as np
 from scipy.stats import truncnorm
 
-from gwpop_search.grammar import baseline_model_spec
+from gwpop_search.grammar import DEFAULT_MUTATIONS, baseline_model_spec
 from gwpop_search.inference.synthetic import (
     SyntheticDataset,
     SyntheticSurveyConfig,
@@ -39,6 +39,20 @@ _SUPPORTED = {
 }
 
 
+_INJECTION_PARAMETER = {
+    "pairing.beta.linear_m1": "beta_q_m1_slope",
+    "chieff.mean.linear_m1": "chi_mu_m1_slope",
+    "chieff.mean.linear_q": "chi_mu_q_slope",
+    "chieff.mean.linear_z": "chi_mu_z_slope",
+    "chieff.width.linear_m1": "log_chi_sigma_m1_slope",
+    "chieff.width.linear_q": "log_chi_sigma_q_slope",
+    "chieff.width.linear_z": "log_chi_sigma_z_slope",
+}
+_MUTATION_BY_ID = {
+    mutation.mutation_id: mutation for mutation in DEFAULT_MUTATIONS
+}
+
+
 @dataclass(frozen=True)
 class StructuredScoutInjection:
     mutation_id: str
@@ -52,8 +66,25 @@ class StructuredScoutInjection:
             )
         if not np.isfinite(self.strength):
             raise ValueError("injection strength must be finite")
-        if self.mutation_id == "null" and self.strength != 0.0:
-            raise ValueError("null injection strength must be exactly zero")
+        if self.mutation_id == "null":
+            if self.strength != 0.0:
+                raise ValueError("null injection strength must be exactly zero")
+            return
+
+        parameter = _INJECTION_PARAMETER[self.mutation_id]
+        mutation = _MUTATION_BY_ID[self.mutation_id]
+        prior = mutation.prior_updates[parameter]
+        if prior.family != "uniform":
+            raise RuntimeError(
+                "structured scout injection expects a uniform descendant prior"
+            )
+        low = float(prior.parameters["low"])
+        high = float(prior.parameters["high"])
+        if not low <= self.strength <= high:
+            raise ValueError(
+                f"injection strength {self.strength} lies outside registered "
+                f"prior support [{low}, {high}] for {parameter}"
+            )
 
     @property
     def injection_label(self) -> str:
@@ -287,15 +318,7 @@ def generate_structured_scout_dataset(
     validate_pair(posterior, selection, model.required_fields)
 
     truth = {name: float(value) for name, value in hp.items()}
-    injected_parameter = {
-        "pairing.beta.linear_m1": "beta_q_m1_slope",
-        "chieff.mean.linear_m1": "chi_mu_m1_slope",
-        "chieff.mean.linear_q": "chi_mu_q_slope",
-        "chieff.mean.linear_z": "chi_mu_z_slope",
-        "chieff.width.linear_m1": "log_chi_sigma_m1_slope",
-        "chieff.width.linear_q": "log_chi_sigma_q_slope",
-        "chieff.width.linear_z": "log_chi_sigma_z_slope",
-    }.get(injection.mutation_id)
+    injected_parameter = _INJECTION_PARAMETER.get(injection.mutation_id)
     if injected_parameter is not None:
         truth[injected_parameter] = float(injection.strength)
 
