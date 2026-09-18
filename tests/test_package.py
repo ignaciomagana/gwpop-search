@@ -542,3 +542,31 @@ def test_export_scout_baseline_cli_parses():
     assert args.model == "baseline.json"
     assert args.output == "baseline_hp.json"
     assert callable(args.func)
+
+
+
+def test_run_holdout_validation_cli_parses():
+    args = build_parser().parse_args(
+        [
+            "run-holdout-validation",
+            "--manifest",
+            "dataset_manifest.json",
+            "--graph",
+            "model_graph.json",
+            "--campaign",
+            "campaign.json",
+            "--model-hash",
+            "abc",
+            "--model-hash",
+            "def",
+            "--n-folds",
+            "5",
+            "--root",
+            "runs/holdout",
+        ]
+    )
+    assert args.command == "run-holdout-validation"
+    assert args.model_hash == ["abc", "def"]
+    assert args.n_folds == 5
+    assert args.root == "runs/holdout"
+    assert callable(args.func)
