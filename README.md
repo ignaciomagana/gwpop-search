@@ -59,15 +59,21 @@ The current repository includes:
 - explicit structural model priors and edge comparisons;
 - F0--F4 deterministic search with diagnostics, budgets, and SQLite state;
 - inclusion-probability-corrected Monte-Carlo screening reductions;
-- conditionally normalized HSGP scout inference with typed descendants;
-- frozen eight-seed grammar-matched scout validation, an 88-run H100 matrix,
-  and injected-descendant independent F3 confirmation;
+- optional conditionally normalized HSGP residual scouting with typed
+  interpretable descendants;
+- targeted scout validation/independent descendant confirmation machinery,
+  including a comprehensive 88-run matrix if that optional extension is
+  scientifically invoked;
 - held-out detected-event prediction;
 - event-drop and nearby-baseline search stress suites;
 - exact-search null replay calibration, with production nulls resampled from
   the frozen estimator-ready selection and an explicit resampling-ESS gate;
 - typed non-executable agent proposal contracts;
 - frozen production manifests/configuration and an H100/Fable runner.
+
+The **finite atomic model graph is the primary scientific analysis**. HSGP is a
+later optional residual scout, not a prerequisite for running or interpreting
+the atom search.
 
 F1/F2 screen values are compute-allocation statistics only. They are never
 reported as Bayes factors. Posterior model probabilities are written only when
