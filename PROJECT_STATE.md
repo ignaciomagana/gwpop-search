@@ -17,6 +17,14 @@ and the durable state is explicitly updated after that review.
 
 **Phase 3 remains the open scientific gate.**
 
+**2026-09-19 H100 record:** the specified NumPyro-NUTS Phase-3 campaign was executed on the H100 and
+**REJECTED** (operator decision). Run 0 chain 0 froze against a hard-edge likelihood cliff (100% max tree
+depth), and even at the injected truth the selection Monte-Carlo variance exceeds the gate for all four
+catalogs. The checkpoint/resume identity test passed. Full diagnosis:
+`docs/PHASE3_H100_REJECTION_DIAGNOSIS.md`. Planning authority was then delegated to the H100 orchestrator,
+which is replacing NUTS/JAXNS with dynesty nested sampling and redesigning the synthetic injection survey
+before re-running Phase 3.
+
 Phases 0--2 are accepted. The software for Phases 4--10 has now been staged,
 integrated, and extensively CI-tested so development can continue without
 waiting for H100 access, but those later phases are **not declared
