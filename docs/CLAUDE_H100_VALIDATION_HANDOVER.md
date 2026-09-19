@@ -872,9 +872,12 @@ Stop and report rather than improvising if:
 - the real-data basis/denominator semantics differ from the reviewed contract;
 - production graph evidence cannot be completed within the frozen budget;
 - an F3/F4 numerical gate fails;
-- an HSGP surface fails its structured-validation gate;
-- a production scout proposal is not a registered legal mutation;
-- an accepted production scout child fails independent F3 confirmation;
+- **if the optional HSGP extension is invoked**, the targeted scout surface
+  fails its structured-validation gate;
+- **if the optional HSGP extension is invoked**, a scout proposal is not a
+  registered legal mutation;
+- **if the optional HSGP extension is invoked**, an accepted scout child fails
+  independent F3 confirmation;
 - holdout folds fail strict NUTS/importance diagnostics;
 - null selection resampling ESS is below the frozen threshold;
 - an exact null cannot complete the same search + evidence-completion procedure;
