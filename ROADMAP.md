@@ -162,9 +162,13 @@ Acceptance:
 - screening decisions never overwrite production results;
 - promotion history is queryable.
 
-## Phase 7 — flexible structure scouts
+## Phase 7 — optional flexible structure scouts
 
-**Goal:** use flexible models to propose interpretable additions to the grammar.
+**Goal:** after the finite atomic model search, optionally use flexible models
+to probe a specific residual structure and propose an interpretable addition to
+the grammar.
+
+This phase is not a prerequisite for the core atomic GWTC-5 analysis.
 
 Implement:
 
@@ -173,11 +177,15 @@ Implement:
 - candidate structural dependency extraction;
 - human-reviewable grammar extension workflow.
 
-Acceptance:
+Acceptance **if this optional extension is invoked**:
 
-- injected correlation structures are recovered by the scout;
-- null mocks do not automatically become permanent grammar additions;
-- compiled parametric descendants can be independently fit.
+- the targeted injected correlation structure is recovered by the scout;
+- corresponding null mocks do not automatically become permanent grammar
+  additions;
+- compiled parametric descendants can be independently fit and evidence-tested.
+
+A blanket HSGP campaign is not required when the atomic search itself is the
+scientific endpoint.
 
 ## Phase 8 — search calibration and adversarial validation
 
