@@ -103,6 +103,20 @@ not thresholded. `NSRecoveryAcceptanceCriteria.f3_level()` holds the F3 gates
 of the dynesty ladder (R-hat 1.05, Kish 500, evidence 0.5/0.5, z 3.5,
 importance 10/100/0.35/0.15/2.0).
 
+### CPU rehearsal (nlive 250, 2 repeats, catalog 0)
+
+`gwpop-search-data/validation/phase3_ns_cpu_rehearsal/` ran the campaign code on
+the real survey-v2 catalog 0 with every plan setting except `nlive = 250` and
+`R = 2` (8 CPU threads, ~440 likelihood evaluations/s). Per run: H = 11.5-11.8
+nats, logzerr 0.24-0.26, Kish ESS ~1930, ~0.5M evaluations (~20 min), dlogz
+termination, no selection-unsupported evaluations; repeat std 0.14, max
+cross-run R-hat 1.002. Importance over 512 pooled draws (q0.1 / q0.5 / q0.9):
+min event ESS 26.7 / 81.7 / 185, selection ESS 9.5k / 14.4k / 21.1k, max event
+weight 0.029 / 0.060 / 0.137, Var(log L) 0.13 / 0.21 / 0.33. The only failed
+check was logzerr > 0.2, expected at nlive 250 (about 0.12 at nlive 1000); the
+tail of the minimum event ESS is the closest importance margin. At nlive 1000 a
+run needs about 2M evaluations.
+
 ### Layout
 
 ```text
