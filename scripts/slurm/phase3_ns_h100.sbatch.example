@@ -17,36 +17,59 @@
 set -euo pipefail
 
 : "${GWPOP_ENV:?Set GWPOP_ENV to the environment activation script}"
+: "${GWPOP_CODE:?Set GWPOP_CODE to the checkout (worktree) whose code must run}"
 : "${GWPOP_RUN_DIR:?Set GWPOP_RUN_DIR to a persistent campaign root}"
 
 source "${GWPOP_ENV}"
 
+# The activation script unsets PYTHONPATH and the package is installed editable
+# from the MAIN checkout, so without this the job runs main's code: before this
+# branch is merged it dies immediately with "invalid choice:
+# synthetic-campaign-ns", and after the merge it would silently run whatever
+# main holds instead of the pinned worktree. Run manifests pin the source
+# digest, so a resume under different code is refused rather than mixed.
+export GWPOP_CODE
+export PYTHONPATH="${GWPOP_CODE}/src"
+
 export JAX_ENABLE_X64=true
-if git rev-parse HEAD >/dev/null 2>&1; then
-    export GWPOP_GIT_COMMIT="${GWPOP_GIT_COMMIT:-$(git rev-parse HEAD)}"
-fi
+export GWPOP_GIT_COMMIT="${GWPOP_GIT_COMMIT:-$(git -C "${GWPOP_CODE}" rev-parse HEAD)}"
 
 python - <<'PY'
+import os
+import pathlib
+
 import jax
+
+import gwpop_search
+
+code = pathlib.Path(os.environ["GWPOP_CODE"]).resolve()
+package = pathlib.Path(gwpop_search.__file__).resolve()
+print("gwpop_search:", package)
+if not package.is_relative_to(code):
+    raise SystemExit(f"gwpop_search resolves to {package}, not below {code}; check PYTHONPATH")
 devices = jax.devices()
 print("JAX devices:", devices)
 if not any(device.platform == "gpu" for device in devices):
     raise SystemExit("No JAX GPU device visible; refusing H100 campaign")
 PY
 
-gwpop-search synthetic-campaign-ns \
+# "python -m", not the console script: the installed console script belongs to
+# the main checkout and ignores PYTHONPATH for its own entry point resolution.
+GWPOP="python -m gwpop_search.cli"
+
+${GWPOP} synthetic-campaign-ns \
   --root "${GWPOP_RUN_DIR}" \
   --n-runs "${GWPOP_N_RUNS:-4}" \
   --repeats "${GWPOP_REPEATS:-4}" \
   --root-seed "${GWPOP_ROOT_SEED:-20260917}" \
   --checkpoint-every "${GWPOP_CHECKPOINT_EVERY:-300}"
 
-gwpop-search fingerprint-ns-run \
+${GWPOP} fingerprint-ns-run \
   --run-dir "${GWPOP_RUN_DIR}" \
   --output "${GWPOP_RUN_DIR}/fingerprints_after_job_${SLURM_JOB_ID:-local}.json" > /dev/null
 
 if [[ -n "${GWPOP_EVIDENCE_CHECK_DIR:-}" ]]; then
-  gwpop-search synthetic-evidence-check \
+  ${GWPOP} synthetic-evidence-check \
     --root "${GWPOP_EVIDENCE_CHECK_DIR}" \
     --root-seed "${GWPOP_ROOT_SEED:-20260917}" \
     --checkpoint-every "${GWPOP_CHECKPOINT_EVERY:-300}"

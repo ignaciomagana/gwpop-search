@@ -210,7 +210,16 @@ def _add_ns_arguments(parser: argparse.ArgumentParser) -> None:
         default=300.0,
         help="seconds between dynesty checkpoints (I/O only; not part of the plan)",
     )
-    parser.add_argument("--importance-draws", type=int, default=512)
+    parser.add_argument(
+        "--importance-draws",
+        type=int,
+        default=16384,
+        help=(
+            "pooled posterior draws the importance diagnostics evaluate; the default is at "
+            "least the pooled draw count of every planned fit, so the gated quantiles carry "
+            "no subsample Monte-Carlo noise"
+        ),
+    )
     parser.add_argument("--rhat-draws-per-run", type=int, default=2000)
 
 

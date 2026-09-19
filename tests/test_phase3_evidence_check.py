@@ -347,6 +347,82 @@ def test_pass_rule_rejects_each_violation():
     assert failing(evaluate_evidence_check_rule(null, injected[:1], fits)) == ["n_injected_cases"]
 
 
+def test_ln_bf_sigma_divides_by_the_repeat_count_and_takes_the_largest_term():
+    """MODEL_COMPARISON_MATH.md 9.1(6): sigma_NS^2 / R, not the single-run error."""
+    from gwpop_search.inference.phase3_evidence import ln_bf_sigma_ns
+    from gwpop_search.inference.phase3_ns import ns_evidence_sigma
+
+    evidence = {
+        "n_repeats": 2,
+        "repeat_std": 0.05,
+        "mean_reported_error": 0.108,
+        "max_reported_error": 0.15,
+        "predicted_error_sqrt_h_over_nlive": [0.10, 0.107],
+    }
+    single = ns_evidence_sigma(evidence)
+    assert single["sigma_ns"] == pytest.approx(0.108)  # the mean logzerr wins
+    assert single["sigma_of_mean"] == pytest.approx(0.108 / math.sqrt(2))
+    assert single["terms"]["kappa_hat_sqrt_h_over_nlive"] == pytest.approx(0.107)
+    assert ns_evidence_sigma(evidence, kappa_hat=2.0)["sigma_ns"] == pytest.approx(0.214)
+
+    budget = ln_bf_sigma_ns(evidence, evidence)
+    assert budget["sigma"] == pytest.approx(0.108)  # sqrt(2 x 0.108^2 / 2)
+    # The single-run formula of the task text is sqrt(R) = 1.41 times larger.
+    task_text = math.hypot(*(max(0.05, 0.15),) * 2)
+    assert task_text / budget["sigma"] == pytest.approx(0.15 * math.sqrt(2) / 0.108, rel=1e-9)
+
+    lonely = ns_evidence_sigma({**evidence, "n_repeats": 1, "repeat_std": None})
+    assert lonely["sigma_ns"] == pytest.approx(0.108) == lonely["sigma_of_mean"]
+    assert ln_bf_sigma_ns({**evidence, "n_repeats": 1}, evidence)["sigma"] == pytest.approx(
+        math.sqrt(0.108**2 + 0.108**2 / 2)
+    )
+    with pytest.raises(ValueError):
+        ns_evidence_sigma(evidence, kappa_hat=0.0)
+
+
+def test_sddr_tolerance_includes_the_savage_dickey_bootstrap_error():
+    """MODEL_COMPARISON_MATH.md 9.1(8) adds sigma_SDDR^2 under the square root."""
+    null, injected, fits = good_cases()
+    # sigma = 0.3, difference 0.61: outside 2 x 0.3 = 0.6 without sigma_SDDR.
+    null[0]["sddr"] = {"ln_bf": null[0]["ln_bf"] + 0.61}
+    name = "null.catalog_000.chieff.mean.linear_q.sddr_agreement"
+    verdict = evaluate_evidence_check_rule(null, injected, fits)
+    record = next(item for item in verdict["checks"] if item["name"] == name)
+    assert record["passed"] is False
+    assert record["combined_sigma"] == pytest.approx(0.3)
+    assert record["note"] == "SDDR bootstrap std unavailable; tolerance omits sigma_SDDR"
+
+    # 2 sqrt(0.3^2 + 0.2^2) = 0.721 > 0.61: the same difference now passes.
+    null[0]["sddr"]["bootstrap_std"] = 0.2
+    verdict = evaluate_evidence_check_rule(null, injected, fits)
+    record = next(item for item in verdict["checks"] if item["name"] == name)
+    assert record["passed"] is True
+    assert record["combined_sigma"] == pytest.approx(math.hypot(0.3, 0.2))
+    assert record["limit"] == pytest.approx(2.0 * math.hypot(0.3, 0.2))
+    assert "note" not in record
+    assert verdict["passed"]
+
+
+def test_expected_case_counts_follow_the_plan_not_a_hard_wired_eight():
+    rule = EvidenceCheckPassRule.for_plan(n_catalogs=2, n_atoms=len(EVIDENCE_CHECK_ATOMS))
+    assert (rule.expected_null_cases, rule.expected_injected_cases) == (4, 2)
+    assert EvidenceCheckPassRule.for_plan(n_catalogs=4, n_atoms=2) == EvidenceCheckPassRule()
+
+    null = [
+        make_case("null", f"catalog_{i:03d}", atom, -0.8, sddr=-0.9)
+        for i in range(2)
+        for atom in EVIDENCE_CHECK_ATOMS
+    ]
+    injected = [
+        make_case("injected", f"injected/{atom}", atom, 3.0, sddr=6.0)
+        for atom in EVIDENCE_CHECK_ATOMS
+    ]
+    fits = [{"passed": True}] * 12
+    # The default rule fails a perfect two-catalog outcome on the count alone.
+    assert failing(evaluate_evidence_check_rule(null, injected, fits)) == ["n_null_cases"]
+    assert evaluate_evidence_check_rule(null, injected, fits, rule)["passed"]
+
+
 def test_pass_rule_round_trips_and_validates():
     rule = EvidenceCheckPassRule()
     assert rule.fit_criteria == NSRecoveryAcceptanceCriteria.f3_level()
@@ -374,7 +450,7 @@ def run_tiny_check(root, **overrides):
         dynesty_config=default_phase3_dynesty_config(
             nlive=30, batch_size=8, maxiter=100, dlogz=0.5, num_posterior_samples=200, slices=None
         ),
-        rule=EvidenceCheckPassRule(expected_null_cases=2),
+        # No explicit rule: the expected case counts must follow the plan.
         importance_draws=32,
         rhat_draws_per_run=100,
         sddr_bootstrap=10,
@@ -416,9 +492,28 @@ def test_tiny_evidence_check_end_to_end_and_resume(tmp_path):
         assert root_fit["model_hash"] == case["root_model_hash"]
         root_ev, child_ev = root_fit["fit"]["evidence"], child_fit["fit"]["evidence"]
         assert case["ln_bf"] == pytest.approx(child_ev["mean"] - root_ev["mean"])
-        assert case["ln_bf_sigma"] == pytest.approx(
+        # MODEL_COMPARISON_MATH.md 9.1(6): the error of the MEAN of R runs.
+        expected_sigma = math.sqrt(
+            sum(
+                max(
+                    evidence["repeat_std"],
+                    evidence["mean_reported_error"],
+                    max(evidence["predicted_error_sqrt_h_over_nlive"]),
+                )
+                ** 2
+                / evidence["n_repeats"]
+                for evidence in (child_ev, root_ev)
+            )
+        )
+        assert case["ln_bf_sigma"] == pytest.approx(expected_sigma)
+        assert case["ln_bf_sigma_budget"]["includes_sigma_mc"] is False
+        assert case["ln_bf_sigma_budget"]["child"]["kappa_hat"] == 1.0
+        # The literal task-text formula is recorded but not used: with R = 2 it
+        # is about sqrt(2) times larger.
+        assert case["ln_bf_sigma_task_text"] == pytest.approx(
             math.hypot(child_ev["conservative_error"], root_ev["conservative_error"])
         )
+        assert case["ln_bf_sigma"] < case["ln_bf_sigma_task_text"]
         assert case["sddr"]["parameter"] == ATOM_SLOPE_PARAMETERS[case["atom"]]
         assert math.isfinite(case["sddr"]["ln_bf"])
         assert child_fit["dynesty_config"]["slices"] == 28
@@ -430,6 +525,13 @@ def test_tiny_evidence_check_end_to_end_and_resume(tmp_path):
         assert {"q05", "median", "q95", "truth_in_90pct_interval"} <= set(case["slope_posterior"])
     names = [item["name"] for item in summary["pass_rule"]["checks"]]
     assert names[:3] == ["all_fits_numerically_valid", "n_null_cases", "n_injected_cases"]
+    # One catalog, two atoms: the counts came from the plan, not from a
+    # hard-wired eight, so the count checks pass.
+    assert summary["rule"]["expected_null_cases"] == 2
+    assert summary["rule"]["expected_injected_cases"] == 2
+    assert all(
+        item["passed"] for item in summary["pass_rule"]["checks"][1:3]
+    ), summary["pass_rule"]["checks"][1:3]
     assert isinstance(summary["evidence_check_passed"], bool)
     # 100-iteration test runs cannot pass the F3 gates.
     assert not summary["evidence_check_passed"]

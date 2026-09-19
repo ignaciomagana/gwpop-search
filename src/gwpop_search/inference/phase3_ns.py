@@ -48,7 +48,15 @@ Per-catalog summary (``gwpop-search-phase3-recovery-2.0``)
 * Importance diagnostics with the backend's jitted diagnostics and the runs'
   own HBI configuration (verified against every run's likelihood identity) at
   the coordinate-wise median of the pooled posterior, over ``n`` seeded pooled
-  draws (quantiles, ``inverted_cdf``) and, reported only, at the truth.
+  draws (quantiles, ``inverted_cdf``) and, reported only, at the truth. Each
+  quantile carries the ``subsample_standard_error`` of its estimator, which is
+  0 when ``n`` covers every pooled draw (the default, so the gated quantiles
+  are exact functions of the pooled posterior).
+* NaN/``+inf`` values: the stored log-likelihoods of the runs are counted and
+  gated. NaN/``+inf`` *evaluations* cannot be counted -- the backend raises
+  :class:`~gwpop_search.hbi.PopulationDensityError` on the first one, so no
+  result exists -- and that guarantee is recorded, explicitly unmeasured,
+  under ``guarantees``.
 
 Acceptance (:class:`NSRecoveryAcceptanceCriteria`)
 --------------------------------------------------
@@ -56,8 +64,10 @@ Each catalog must pass every sampler, evidence and importance check; the
 importance thresholds are enforced at the posterior-median point, at the median
 over the pooled draws and at the tail (the ``tail_ess_quantile`` quantile of
 ESS-type metrics, the ``tail_weight_quantile`` quantile of weights and
-``Var(log L)``). Ensemble coverage and standardized offsets are reported, not
-thresholded.
+``Var(log L)``; both must lie strictly beyond the median). The campaign gate
+also requires every catalog of the plan to be present: assessing the catalogs
+that happen to have finished is a selection effect. Ensemble coverage and
+standardized offsets are reported, not thresholded.
 
 Fingerprints
 ------------
@@ -99,9 +109,25 @@ NS_FINGERPRINT_FORMAT_VERSION = "gwpop-search-ns-run-fingerprints-1.0"
 
 PHASE3_ROOT_SEED = 20260917
 DEFAULT_NS_REPEATS = 4
-DEFAULT_IMPORTANCE_DRAWS = 512
+# At or above the pooled-draw count of every planned fit (Phase-3 v2:
+# R = 4 repeats x num_posterior_samples = 4000, i.e. 16000 draws; Phase-3c:
+# 2 x 4000 = 8000), so the gated quantiles are exact functions of the pooled
+# posterior and carry no subsample Monte-Carlo noise; the recorded
+# ``subsample_standard_error`` of every quantile is then exactly 0. A smaller
+# value subsamples: at 512 draws the q0.1 of the minimum event ESS of the CPU
+# rehearsal has a subsample standard deviation of 2.6 on a value of 30.0
+# against a gate at 20, i.e. the verdict would depend on the pinned seed.
+DEFAULT_IMPORTANCE_DRAWS = 16384
 DEFAULT_RHAT_DRAWS_PER_RUN = 2000
 DEFAULT_IMPORTANCE_BATCH_SIZE = 64
+# Bootstrap resamplings behind the reported subsample standard error of every
+# importance quantile (no likelihood evaluations; reported, never gated).
+DEFAULT_QUANTILE_BOOTSTRAP = 200
+# kappa_hat of MODEL_COMPARISON_MATH.md 9.1(6). It is calibrated by pooling the
+# repeat scatter over models against sqrt(H/nlive) (design Sec. 8.3); until that
+# calibration exists the nested-sampling prediction itself (kappa_hat = 1) is
+# used, which is the smallest defensible value.
+DEFAULT_SIGMA_NS_KAPPA_HAT = 1.0
 
 # Quantiles of every importance statistic over the pooled posterior draws.
 IMPORTANCE_QUANTILES = (0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)
@@ -424,6 +450,61 @@ def evidence_repeat_statistics(results: Sequence[DynestyResult]) -> dict[str, ob
     }
 
 
+def ns_evidence_sigma(
+    evidence: Mapping[str, object],
+    *,
+    kappa_hat: float = DEFAULT_SIGMA_NS_KAPPA_HAT,
+) -> dict[str, object]:
+    """``sigma_NS,M`` and ``sigma_NS,M / sqrt(R_M)`` of one model's repeats.
+
+    MODEL_COMPARISON_MATH.md 9.1(6):
+    ``sigma_NS,M = max(repeat std (ddof=1), mean logzerr, kappa_hat *
+    sqrt(H_M / nlive))`` -- the error of a *single* run -- and the error of the
+    mean over the ``R_M`` repeats that enter ``ln BF`` is
+    ``sigma_NS,M / sqrt(R_M)``. ``sqrt(H/nlive)`` is taken as its largest value
+    over the repeats. Returns ``None`` values when the repeats do not determine
+    it (a single run has no ``repeat_std``).
+
+    ``evidence`` is an :func:`evidence_repeat_statistics` payload.
+    """
+    evidence = dict(evidence)
+    kappa_hat = float(kappa_hat)
+    if not math.isfinite(kappa_hat) or kappa_hat <= 0.0:
+        raise ValueError("kappa_hat must be positive and finite")
+    n = int(evidence["n_repeats"])
+    predicted = [float(v) for v in (evidence.get("predicted_error_sqrt_h_over_nlive") or [])]
+    terms = {
+        "repeat_std": _finite_or_none(evidence.get("repeat_std")),
+        "mean_reported_error": _finite_or_none(evidence.get("mean_reported_error")),
+        "kappa_hat_sqrt_h_over_nlive": (
+            kappa_hat * max(predicted) if predicted else None
+        ),
+    }
+    values = [value for value in terms.values() if value is not None]
+    sigma_ns = max(values) if values else None
+    return {
+        "formula": "MODEL_COMPARISON_MATH.md 9.1(6)",
+        "kappa_hat": kappa_hat,
+        "n_repeats": n,
+        "terms": terms,
+        "sigma_ns": sigma_ns,
+        "sigma_of_mean": None if sigma_ns is None else sigma_ns / math.sqrt(n),
+    }
+
+
+def n_nan_or_posinf_log_likelihoods(result: DynestyResult) -> int:
+    """Stored log-likelihoods of a run that are NaN or ``+inf`` (``-inf`` is allowed).
+
+    A measurement of the run's own artifact, not a restatement of the backend's
+    guarantee: the likelihood wrapper raises
+    :class:`~gwpop_search.hbi.PopulationDensityError` on any NaN/``+inf`` value,
+    so a completed run cannot contain one, but a corrupted or externally
+    written ``result.npz`` would be caught here.
+    """
+    values = np.asarray(result.log_likelihoods, dtype=float)
+    return int(np.count_nonzero(np.isnan(values) | np.isposinf(values)))
+
+
 def _run_record(result: DynestyResult, *, repeat: int, run_dir: str | None) -> dict[str, object]:
     diagnostics = dict(result.diagnostics)
     converged = diagnostics.get("converged")
@@ -431,6 +512,7 @@ def _run_record(result: DynestyResult, *, repeat: int, run_dir: str | None) -> d
         "repeat": int(repeat),
         "seed": int(result.seed),
         "run_dir": run_dir,
+        "n_nan_or_posinf_log_likelihoods": n_nan_or_posinf_log_likelihoods(result),
         "log_evidence": float(result.log_evidence),
         "log_evidence_error": float(result.log_evidence_error),
         "information": float(result.information),
@@ -475,7 +557,49 @@ def _point_statistics(stats: Mapping[str, np.ndarray], row: int, batch) -> dict[
     return point
 
 
-def _distribution(values: np.ndarray) -> dict[str, object]:
+def _quantile_subsample_standard_errors(
+    values: np.ndarray,
+    *,
+    n_pooled: int,
+    n_bootstrap: int,
+    seed: int,
+) -> dict[str, float | None]:
+    """Monte-Carlo noise of each quantile from drawing ``k`` of ``n_pooled`` draws.
+
+    The estimator is the quantile of a ``k``-element subsample drawn without
+    replacement from the ``n_pooled`` pooled posterior draws. Its standard
+    deviation around the full-pool quantile is estimated by resampling the
+    evaluated draws with replacement and applying the finite-population
+    correction ``sqrt(1 - k / n_pooled)``; it is exactly 0 when every pooled
+    draw was evaluated (``k == n_pooled``), which is what the defaults do, and
+    ``None`` when it was not estimated. Reported for transparency; no criterion
+    uses it.
+    """
+    values = np.asarray(values, dtype=float)
+    k = int(values.size)
+    n_pooled = int(n_pooled)
+    if k >= n_pooled:
+        return {f"q{q:g}": 0.0 for q in IMPORTANCE_QUANTILES}
+    if int(n_bootstrap) < 2 or k < 2:
+        return {f"q{q:g}": None for q in IMPORTANCE_QUANTILES}
+    correction = math.sqrt(max(0.0, 1.0 - k / n_pooled))
+    rng = np.random.default_rng(int(seed))
+    resampled = values[rng.integers(0, k, size=(int(n_bootstrap), k))]
+    errors: dict[str, float | None] = {}
+    for q in IMPORTANCE_QUANTILES:
+        draws = np.quantile(resampled, q, axis=1, method=QUANTILE_METHOD)
+        value = float(np.std(draws, ddof=1)) * correction if np.all(np.isfinite(draws)) else None
+        errors[f"q{q:g}"] = value
+    return errors
+
+
+def _distribution(
+    values: np.ndarray,
+    *,
+    n_pooled: int | None = None,
+    n_bootstrap: int = DEFAULT_QUANTILE_BOOTSTRAP,
+    seed: int = 0,
+) -> dict[str, object]:
     values = np.asarray(values, dtype=float)
     nonfinite = int(np.count_nonzero(~np.isfinite(values)))
     payload: dict[str, object] = {
@@ -486,6 +610,12 @@ def _distribution(values: np.ndarray) -> dict[str, object]:
     payload["max"] = _finite_or_none(np.max(values))
     payload["mean"] = _finite_or_none(np.mean(values)) if nonfinite == 0 else None
     payload["n_nonfinite"] = nonfinite
+    payload["subsample_standard_error"] = _quantile_subsample_standard_errors(
+        values,
+        n_pooled=values.size if n_pooled is None else n_pooled,
+        n_bootstrap=n_bootstrap,
+        seed=seed,
+    )
     return payload
 
 
@@ -500,6 +630,7 @@ def pooled_importance_diagnostics(
     seed: int,
     truth: Mapping[str, float] | None = None,
     batch_size: int = DEFAULT_IMPORTANCE_BATCH_SIZE,
+    quantile_bootstrap: int = DEFAULT_QUANTILE_BOOTSTRAP,
 ) -> dict[str, object]:
     """Importance diagnostics at the pooled posterior median and over pooled draws.
 
@@ -508,8 +639,15 @@ def pooled_importance_diagnostics(
     configuration other than the selection chunk size, model and data digests;
     ``ValueError`` otherwise). The point is the coordinate-wise median of the
     pooled equal-weight draws; the ``n_draws`` draws are a seeded subset
-    (without replacement) of them. ``truth``, when given, is evaluated too and
+    (without replacement) of them, all of them when ``n_draws`` is at least the
+    pooled count (the default). ``truth``, when given, is evaluated too and
     reported only.
+
+    The gated quantiles of the draw distribution are Monte-Carlo estimates
+    whenever the draws are a strict subset, so every quantile carries a
+    ``subsample_standard_error`` (finite-population-corrected bootstrap, zero
+    when every pooled draw was evaluated). It is reported, never gated: the
+    default ``n_draws`` makes it zero.
     """
     results = list(results)
     names = _common_names(results)
@@ -537,8 +675,9 @@ def pooled_importance_diagnostics(
             )
     draws = pooled_posterior_draws(results)
     rng = np.random.default_rng(int(seed))
-    k = min(n_draws, draws.shape[0])
-    chosen = draws[np.sort(rng.choice(draws.shape[0], size=k, replace=False))]
+    n_pooled = int(draws.shape[0])
+    k = min(n_draws, n_pooled)
+    chosen = draws[np.sort(rng.choice(n_pooled, size=k, replace=False))]
     median = np.median(draws, axis=0)
     rows = [median[None, :], chosen]
     if truth is not None:
@@ -551,13 +690,24 @@ def pooled_importance_diagnostics(
     payload: dict[str, object] = {
         "hbi_config": _hbi_config_payload(hbi_config),
         "n_draws": int(k),
+        "n_pooled_draws": n_pooled,
+        "all_pooled_draws_evaluated": bool(k >= n_pooled),
+        "quantile_bootstrap": int(quantile_bootstrap),
         "seed": int(seed),
         "quantile_method": QUANTILE_METHOD,
         "posterior_median_hyperparameters": {
             name: float(median[i]) for i, name in enumerate(names)
         },
         "posterior_median": _point_statistics(stats, 0, batch),
-        "over_posterior": {key: _distribution(value[1 : 1 + k]) for key, value in stats.items()},
+        "over_posterior": {
+            key: _distribution(
+                value[1 : 1 + k],
+                n_pooled=n_pooled,
+                n_bootstrap=quantile_bootstrap,
+                seed=int(rng.integers(0, 2**63 - 1)),
+            )
+            for key, value in stats.items()
+        },
     }
     if truth is not None:
         payload["truth"] = _point_statistics(stats, 1 + k, batch)
@@ -595,9 +745,9 @@ def summarize_ns_fit(
         "runs": runs,
         "totals": {
             "min_kish_ess": float(min(run["kish_ess"] for run in runs)),
-            # Structural: the backend raises PopulationDensityError on any NaN/+inf
-            # likelihood value, so a completed run has none.
-            "n_nan_or_posinf_evaluations": 0,
+            "n_nan_or_posinf_log_likelihoods": int(
+                sum(run["n_nan_or_posinf_log_likelihoods"] for run in runs)
+            ),
             "n_selection_unsupported": (
                 None if any(v is None for v in unsupported) else int(sum(unsupported))
             ),
@@ -608,6 +758,23 @@ def summarize_ns_fit(
                 if any(run["n_likelihood_evaluations"] is None for run in runs)
                 else int(sum(run["n_likelihood_evaluations"] for run in runs))
             ),
+        },
+        # Structural guarantees of the backend, recorded so that they are not
+        # mistaken for measurements. NaN/+inf likelihood values are never
+        # counted: the wrapper raises PopulationDensityError on the first one,
+        # so no result exists to count them in. What IS measured is
+        # totals["n_nan_or_posinf_log_likelihoods"], the stored log-likelihoods
+        # of the completed runs, which the criteria gate.
+        "guarantees": {
+            "nan_or_posinf_evaluations": {
+                "count": None,
+                "measured": False,
+                "enforced_by": (
+                    "gwpop_search.inference.dynesty_backend raises PopulationDensityError on "
+                    "any NaN/+inf event term or selection exposure, so a run that produced a "
+                    "result evaluated none"
+                ),
+            }
         },
         "evidence": evidence_repeat_statistics(results),
         "convergence": (
@@ -707,10 +874,11 @@ class NSRecoveryAcceptanceCriteria:
             raise ValueError(f"tail_ess_quantile must be one of {IMPORTANCE_QUANTILES}")
         if self.tail_weight_quantile not in IMPORTANCE_QUANTILES:
             raise ValueError(f"tail_weight_quantile must be one of {IMPORTANCE_QUANTILES}")
-        if not self.tail_ess_quantile <= 0.5 <= self.tail_weight_quantile:
+        if not self.tail_ess_quantile < 0.5 < self.tail_weight_quantile:
             raise ValueError(
-                "the tail must be at least as strict as the median: "
-                "tail_ess_quantile <= 0.5 <= tail_weight_quantile"
+                "the tail must be strictly beyond the median, otherwise the tail checks "
+                "duplicate the draw-median ones: "
+                "tail_ess_quantile < 0.5 < tail_weight_quantile"
             )
         if self.max_selection_unsupported_evaluations < 0:
             raise ValueError("max_selection_unsupported_evaluations cannot be negative")
@@ -759,21 +927,38 @@ class NSRecoveryAcceptanceCriteria:
 
 
 def _check(name: str, value, limit, *, comparison: str, **extra) -> dict[str, object]:
-    if value is None or isinstance(value, bool) or not math.isfinite(float(value)):
+    """One fail-closed numerical check.
+
+    Anything that is not a finite real number -- ``None``, a bool, a NaN, a
+    string, a list, a mapping -- fails the check and is recorded with a
+    ``null`` value and its raw repr, so a corrupted summary is reported rather
+    than raising out of the assessment.
+    """
+    if comparison not in ("le", "ge"):  # pragma: no cover - internal misuse
+        raise ValueError(comparison)
+    numeric: float | None = None
+    if value is not None and not isinstance(value, bool):
+        try:
+            candidate = float(value)
+        except (TypeError, ValueError):
+            candidate = None
+        if candidate is not None and math.isfinite(candidate):
+            numeric = candidate
+    if numeric is None:
         passed = False
     elif comparison == "le":
-        passed = float(value) <= float(limit)
-    elif comparison == "ge":
-        passed = float(value) >= float(limit)
-    else:  # pragma: no cover - internal misuse
-        raise ValueError(comparison)
+        passed = numeric <= float(limit)
+    else:
+        passed = numeric >= float(limit)
     record = {
         "name": name,
-        "value": None if value is None or isinstance(value, bool) else _finite_or_none(value),
+        "value": numeric,
         "comparison": comparison,
         "limit": float(limit),
         "passed": bool(passed),
     }
+    if numeric is None and value is not None:
+        record["raw_value"] = repr(value)
     record.update(extra)
     return record
 
@@ -814,8 +999,12 @@ def assess_ns_fit(
                criteria.max_log_evidence_error, comparison="le"),
         _check("max_pairwise_repeat_z", evidence.get("max_pairwise_z"),
                criteria.max_pairwise_repeat_z, comparison="le"),
-        _check("n_nan_or_posinf_evaluations", totals.get("n_nan_or_posinf_evaluations"), 0,
-               comparison="le"),
+        # Measured on the stored artifacts. NaN/+inf likelihood *evaluations*
+        # cannot be counted (the backend raises on the first one and no result
+        # is produced); that structural guarantee is recorded, unmeasured, in
+        # the summary's "guarantees" block.
+        _check("n_nan_or_posinf_log_likelihoods",
+               totals.get("n_nan_or_posinf_log_likelihoods"), 0, comparison="le"),
         _check("n_selection_unsupported", totals.get("n_selection_unsupported"),
                criteria.max_selection_unsupported_evaluations, comparison="le"),
     ]
@@ -1042,11 +1231,29 @@ def aggregate_ns_recovery_summaries(
     criteria: NSRecoveryAcceptanceCriteria | None = None,
     *,
     plan_sha256: str | None = None,
+    planned_seed_pairs: Sequence[Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
-    """Campaign summary 2.0: per-catalog assessments, coverage and offsets."""
+    """Campaign summary 2.0: per-catalog assessments, coverage and offsets.
+
+    ``planned_seed_pairs`` are the plan's ``seed_pairs``. When given, the gate
+    additionally requires that every planned catalog has a summary: assessing
+    only the catalogs that happen to have finished is a selection effect (the
+    missing ones are the ones most likely to have failed), so a campaign with
+    ``missing_seed_pairs`` never passes.
+    """
     criteria = NSRecoveryAcceptanceCriteria() if criteria is None else criteria
     summaries = [dict(item) for item in summaries]
     assessments = [assess_ns_recovery_summary(item, criteria) for item in summaries]
+    present = {(int(item["data_seed"]), int(item["sampler_seed"])) for item in summaries}
+    missing: list[dict[str, int]] = []
+    n_planned = None
+    if planned_seed_pairs is not None:
+        n_planned = len(list(planned_seed_pairs))
+        missing = [
+            {"data_seed": int(pair["data_seed"]), "sampler_seed": int(pair["sampler_seed"])}
+            for pair in planned_seed_pairs
+            if (int(pair["data_seed"]), int(pair["sampler_seed"])) not in present
+        ]
 
     parameter_names: set[str] = set()
     for item in summaries:
@@ -1084,16 +1291,20 @@ def aggregate_ns_recovery_summaries(
     n_pass = sum(bool(item["passed"]) for item in assessments)
     enough_runs = len(summaries) >= criteria.min_runs
     all_pass = bool(summaries) and n_pass == len(summaries)
+    complete = not missing
     return {
         "format_version": CAMPAIGN_SUMMARY_FORMAT_VERSION,
         "criteria": criteria.to_dict(),
         "plan_sha256": plan_sha256,
         "n_runs": len(summaries),
+        "n_planned_runs": n_planned,
+        "missing_seed_pairs": missing,
+        "all_planned_catalogs_present": bool(complete),
         "n_numerical_pass": n_pass,
         "n_numerical_fail": len(summaries) - n_pass,
         "enough_runs": bool(enough_runs),
         "all_numerical_pass": bool(all_pass),
-        "phase3_numerical_gate_passed": bool(enough_runs and all_pass),
+        "phase3_numerical_gate_passed": bool(enough_runs and all_pass and complete),
         # Reported, not thresholded: a handful of catalogs is not a calibrated
         # coverage measurement.
         "coverage": coverage,
@@ -1131,7 +1342,8 @@ def assess_ns_recovery_campaign(
 
     Without explicit ``criteria`` the criteria recorded in the campaign plan
     are used (the defaults when the root has no plan). Summaries of catalogs
-    that are not part of the plan are refused.
+    that are not part of the plan are refused, and a plan whose catalogs are
+    not all present fails the gate (``missing_seed_pairs``).
     """
     root = Path(root)
     plan = _load_plan(root)
@@ -1159,6 +1371,7 @@ def assess_ns_recovery_campaign(
         summaries,
         criteria=criteria,
         plan_sha256=None if plan is None else _json_sha256(plan),
+        planned_seed_pairs=None if plan is None else list(plan["seed_pairs"]),
     )
     root.mkdir(parents=True, exist_ok=True)
     _atomic_write_json(root / CAMPAIGN_SUMMARY_NAME, result)
