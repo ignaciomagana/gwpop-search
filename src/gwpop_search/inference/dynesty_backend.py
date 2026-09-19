@@ -26,9 +26,12 @@ hyperparameter vectors with ``jax.jit(jax.vmap(...))``.
   bug and raises :class:`gwpop_search.hbi.PopulationDensityError`. It is never
   mapped to a likelihood value.
 * As in the JAX builder, an exposure estimate with no finite population
-  support (``log A = -inf``) gives ``log L = -inf``. Such evaluations are
-  counted separately (``n_selection_unsupported``) so that they are never
-  silent.
+  support (``log A = -inf``) while every event keeps support gives
+  ``log L = -inf`` (the NumPy reference raises ``SelectionSupportError``
+  there). Such evaluations are counted, summed across checkpoint/resume
+  sessions, reported as ``DynestyResult.n_selection_unsupported`` and
+  announced with :class:`SelectionSupportWarning`: they remove prior volume
+  from the evidence because the injections do not cover the population.
 
 Evidence contract
 -----------------
@@ -39,7 +42,31 @@ over the rate with ``p(R) ~ 1/R``; the omitted constant (``log Gamma(N)`` plus
 the normalization of that improper rate prior) is the same for every
 population model evaluated on the same PE catalog and selection product, so it
 cancels in Bayes factors between such models. Evidences are comparable only
-under those conditions (same data, same rate treatment).
+under those conditions (same data, same rate treatment). Further caveats:
+
+* The hyperpriors are the model's declared priors. For a declarative model
+  (``population_model.spec``), :func:`run_dynesty_population` refuses priors
+  that differ from ``prior_specs_from_model_spec(model.spec)`` because those
+  priors are part of the model hash that the evidence is recorded under.
+* The prior is not renormalized over hyperparameters that a density encodes
+  as invalid (``-inf``). If a prior admitted such a region, ``ln Z`` would
+  include ``ln P(valid)``. Genuine zero support, where the data exclude the
+  hyperparameters (e.g. an event outside the mass range), is correctly part
+  of ``ln Z``.
+* Monte Carlo noise in ``log L`` enters ``ln Z`` at order ``Var[log L]``;
+  check it on the posterior with :func:`importance_diagnostics_over_posterior`.
+
+Identity and provenance
+-----------------------
+A resume (and, for population runs, the reuse of a finished result) must be
+the same computation: the checkpoint and the run manifest pin the parameter
+names, seed, the trajectory-relevant configuration
+(:meth:`DynestyConfig.identity_dict`), the code (package version, git commit,
+``git_dirty`` and a SHA-256 of the package sources, so uncommitted edits are
+detected), the software versions and the runtime (JAX backend, device kind,
+platform version, ``XLA_FLAGS``, CPU model). The likelihood identity (names,
+HBI config, model configuration, data digests) is stored with every result so
+that diagnostics can refuse to evaluate a different estimator.
 
 Batching and determinism
 ------------------------
@@ -63,22 +90,31 @@ checkpoint written during the main loop (the normal case after a job is
 killed) continues the identical trajectory, so the final evidence and samples
 equal those of an uninterrupted run with the same seed. ``maxiter``/``maxcall``
 are total budgets across sessions (dynesty counts them per call; the remaining
-budget is passed on resume).
+budget is passed on resume). ``checkpoint_every`` and
+``num_posterior_samples`` do not affect the trajectory and may change between
+sessions. Run counters (likelihood evaluations, zero-likelihood and
+selection-unsupported evaluations, sampling wall time) travel inside the
+checkpoint and are totals over the sessions that produced the result.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields as dataclass_fields
+import copy
+from dataclasses import dataclass, field, fields as dataclass_fields, replace
 import hashlib
+import importlib
 import json
 import math
 import numbers
 import os
 from pathlib import Path
 import pickle
+import platform
+import subprocess
 import threading
 import time
 from typing import Callable, Mapping, Sequence
+import warnings
 
 import numpy as np
 from scipy.special import logsumexp, ndtri
@@ -87,14 +123,24 @@ from gwpop_search.hbi.common import PopulationDensityError
 
 from .priors import PriorSpec, serialize_prior_map
 
-MANIFEST_FORMAT_VERSION = "gwpop-search-dynesty-1.0"
-RESULT_FORMAT_VERSION = "gwpop-search-dynesty-result-1.0"
-CHECKPOINT_FORMAT_VERSION = "gwpop-search-dynesty-checkpoint-1.0"
+MANIFEST_FORMAT_VERSION = "gwpop-search-dynesty-1.1"
+RESULT_FORMAT_VERSION = "gwpop-search-dynesty-result-1.1"
+CHECKPOINT_FORMAT_VERSION = "gwpop-search-dynesty-checkpoint-1.1"
+# Results written before provenance/counters were recorded load with those
+# fields empty (None / {}).
+_READABLE_RESULT_FORMATS = ("gwpop-search-dynesty-result-1.0", RESULT_FORMAT_VERSION)
 
-# Attribute stamped on every sampler created by run_dynesty. dynesty pickles the
-# sampler's __dict__, so checkpoints carry it and a resume can verify that the
-# requested seed/configuration/names are the ones the checkpoint was made with.
+# Attributes stamped on every sampler created by run_dynesty. dynesty pickles
+# the sampler's __dict__, so checkpoints carry them: the metadata lets a resume
+# verify that the requested run is the one the checkpoint was made for, and the
+# tally carries the run counters across sessions.
 _CHECKPOINT_META_ATTR = "_gwpop_search_checkpoint_meta"
+_TALLY_ATTR = "_gwpop_search_run_tally"
+
+# DynestyConfig fields that do not influence the sampling trajectory: the
+# checkpoint cadence (I/O only) and the equal-weight resampling size
+# (post-processing of the finished run).
+_NON_TRAJECTORY_FIELDS = ("checkpoint_every", "num_posterior_samples")
 
 # Entropy tag for the equal-weight resampling stream. The dynesty run itself
 # uses ``np.random.default_rng(seed)``; resampling uses
@@ -124,6 +170,18 @@ class DynestyUnavailableError(ImportError):
 
 class PoolCancelledError(RuntimeError):
     """A pooled task was abandoned because another task in the same map failed."""
+
+
+class DirtyCodeWarning(UserWarning):
+    """The package sources have uncommitted changes, so ``git_commit`` does not
+    identify the code; the run is identified by ``code.source_sha256``.
+    Production drivers should escalate this warning to an error."""
+
+
+class SelectionSupportWarning(UserWarning):
+    """Some evaluations had population support on every event but none on the
+    selection injections; they were treated as zero likelihood, which removes
+    that prior volume from the evidence."""
 
 
 def _require_dynesty():
@@ -164,20 +222,271 @@ def _require_jax():
 
 
 def _software_versions() -> dict[str, str]:
-    versions = {"numpy": str(np.__version__)}
-    try:
-        import dynesty
-
-        versions["dynesty"] = str(dynesty.__version__)
-    except ImportError:  # pragma: no cover
-        versions["dynesty"] = "unavailable"
-    try:
-        import jax
-
-        versions["jax"] = str(jax.__version__)
-    except ImportError:  # pragma: no cover
-        versions["jax"] = "unavailable"
+    """Versions of the numerical stack (importing them never initializes a device)."""
+    versions = {}
+    for module in ("numpy", "scipy", "dynesty", "jax", "jaxlib"):
+        try:
+            versions[module] = str(importlib.import_module(module).__version__)
+        except ImportError:  # pragma: no cover - optional extras
+            versions[module] = "unavailable"
     return dict(sorted(versions.items()))
+
+
+# ---------------------------------------------------------------------------
+# Code, runtime and likelihood identity
+# ---------------------------------------------------------------------------
+
+
+def _json_normalized(value):
+    """``value`` as it reads back from JSON (tuples -> lists, sorted keys)."""
+    return json.loads(json.dumps(_json_ready(value), sort_keys=True))
+
+
+def _json_sha256(value) -> str:
+    text = json.dumps(_json_ready(value), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _package_dir() -> Path:
+    import gwpop_search
+
+    return Path(gwpop_search.__file__).resolve().parent
+
+
+def _source_digest(package_dir: Path) -> tuple[str, int]:
+    """SHA-256 over every ``*.py`` file below ``package_dir`` (relative path + content)."""
+    digest = hashlib.sha256()
+    count = 0
+    for path in sorted(package_dir.rglob("*.py")):
+        relative = path.relative_to(package_dir)
+        if "__pycache__" in relative.parts or not path.is_file():
+            continue
+        digest.update(relative.as_posix().encode("utf-8") + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+        count += 1
+    return digest.hexdigest(), count
+
+
+def _git_root(start: Path) -> Path | None:
+    for parent in (start, *start.parents):
+        if (parent / ".git").exists():  # a directory, or a file in a git worktree
+            return parent
+    return None
+
+
+def _git(repo: Path, *args: str) -> str | None:
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+
+
+def _code_identity(package_dir: str | Path | None = None) -> dict[str, object]:
+    """Identity of the code that runs.
+
+    ``source_sha256`` hashes every ``*.py`` file of the package (relative path
+    and content), so uncommitted edits change the identity even when the git
+    commit does not, and it is available for installs without git metadata.
+    ``git_dirty`` is ``True`` when ``git status`` reports modified, staged or
+    untracked ``*.py`` files under the package directory and ``None`` when no
+    git checkout (or no git) is found. ``GWPOP_GIT_COMMIT`` overrides the
+    commit, as for the NUTS manifests.
+    """
+    from gwpop_search import __version__
+
+    package_dir = _package_dir() if package_dir is None else Path(package_dir).resolve()
+    source_sha256, n_files = _source_digest(package_dir)
+    commit = os.environ.get("GWPOP_GIT_COMMIT") or None
+    dirty = None
+    repo = _git_root(package_dir)
+    if repo is not None:
+        if commit is None:
+            head = _git(repo, "rev-parse", "HEAD")
+            commit = None if head is None else (head.strip() or None)
+        relative = package_dir.relative_to(repo).as_posix()
+        pathspec = f":(glob){relative}/**/*.py" if relative != "." else ":(glob)**/*.py"
+        status = _git(repo, "status", "--porcelain", "--untracked-files=all", "--", pathspec)
+        dirty = None if status is None else bool(status.strip())
+    return {
+        "package_version": str(__version__),
+        "git_commit": commit or "unknown",
+        "git_dirty": dirty,
+        "source_sha256": source_sha256,
+        "n_source_files": n_files,
+    }
+
+
+def _cpu_model() -> str:
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:  # pragma: no cover - non-Linux hosts
+        pass
+    return platform.processor() or "unknown"  # pragma: no cover
+
+
+def _runtime_identity(*, jax_devices: bool) -> dict[str, object]:
+    """Where the computation runs (bit-identical resume needs the same runtime).
+
+    The host part (Python, architecture, CPU model) always applies: dynesty's
+    bounds and proposals run in NumPy on the host. With ``jax_devices`` the
+    JAX backend is queried (and therefore initialized): backend, device
+    platform and kind of the default device, platform (CUDA) version,
+    ``XLA_FLAGS`` and the 64-bit flag.
+    """
+    info: dict[str, object] = {
+        "python": platform.python_version(),
+        "machine": platform.machine(),
+        "cpu_model": _cpu_model(),
+    }
+    if jax_devices:
+        jax, _ = _require_jax()
+        device = jax.devices()[0]
+        client = getattr(device, "client", None)
+        info.update(
+            {
+                "jax_backend": str(jax.default_backend()),
+                "device_platform": str(device.platform),
+                "device_kind": str(device.device_kind),
+                "platform_version": str(getattr(client, "platform_version", "unknown")),
+                "xla_flags": os.environ.get("XLA_FLAGS", ""),
+                "jax_enable_x64": bool(jax.config.read("jax_enable_x64")),
+            }
+        )
+    return info
+
+
+def _model_identity(population_model) -> dict[str, object]:
+    from .numpyro import _model_config
+
+    payload = dict(_model_config(population_model))
+    if not hasattr(population_model, "to_config"):
+        # Plain callables have no configuration; record which callable it is.
+        module = getattr(population_model, "__module__", None)
+        qualname = getattr(population_model, "__qualname__", None)
+        if module and qualname:
+            payload["callable"] = f"{module}.{qualname}"
+    return payload
+
+
+def _update_digest(digest, label: str, array) -> None:
+    array = np.ascontiguousarray(array)
+    digest.update(label.encode("utf-8"))
+    digest.update(str(array.dtype.str).encode("utf-8"))
+    digest.update(str(array.shape).encode("utf-8"))
+    digest.update(array.tobytes())
+
+
+def _posterior_digest(posterior, fields: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    digest.update(json.dumps(list(posterior.event_names)).encode("utf-8"))
+    _update_digest(digest, "offsets", np.asarray(posterior.offsets, dtype="<i8"))
+    for name in fields:
+        _update_digest(digest, f"samples/{name}", np.asarray(posterior.samples[name], dtype="<f8"))
+    _update_digest(digest, "log_ref_density", np.asarray(posterior.log_ref_density, dtype="<f8"))
+    return digest.hexdigest()
+
+
+def _selection_digest(selection, fields: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    for name in fields:
+        _update_digest(digest, f"samples/{name}", np.asarray(selection.samples[name], dtype="<f8"))
+    _update_digest(digest, "log_draw_density", np.asarray(selection.log_draw_density, dtype="<f8"))
+    digest.update(json.dumps(selection.campaign_id.tolist()).encode("utf-8"))
+    digest.update(str(selection.estimator_semantics).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _data_identity(posterior, selection, fields: Sequence[str]) -> dict[str, object]:
+    return {
+        "pe_basis": posterior.basis.identity,
+        "selection_basis": selection.basis.identity,
+        "event_names": list(posterior.event_names),
+        "n_events": int(posterior.n_events),
+        "pe_sample_counts": np.diff(posterior.offsets).astype(int).tolist(),
+        "n_pe_samples": int(posterior.n_samples_total),
+        "n_selected": int(selection.n_selected),
+        "selection_mode": selection.mode.value,
+        "selection_campaigns": [
+            {
+                "campaign_id": campaign.campaign_id,
+                "n_draw": None if campaign.n_draw is None else int(campaign.n_draw),
+                "observing_time_yr": (
+                    None
+                    if campaign.observing_time_yr is None
+                    else float(campaign.observing_time_yr)
+                ),
+            }
+            for campaign in selection.campaigns
+        ],
+        "density_fields": list(fields),
+        "pe_sha256": _posterior_digest(posterior, fields),
+        "selection_sha256": _selection_digest(selection, fields),
+    }
+
+
+def build_likelihood_identity(
+    posterior,
+    selection,
+    population_model,
+    names: Sequence[str],
+    hbi_config=None,
+) -> dict[str, object]:
+    """What defines the shape log-likelihood function (JSON-normalized).
+
+    ``parameter_names`` (column order), the HBI configuration, the population
+    model configuration (``to_config()``; the qualified name for plain
+    callables) and the data: event names, per-event sample counts, bases,
+    selection mode/campaigns and SHA-256 digests of every array the
+    likelihood reads. Stored with every result of an HBI likelihood so that
+    diagnostics can verify they evaluate the same estimator.
+    """
+    from gwpop_search.hbi.common import density_required_fields
+
+    from .numpyro import _hbi_config_dict
+
+    names = _validated_names(names, what="hyperparameter names")
+    fields = density_required_fields(population_model, posterior.basis)
+    return _json_normalized(
+        {
+            "parameter_names": list(names),
+            "hbi_config": _hbi_config_dict(hbi_config),
+            "model": _model_identity(population_model),
+            "data": _data_identity(posterior, selection, fields),
+        }
+    )
+
+
+def _hbi_config_from_dict(payload: Mapping[str, object]):
+    from gwpop_search.hbi import HBIConfig
+
+    known = {"rate_treatment", "raw_selection_use_observing_time", "selection_chunk_size"}
+    unknown = sorted(set(payload) - known)
+    if unknown:
+        raise ValueError(f"unknown HBI configuration field(s) {unknown}")
+    return HBIConfig(
+        rate_treatment=payload["rate_treatment"],
+        raw_selection_use_observing_time=bool(payload["raw_selection_use_observing_time"]),
+        selection_chunk_size=payload["selection_chunk_size"],
+    )
+
+
+def _without_chunk_size(identity: Mapping[str, object]) -> dict[str, object]:
+    """Likelihood identity minus the selection chunk size (evaluation order only)."""
+    result = copy.deepcopy(dict(identity))
+    hbi = result.get("hbi_config")
+    if isinstance(hbi, dict):
+        hbi.pop("selection_chunk_size", None)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +538,9 @@ class DynestyConfig:
     semantics (``maxiter=M`` performs ``M + 1`` iterations) and are total
     budgets across checkpoint/resume sessions. ``update_interval`` follows
     dynesty: an ``int`` counts likelihood calls, a ``float`` is a fraction of
-    ``nlive``. ``checkpoint_every`` is in seconds.
+    ``nlive``. ``checkpoint_every`` is in seconds. ``checkpoint_every`` and
+    ``num_posterior_samples`` do not affect the sampling trajectory and are
+    excluded from the resume identity (:meth:`identity_dict`).
     """
 
     nlive: int = 500
@@ -316,6 +627,19 @@ class DynestyConfig:
 
     def to_dict(self) -> dict[str, object]:
         return {item.name: getattr(self, item.name) for item in dataclass_fields(self)}
+
+    def identity_dict(self) -> dict[str, object]:
+        """Fields that determine the sampling trajectory and where it stops.
+
+        Excludes ``checkpoint_every`` (I/O cadence) and
+        ``num_posterior_samples`` (resampling of the finished run); a run can
+        be resumed or its finished result reused with different values.
+        ``maxiter``/``maxcall`` are included: they set the stopping point.
+        """
+        payload = self.to_dict()
+        for name in _NON_TRAJECTORY_FIELDS:
+            payload.pop(name)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "DynestyConfig":
@@ -466,7 +790,15 @@ class BatchedShapeLogLikelihood:
     ``{names[k]: X[row, k]}``; the event terms and log exposure are computed by
     the same :func:`gwpop_search.hbi.jax_backend.build_terms_function`. The
     extra outputs of the vmapped function only detect NaN/``+inf`` (which
-    raise) and count exposure estimates without population support.
+    raise) and count exposure estimates without population support while
+    every event is supported (``stats()["n_selection_unsupported"]``; the
+    NumPy reference raises ``SelectionSupportError`` at such points, the JAX
+    builder and this class return ``-inf``). :func:`run_dynesty` sums that
+    count over sessions and warns when it is non-zero.
+
+    :meth:`likelihood_identity` (names, HBI config, model, data digests) and
+    :meth:`runtime_identity` (device and software runtime) are recorded by
+    :func:`run_dynesty` in checkpoints and results.
     """
 
     def __init__(
@@ -491,6 +823,8 @@ class BatchedShapeLogLikelihood:
         self.batch_size = _as_int("batch_size", batch_size, minimum=1)
         self.n_events = int(posterior.n_events)
         self.hbi_config = cfg
+        self._identity_inputs = (posterior, selection, population_model)
+        self._likelihood_identity: dict | None = None
 
         terms = build_terms_function(
             posterior, selection, population_model, config=cfg, jit=False
@@ -584,6 +918,19 @@ class BatchedShapeLogLikelihood:
     def stats(self) -> dict[str, object]:
         with self._stats_lock:
             return dict(self._stats)
+
+    def likelihood_identity(self) -> dict[str, object]:
+        """:func:`build_likelihood_identity` of this likelihood (computed once)."""
+        if self._likelihood_identity is None:
+            posterior, selection, model = self._identity_inputs
+            self._likelihood_identity = build_likelihood_identity(
+                posterior, selection, model, self.names, self.hbi_config
+            )
+        return copy.deepcopy(self._likelihood_identity)
+
+    def runtime_identity(self) -> dict[str, object]:
+        """Host and JAX device runtime this likelihood evaluates on."""
+        return _runtime_identity(jax_devices=True)
 
 
 def build_batched_log_likelihood(
@@ -782,6 +1129,7 @@ class ThreadBatchPool:
             "n_maps": 0,
             "n_tasks": 0,
             "n_evaluations": 0,
+            "n_zero_likelihood": 0,
             "n_batches": 0,
             "n_full_batches": 0,
             "evaluation_seconds": 0.0,
@@ -801,6 +1149,11 @@ class ThreadBatchPool:
         self._dispatcher.start()
 
     # -- public API -------------------------------------------------------
+
+    @property
+    def batched_loglikelihood(self) -> Callable[[np.ndarray], np.ndarray]:
+        """The batched callable every likelihood request is evaluated with."""
+        return self._fn
 
     def map(self, func, iterable) -> list:
         items = list(iterable)
@@ -1027,6 +1380,7 @@ class ThreadBatchPool:
         with self._lock:
             stats = self._stats
             stats["n_evaluations"] += X.shape[0]
+            stats["n_zero_likelihood"] += int(np.count_nonzero(np.isneginf(values)))
             stats["n_batches"] += 1
             stats["n_full_batches"] += int(X.shape[0] == self.batch_size)
             stats["evaluation_seconds"] += elapsed
@@ -1092,12 +1446,31 @@ class DynestyResult:
     points with zero likelihood, stored by dynesty as ``logl = -1e300``, are
     reported with ``-inf`` likelihood and weight). ``posterior_samples`` are
     ``config.num_posterior_samples`` equal-weight draws (systematic
-    resampling, see :func:`equal_weight_resample`). ``ncall`` is dynesty's
-    ``sampler.ncall`` (initial live points included); dynesty also counts
-    slice proposals that fall outside the unit cube and are rejected without
-    a likelihood evaluation, so the exact number of evaluations of the last
-    session is ``diagnostics["session_pool"]["n_evaluations"]``.
+    resampling, see :func:`equal_weight_resample`, with the generator
+    ``default_rng([seed, tag])``; :meth:`with_num_posterior_samples` redraws
+    them exactly as a run with that size would).
+
+    Counters are totals over the checkpoint/resume sessions that produced the
+    result (a killed session's evaluations after its last checkpoint are
+    repeated by the resume and counted once, so they equal an uninterrupted
+    run): ``n_likelihood_evaluations`` is the exact number of likelihood
+    evaluations; ``n_selection_unsupported`` counts evaluations whose events
+    were all supported but whose selection exposure had no population
+    support (treated as zero likelihood; ``None`` when the likelihood does not
+    report it); ``elapsed_seconds`` is the sampling wall time. dynesty's
+    ``ncall`` (initial live points included) differs from
+    ``n_likelihood_evaluations``: it also counts slice steps outside the unit
+    cube, which are rejected without an evaluation, and it does not count the
+    evaluations of proposals still queued when the run stopped
+    (``diagnostics["n_queued_evaluations"]``). For ``sample="unif"``,
+    ``ncall + n_queued_evaluations == n_likelihood_evaluations`` exactly.
     ``efficiency`` is dynesty's ``eff`` in percent (``niter / ncall``).
+
+    ``provenance`` records ``code`` (package version, git commit,
+    ``git_dirty``, source digest), ``versions``, ``runtime`` (host and device),
+    ``likelihood`` (:func:`build_likelihood_identity` of an HBI likelihood,
+    else ``None``) and ``run`` (caller identity, e.g. the population
+    manifest digest).
     """
 
     names: tuple[str, ...]
@@ -1118,15 +1491,36 @@ class DynestyResult:
     seed: int
     versions: Mapping[str, str]
     diagnostics: Mapping[str, object] = field(default_factory=dict)
+    n_likelihood_evaluations: int | None = None
+    n_selection_unsupported: int | None = None
+    provenance: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def weights(self) -> np.ndarray:
         """Normalized importance weights of :attr:`samples`."""
-        return np.exp(self.log_weights - logsumexp(self.log_weights))
+        return _normalized_weights(self.log_weights)
+
+    @property
+    def likelihood_identity(self) -> Mapping[str, object] | None:
+        """The likelihood this result sampled (``None`` for non-HBI likelihoods)."""
+        return self.provenance.get("likelihood")
 
     def posterior(self) -> dict[str, np.ndarray]:
         """Equal-weight posterior samples keyed by parameter name."""
         return {name: self.posterior_samples[:, k] for k, name in enumerate(self.names)}
+
+    def with_num_posterior_samples(self, num_posterior_samples: int) -> "DynestyResult":
+        """This result with ``num_posterior_samples`` equal-weight draws.
+
+        The draws are identical to those of a run with
+        ``config.num_posterior_samples = num_posterior_samples`` (the sampling
+        trajectory does not depend on it); ``config`` is updated accordingly.
+        """
+        config = replace(self.config, num_posterior_samples=num_posterior_samples)
+        draws = _equal_weight_posterior(
+            self.samples, self.log_weights, config.num_posterior_samples, self.seed
+        )
+        return replace(self, config=config, posterior_samples=draws)
 
 
 def equal_weight_resample(samples, weights, n: int, rng: np.random.Generator) -> np.ndarray:
@@ -1151,6 +1545,17 @@ def equal_weight_resample(samples, weights, n: int, rng: np.random.Generator) ->
     positions = (rng.random() + np.arange(n)) / n
     index = np.searchsorted(cumulative, positions, side="right")
     return rng.permutation(samples[index])
+
+
+def _normalized_weights(log_weights) -> np.ndarray:
+    log_weights = np.asarray(log_weights, dtype=np.float64)
+    return np.exp(log_weights - logsumexp(log_weights))
+
+
+def _equal_weight_posterior(samples, log_weights, n: int, seed: int) -> np.ndarray:
+    """The run's equal-weight draws: one seeded stream per (seed, size)."""
+    rng = np.random.default_rng([int(seed), _RESAMPLE_STREAM])
+    return equal_weight_resample(samples, _normalized_weights(log_weights), n, rng)
 
 
 def _json_ready(value):
@@ -1179,6 +1584,10 @@ def _result_sidecar(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".json")
 
 
+def _optional_int(value) -> int | None:
+    return None if value is None else int(value)
+
+
 def save_dynesty_result(path: str | Path, result: DynestyResult) -> None:
     """Write ``result`` as ``path`` (npz arrays) plus ``path + '.json'`` metadata.
 
@@ -1202,6 +1611,9 @@ def save_dynesty_result(path: str | Path, result: DynestyResult) -> None:
         "seed": int(result.seed),
         "versions": dict(result.versions),
         "diagnostics": _json_ready(result.diagnostics),
+        "n_likelihood_evaluations": _optional_int(result.n_likelihood_evaluations),
+        "n_selection_unsupported": _optional_int(result.n_selection_unsupported),
+        "provenance": _json_ready(result.provenance),
     }
     _atomic_write_text(
         _result_sidecar(path), json.dumps(metadata, sort_keys=True, indent=2, allow_nan=True)
@@ -1230,7 +1642,7 @@ def load_dynesty_result(path: str | Path) -> DynestyResult:
     if not path.exists() or not sidecar.exists():
         raise FileNotFoundError(f"incomplete dynesty result: need {path} and {sidecar}")
     metadata = json.loads(sidecar.read_text())
-    if metadata.get("format_version") != RESULT_FORMAT_VERSION:
+    if metadata.get("format_version") not in _READABLE_RESULT_FORMATS:
         raise ValueError(
             f"unsupported dynesty result format {metadata.get('format_version')!r} in {sidecar}"
         )
@@ -1267,6 +1679,9 @@ def load_dynesty_result(path: str | Path) -> DynestyResult:
         seed=int(metadata["seed"]),
         versions=dict(metadata["versions"]),
         diagnostics=dict(metadata.get("diagnostics", {})),
+        n_likelihood_evaluations=_optional_int(metadata.get("n_likelihood_evaluations")),
+        n_selection_unsupported=_optional_int(metadata.get("n_selection_unsupported")),
+        provenance=dict(metadata.get("provenance") or {}),
     )
 
 
@@ -1275,13 +1690,119 @@ def load_dynesty_result(path: str | Path) -> DynestyResult:
 # ---------------------------------------------------------------------------
 
 
-def _checkpoint_meta(names: tuple[str, ...], seed: int, config: DynestyConfig) -> dict:
-    return {
-        "format_version": CHECKPOINT_FORMAT_VERSION,
-        "names": list(names),
-        "seed": int(seed),
-        "config": config.to_dict(),
-    }
+def _checkpoint_meta(
+    names: Sequence[str],
+    seed: int,
+    config: DynestyConfig,
+    identity: Mapping[str, object],
+) -> dict:
+    """Resume identity stamped on every sampler (JSON-normalized)."""
+    return _json_normalized(
+        {
+            "format_version": CHECKPOINT_FORMAT_VERSION,
+            "names": list(names),
+            "seed": int(seed),
+            "config": config.identity_dict(),
+            "identity": dict(identity),
+        }
+    )
+
+
+def _run_identity(loglike_batched, run: Mapping[str, object] | None = None) -> dict:
+    """Code, software, runtime and likelihood identity of a run (JSON-normalized).
+
+    A batched likelihood may expose ``likelihood_identity()`` and
+    ``runtime_identity()`` (:class:`BatchedShapeLogLikelihood` does).
+    Otherwise the likelihood identity is ``None`` and only the host runtime is
+    recorded, without initializing a JAX backend. ``run`` is an optional
+    caller identity (e.g. the population manifest digest).
+    """
+    likelihood_fn = getattr(loglike_batched, "likelihood_identity", None)
+    runtime_fn = getattr(loglike_batched, "runtime_identity", None)
+    return _json_normalized(
+        {
+            "code": _code_identity(),
+            "versions": _software_versions(),
+            "runtime": (
+                runtime_fn() if callable(runtime_fn) else _runtime_identity(jax_devices=False)
+            ),
+            "likelihood": likelihood_fn() if callable(likelihood_fn) else None,
+            "run": None if run is None else dict(run),
+        }
+    )
+
+
+def _add_delta(base, now, start):
+    if base is None or now is None or start is None:
+        return None
+    return int(base) + int(now) - int(start)
+
+
+class _RunTally:
+    """Run counters that travel inside dynesty checkpoints.
+
+    dynesty pickles the sampler only between iterations, never while a
+    ``pool.map`` is running, and the pickled state reflects every likelihood
+    evaluation made so far (queued proposals included). Pickling therefore
+    stores ``base + (current session - session start)``: evaluations that a
+    killed session made after its last checkpoint are lost with it and are
+    repeated by the resume, so the totals equal those of an uninterrupted
+    run. A counter a session cannot measure (a likelihood without ``stats()``)
+    becomes ``None`` for the whole run.
+    """
+
+    _POOL_KEYS = ("n_evaluations", "n_zero_likelihood")
+    _LIKELIHOOD_KEYS = ("n_selection_unsupported",)
+
+    def __init__(self):
+        self.base: dict[str, object] = {
+            key: 0 for key in (*self._POOL_KEYS, *self._LIKELIHOOD_KEYS)
+        }
+        self.base["elapsed_seconds"] = 0.0
+        self._pool: ThreadBatchPool | None = None
+        self._likelihood_stats = None
+        self._start: dict | None = None
+
+    def bind(self, pool: ThreadBatchPool, clock_start: float) -> None:
+        """Count this session's evaluations from ``pool`` (and its likelihood's stats)."""
+        stats = getattr(pool.batched_loglikelihood, "stats", None)
+        self._pool = pool
+        self._likelihood_stats = stats if callable(stats) else None
+        self._start = {
+            "pool": pool.stats(),
+            "likelihood": None if self._likelihood_stats is None else self._likelihood_stats(),
+            "clock": float(clock_start),
+        }
+
+    def snapshot(self) -> dict[str, object]:
+        totals = dict(self.base)
+        if self._pool is None:
+            return totals
+        start = self._start
+        pool_now = self._pool.stats()
+        for key in self._POOL_KEYS:
+            totals[key] = _add_delta(self.base.get(key), pool_now.get(key), start["pool"].get(key))
+        like_now = None if self._likelihood_stats is None else self._likelihood_stats()
+        for key in self._LIKELIHOOD_KEYS:
+            if like_now is None or start["likelihood"] is None:
+                totals[key] = None
+            else:
+                totals[key] = _add_delta(
+                    self.base.get(key), like_now.get(key), start["likelihood"].get(key)
+                )
+        totals["elapsed_seconds"] = float(self.base["elapsed_seconds"]) + (
+            time.perf_counter() - start["clock"]
+        )
+        return totals
+
+    def __getstate__(self):
+        return {"base": self.snapshot()}
+
+    def __setstate__(self, state):
+        self.base = dict(state["base"])
+        self._pool = None
+        self._likelihood_stats = None
+        self._start = None
 
 
 def _new_sampler(
@@ -1293,9 +1814,21 @@ def _new_sampler(
     seed: int,
     config: DynestyConfig,
     names: Sequence[str] | None = None,
+    identity: Mapping[str, object] | None = None,
+    tally: _RunTally | None = None,
 ):
-    """Construct the static sampler (evaluates the initial live points via the pool)."""
+    """Construct the static sampler (evaluates the initial live points via the pool).
+
+    ``identity`` defaults to the run identity of the pool's likelihood and
+    ``tally`` to a fresh tally bound to ``pool``; both are stamped on the
+    sampler so that checkpoints carry them.
+    """
     names = tuple(f"x{k}" for k in range(ndim)) if names is None else tuple(names)
+    if identity is None:
+        identity = _run_identity(pool.batched_loglikelihood)
+    if tally is None:
+        tally = _RunTally()
+        tally.bind(pool, time.perf_counter())
     sampler = dynesty.NestedSampler(
         pool.point_loglikelihood,
         prior_transform,
@@ -1313,7 +1846,8 @@ def _new_sampler(
         bootstrap=config.bootstrap,
         enlarge=config.enlarge,
     )
-    setattr(sampler, _CHECKPOINT_META_ATTR, _checkpoint_meta(names, seed, config))
+    setattr(sampler, _CHECKPOINT_META_ATTR, _checkpoint_meta(names, seed, config, identity))
+    setattr(sampler, _TALLY_ATTR, tally)
     return sampler
 
 
@@ -1327,7 +1861,10 @@ def _restore_sampler(
     *,
     seed: int,
     names: tuple[str, ...],
+    identity: Mapping[str, object],
+    clock_start: float,
 ):
+    """Restore a checkpoint of the requested run; returns ``(sampler, tally)``."""
     sampler = dynesty.NestedSampler.restore(str(checkpoint), pool=pool)
     wrapper = getattr(getattr(sampler, "loglikelihood", None), "loglikelihood", None)
     proxy = getattr(wrapper, "func", None)
@@ -1337,13 +1874,15 @@ def _restore_sampler(
             f"{checkpoint} was not written by gwpop-search run_dynesty "
             "(missing pooled likelihood or checkpoint metadata)"
         )
-    requested = json.loads(json.dumps(_checkpoint_meta(names, seed, config)))
+    requested = _checkpoint_meta(names, seed, config, identity)
     if meta != requested:
         diffs = _manifest_differences(meta, requested)
         raise ValueError(
             f"{checkpoint} was written for a different run; differing keys: {diffs}"
         )
-    proxy.bind(pool)
+    tally = getattr(sampler, _TALLY_ATTR, None)
+    if not isinstance(tally, _RunTally):
+        raise RuntimeError(f"{checkpoint} carries no gwpop-search run tally")
     if int(sampler.ndim) != ndim or int(sampler.nlive) != config.nlive:
         raise ValueError(
             f"checkpoint has ndim={sampler.ndim}, nlive={sampler.nlive}; "
@@ -1363,7 +1902,9 @@ def _restore_sampler(
             raise ValueError("checkpoint prior transform differs from the requested priors")
     else:
         ptform.func = prior_transform
-    return sampler
+    proxy.bind(pool)
+    tally.bind(pool, clock_start)
+    return sampler, tally
 
 
 def _remaining_budget(sampler, config: DynestyConfig) -> tuple[int | None, int | None]:
@@ -1396,14 +1937,23 @@ def _run_session(sampler, config: DynestyConfig, checkpoint: Path | None, *, res
     )
 
 
+def _queued_evaluations(sampler) -> int | None:
+    """Likelihood evaluations of proposals still queued (not included in ``ncall``)."""
+    try:
+        return int(sum(len(item.evaluation_history) for item in sampler.queue))
+    except (AttributeError, TypeError):  # pragma: no cover - other dynesty layouts
+        return None
+
+
 def _result_from_sampler(
     sampler,
     *,
     names: tuple[str, ...],
     seed: int,
     config: DynestyConfig,
-    elapsed: float,
+    totals: Mapping[str, object],
     diagnostics: Mapping[str, object],
+    provenance: Mapping[str, object],
 ) -> DynestyResult:
     import dynesty.utils as dyutils
 
@@ -1422,10 +1972,9 @@ def _result_from_sampler(
     zero = log_likelihoods <= lowl
     log_likelihoods[zero] = -np.inf
     log_weights[zero] = -np.inf
-    weights = np.exp(log_weights - logsumexp(log_weights))
+    weights = _normalized_weights(log_weights)
     kish_ess = float(1.0 / np.sum(weights**2))
-    rng = np.random.default_rng([int(seed), _RESAMPLE_STREAM])
-    posterior = equal_weight_resample(samples, weights, config.num_posterior_samples, rng)
+    posterior = _equal_weight_posterior(samples, log_weights, config.num_posterior_samples, seed)
 
     niter = int(results["niter"])
     info = dict(diagnostics)
@@ -1437,6 +1986,8 @@ def _result_from_sampler(
         info["final_delta_logz"] = final_delta
         info["converged"] = bool(final_delta < config.dlogz)
     info["n_zero_likelihood_points"] = int(np.count_nonzero(zero))
+    info["n_queued_evaluations"] = _queued_evaluations(sampler)
+    info["cumulative"] = dict(totals)
     return DynestyResult(
         names=names,
         log_evidence=log_evidence,
@@ -1451,12 +2002,30 @@ def _result_from_sampler(
         log_volumes=log_volumes,
         posterior_samples=posterior,
         kish_ess=kish_ess,
-        elapsed_seconds=float(elapsed),
+        elapsed_seconds=float(totals["elapsed_seconds"]),
         config=config,
         seed=int(seed),
         versions=_software_versions(),
         diagnostics=info,
+        n_likelihood_evaluations=_optional_int(totals.get("n_evaluations")),
+        n_selection_unsupported=_optional_int(totals.get("n_selection_unsupported")),
+        provenance=copy.deepcopy(dict(provenance)),
     )
+
+
+def _warn_selection_unsupported(result: DynestyResult, *, stacklevel: int = 3) -> None:
+    n = result.n_selection_unsupported
+    if n:
+        warnings.warn(
+            SelectionSupportWarning(
+                f"{n} likelihood evaluation(s) of this run had population support on every "
+                "event but none on the selection injections (log A = -inf). They were treated "
+                "as zero likelihood, which removes that prior volume from the evidence; the "
+                "NumPy reference raises SelectionSupportError there. Check the injection "
+                "coverage before using this evidence."
+            ),
+            stacklevel=stacklevel,
+        )
 
 
 def run_dynesty(
@@ -1469,6 +2038,7 @@ def run_dynesty(
     checkpoint_file: str | Path | None = None,
     resume: bool = False,
     names: Sequence[str] | None = None,
+    identity: Mapping[str, object] | None = None,
 ) -> DynestyResult:
     """Run static dynesty with a batched likelihood and return posterior + evidence.
 
@@ -1479,6 +2049,15 @@ def run_dynesty(
     ``checkpoint_file``; a checkpoint that already holds a finished run is
     converted to a result without further sampling. Starting a fresh run over
     an existing checkpoint is refused.
+
+    Checkpoints pin the names, seed, :meth:`DynestyConfig.identity_dict`, the
+    code identity, software versions, runtime (host, and the JAX device when
+    the likelihood exposes ``runtime_identity()``), the likelihood identity
+    (when it exposes ``likelihood_identity()``) and the optional caller
+    ``identity`` (a JSON-serializable mapping, stored as
+    ``result.provenance["run"]``); a resume refuses any difference. Warns with
+    :class:`SelectionSupportWarning` when the run's total
+    ``n_selection_unsupported`` is non-zero.
     """
     dynesty = _require_dynesty()
     cfg = DynestyConfig() if config is None else config
@@ -1495,6 +2074,8 @@ def run_dynesty(
         raise ValueError(f"{len(names)} names given for ndim={ndim}")
     if not callable(prior_transform):
         raise TypeError("prior_transform must be callable")
+    if identity is not None and not isinstance(identity, Mapping):
+        raise TypeError("identity must be a mapping")
     checkpoint = None if checkpoint_file is None else Path(checkpoint_file)
     if resume:
         if checkpoint is None or not checkpoint.exists():
@@ -1512,39 +2093,64 @@ def run_dynesty(
                 "the sampler); use prior_transform_for() or a top-level callable"
             ) from exc
         checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    run_identity = _run_identity(loglike_batched, identity)
 
     start = time.perf_counter()
     with ThreadBatchPool(loglike_batched, cfg.batch_size) as pool:
         if resume:
-            sampler = _restore_sampler(
-                dynesty, checkpoint, pool, prior_transform, ndim, cfg, seed=seed, names=names
+            sampler, tally = _restore_sampler(
+                dynesty,
+                checkpoint,
+                pool,
+                prior_transform,
+                ndim,
+                cfg,
+                seed=seed,
+                names=names,
+                identity=run_identity,
+                clock_start=start,
             )
         else:
+            tally = _RunTally()
+            tally.bind(pool, start)
             sampler = _new_sampler(
-                dynesty, pool, prior_transform, ndim, seed=seed, config=cfg, names=names
+                dynesty,
+                pool,
+                prior_transform,
+                ndim,
+                seed=seed,
+                config=cfg,
+                names=names,
+                identity=run_identity,
+                tally=tally,
             )
         finished_in_checkpoint = bool(sampler.added_live)
         if not finished_in_checkpoint:
             _run_session(sampler, cfg, checkpoint, resume=resume)
         pool_stats = pool.stats()
-    elapsed = time.perf_counter() - start
+        totals = tally.snapshot()
+    session_elapsed = time.perf_counter() - start
 
     diagnostics: dict[str, object] = {
         "resumed": bool(resume),
         "finished_in_checkpoint": finished_in_checkpoint,
+        "session_elapsed_seconds": session_elapsed,
         "session_pool": pool_stats,
     }
     likelihood_stats = getattr(loglike_batched, "stats", None)
     if callable(likelihood_stats):
         diagnostics["session_likelihood"] = likelihood_stats()
-    return _result_from_sampler(
+    result = _result_from_sampler(
         sampler,
         names=names,
         seed=seed,
         config=cfg,
-        elapsed=elapsed,
+        totals=totals,
         diagnostics=diagnostics,
+        provenance=run_identity,
     )
+    _warn_selection_unsupported(result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1552,32 +2158,36 @@ def run_dynesty(
 # ---------------------------------------------------------------------------
 
 
-def _update_digest(digest, label: str, array) -> None:
-    array = np.ascontiguousarray(array)
-    digest.update(label.encode("utf-8"))
-    digest.update(str(array.dtype.str).encode("utf-8"))
-    digest.update(str(array.shape).encode("utf-8"))
-    digest.update(array.tobytes())
+def _require_declared_priors(population_model, priors: Mapping[str, PriorSpec]) -> None:
+    """For a declarative model the evidence is defined by the spec's own hyperpriors."""
+    from gwpop_search.grammar import ModelSpec
 
+    from .model_spec import prior_specs_from_model_spec
 
-def _posterior_digest(posterior, fields: Sequence[str]) -> str:
-    digest = hashlib.sha256()
-    digest.update(json.dumps(list(posterior.event_names)).encode("utf-8"))
-    _update_digest(digest, "offsets", np.asarray(posterior.offsets, dtype="<i8"))
-    for name in fields:
-        _update_digest(digest, f"samples/{name}", np.asarray(posterior.samples[name], dtype="<f8"))
-    _update_digest(digest, "log_ref_density", np.asarray(posterior.log_ref_density, dtype="<f8"))
-    return digest.hexdigest()
-
-
-def _selection_digest(selection, fields: Sequence[str]) -> str:
-    digest = hashlib.sha256()
-    for name in fields:
-        _update_digest(digest, f"samples/{name}", np.asarray(selection.samples[name], dtype="<f8"))
-    _update_digest(digest, "log_draw_density", np.asarray(selection.log_draw_density, dtype="<f8"))
-    digest.update(json.dumps(selection.campaign_id.tolist()).encode("utf-8"))
-    digest.update(str(selection.estimator_semantics).encode("utf-8"))
-    return digest.hexdigest()
+    spec = getattr(population_model, "spec", None)
+    if not isinstance(spec, ModelSpec):
+        return
+    declared = prior_specs_from_model_spec(spec)
+    missing = sorted(set(declared) - set(priors))
+    extra = sorted(set(priors) - set(declared))
+    changed = sorted(name for name in set(declared) & set(priors) if priors[name] != declared[name])
+    if not (missing or extra or changed):
+        return
+    details = []
+    if missing:
+        details.append(f"missing {missing}")
+    if extra:
+        details.append(f"not parameters of the model {extra}")
+    details.extend(
+        f"{name}: {priors[name].to_dict()} instead of {declared[name].to_dict()}"
+        for name in changed
+    )
+    raise ValueError(
+        "priors must be the hyperpriors declared by the model spec "
+        f"(model_hash {spec.model_hash}), which define its evidence and its hash: "
+        + "; ".join(details)
+        + ". Use prior_specs_from_model_spec(model.spec)."
+    )
 
 
 def build_dynesty_manifest(
@@ -1592,57 +2202,34 @@ def build_dynesty_manifest(
 ) -> dict[str, object]:
     """Resume identity of a population run (JSON-normalized).
 
-    Pins the data (event names, per-event sample counts, bases, selection
-    mode/campaigns and SHA-256 digests of every array the likelihood reads),
-    the priors, the model configuration, the dynesty and HBI configurations,
-    the seed, the code identity and the dynesty/JAX/NumPy versions.
+    Pins the likelihood (:func:`build_likelihood_identity`: parameter names,
+    HBI configuration, model configuration and the data: event names,
+    per-event sample counts, bases, selection mode/campaigns and SHA-256
+    digests of every array the likelihood reads), the priors, the dynesty
+    trajectory configuration (:meth:`DynestyConfig.identity_dict`), the seed,
+    the code identity (package version, git commit, ``git_dirty`` and a
+    SHA-256 of the package sources), the software versions and the runtime
+    (host and JAX device). For a model with a ``spec`` the priors must equal
+    ``prior_specs_from_model_spec(model.spec)`` (``ValueError`` otherwise).
     """
-    from gwpop_search.hbi.common import density_required_fields
-
-    from .numpyro import _code_identity, _hbi_config_dict, _model_config, _validated_priors
+    from .numpyro import _validated_priors
 
     if not isinstance(config, DynestyConfig):
         raise TypeError("config must be a DynestyConfig")
     prior_map = _validated_priors(priors)
+    _require_declared_priors(population_model, prior_map)
     names, _ = prior_transform_for(prior_map)
-    fields = density_required_fields(population_model, posterior.basis)
     manifest = {
         "format_version": MANIFEST_FORMAT_VERSION,
         "root_seed": _as_int("seed", seed, minimum=0),
         "code": _code_identity(),
         "versions": _software_versions(),
-        "dynesty_config": config.to_dict(),
-        "hbi_config": _hbi_config_dict(hbi_config),
+        "runtime": _runtime_identity(jax_devices=True),
+        "dynesty_config": config.identity_dict(),
         "priors": serialize_prior_map(prior_map),
-        "parameter_names": list(names),
-        "model": _model_config(population_model),
-        "data": {
-            "pe_basis": posterior.basis.identity,
-            "selection_basis": selection.basis.identity,
-            "event_names": list(posterior.event_names),
-            "n_events": int(posterior.n_events),
-            "pe_sample_counts": np.diff(posterior.offsets).astype(int).tolist(),
-            "n_pe_samples": int(posterior.n_samples_total),
-            "n_selected": int(selection.n_selected),
-            "selection_mode": selection.mode.value,
-            "selection_campaigns": [
-                {
-                    "campaign_id": campaign.campaign_id,
-                    "n_draw": None if campaign.n_draw is None else int(campaign.n_draw),
-                    "observing_time_yr": (
-                        None
-                        if campaign.observing_time_yr is None
-                        else float(campaign.observing_time_yr)
-                    ),
-                }
-                for campaign in selection.campaigns
-            ],
-            "density_fields": list(fields),
-            "pe_sha256": _posterior_digest(posterior, fields),
-            "selection_sha256": _selection_digest(selection, fields),
-        },
+        **build_likelihood_identity(posterior, selection, population_model, names, hbi_config),
     }
-    return json.loads(json.dumps(_json_ready(manifest), sort_keys=True))
+    return _json_normalized(manifest)
 
 
 def _manifest_differences(existing: Mapping, requested: Mapping, prefix: str = "") -> list[str]:
@@ -1672,13 +2259,21 @@ def run_dynesty_population(
 
     ``run_dir`` holds ``manifest.json``, dynesty's ``checkpoint.pkl`` and the
     final ``result.npz`` (+ ``result.npz.json``). If a complete result exists
-    for an identical manifest it is loaded; if a checkpoint exists the run is
-    resumed; otherwise a new run starts. A manifest that differs from the
-    requested run raises ``ValueError`` (nothing is overwritten).
+    for an identical manifest it is loaded (with its equal-weight draws redone
+    for a different ``num_posterior_samples``; the stored files are never
+    rewritten, and the returned ``config`` is the requested one); if a
+    checkpoint exists the run is resumed; otherwise a new run starts. A
+    manifest that differs from the requested run raises ``ValueError``
+    (nothing is overwritten). For a model with a ``spec`` the priors must be
+    ``prior_specs_from_model_spec(model.spec)``.
+
+    Warns with :class:`DirtyCodeWarning` when the package sources have
+    uncommitted changes (the manifest then identifies the code by its source
+    digest) and with :class:`SelectionSupportWarning` when the result has
+    evaluations without selection support.
     """
     cfg = DynestyConfig() if config is None else config
     run_dir = Path(run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
     manifest = build_dynesty_manifest(
         posterior,
         selection,
@@ -1688,6 +2283,8 @@ def run_dynesty_population(
         config=cfg,
         hbi_config=hbi_config,
     )
+    manifest_sha256 = _json_sha256(manifest)
+    run_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = run_dir / "manifest.json"
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text())
@@ -1698,13 +2295,34 @@ def run_dynesty_population(
             )
     else:
         _atomic_write_text(manifest_path, json.dumps(manifest, sort_keys=True, indent=2))
+    code = manifest["code"]
+    if code["git_dirty"]:
+        warnings.warn(
+            DirtyCodeWarning(
+                "gwpop_search sources have uncommitted changes: git commit "
+                f"{code['git_commit']} does not contain the code of this run, which is "
+                f"identified by source_sha256 {code['source_sha256']}. Commit before "
+                "production runs."
+            ),
+            stacklevel=2,
+        )
 
     names, transform = prior_transform_for(priors)
     result_path = run_dir / "result.npz"
     if dynesty_result_exists(result_path):
         result = load_dynesty_result(result_path)
-        if result.names != names or result.seed != int(seed) or result.config != cfg:
+        stored_run = result.provenance.get("run") or {}
+        if (
+            result.names != names
+            or result.seed != int(seed)
+            or result.config.identity_dict() != cfg.identity_dict()
+            or stored_run.get("manifest_sha256") != manifest_sha256
+        ):
             raise ValueError(f"{result_path} is inconsistent with {manifest_path}")
+        if result.config.num_posterior_samples != cfg.num_posterior_samples:
+            result = result.with_num_posterior_samples(cfg.num_posterior_samples)
+        result = replace(result, config=cfg)
+        _warn_selection_unsupported(result)
         return result
 
     checkpoint = run_dir / "checkpoint.pkl"
@@ -1725,6 +2343,7 @@ def run_dynesty_population(
         checkpoint_file=checkpoint,
         resume=checkpoint.exists(),
         names=names,
+        identity={"manifest_sha256": manifest_sha256},
     )
     save_dynesty_result(result_path, result)
     return result
@@ -1840,13 +2459,15 @@ class ImportanceDiagnosticsBatch:
 class ImportanceDiagnosticsFunction:
     """Jitted, vmapped importance diagnostics; ``f(X [K, ndim]) -> ImportanceDiagnosticsBatch``.
 
-    The reference NumPy implementation needs ~37 s per hyperparameter vector
-    on the ~1M-row GWTC-5 candidate selection; this evaluates a fixed
+    The reference NumPy implementation needs seconds per hyperparameter
+    vector on the ~1M-row GWTC-5 candidate selection; this evaluates a fixed
     ``[batch_size, ndim]`` block per device call. ``selection_chunk_size``
     bounds device memory by scanning each campaign in chunks with an online
     (max, S1, S2) merge (results agree with the unchunked evaluation up to
     rounding); when omitted it defaults to ``hbi_config.selection_chunk_size``,
     and ``None`` there evaluates each campaign in one block.
+    :meth:`likelihood_identity` identifies the estimator it diagnoses (see
+    :func:`build_likelihood_identity`).
     """
 
     def __init__(
@@ -1864,14 +2485,19 @@ class ImportanceDiagnosticsFunction:
         from jax import lax
 
         from gwpop_search.data import validate_pair
-        from gwpop_search.hbi import HBIConfig
+        from gwpop_search.hbi import HBIConfig, RateTreatment
         from gwpop_search.hbi.common import density_required_fields, selection_log_factors
         from gwpop_search.hbi.jax_backend import _pad_events
 
         cfg = HBIConfig() if hbi_config is None else hbi_config
+        if cfg.rate_treatment is not RateTreatment.SHAPE:
+            raise ValueError("importance diagnostics are implemented for the shape likelihood only")
         self.names = _validated_names(names, what="hyperparameter names")
         self.ndim = len(self.names)
         self.batch_size = _as_int("batch_size", batch_size, minimum=1)
+        self.hbi_config = cfg
+        self._identity_inputs = (posterior, selection, population_model)
+        self._likelihood_identity: dict | None = None
         fields = density_required_fields(population_model, posterior.basis)
         validate_pair(posterior, selection, fields)
         self.event_names = tuple(posterior.event_names)
@@ -2028,6 +2654,15 @@ class ImportanceDiagnosticsFunction:
         self._jax = jax
         self._jnp = jnp
 
+    def likelihood_identity(self) -> dict[str, object]:
+        """:func:`build_likelihood_identity` of the diagnosed likelihood (computed once)."""
+        if self._likelihood_identity is None:
+            posterior, selection, model = self._identity_inputs
+            self._likelihood_identity = build_likelihood_identity(
+                posterior, selection, model, self.names, self.hbi_config
+            )
+        return copy.deepcopy(self._likelihood_identity)
+
     def __call__(self, X) -> ImportanceDiagnosticsBatch:
         X = np.asarray(X, dtype=np.float64)
         if X.ndim == 1:
@@ -2134,11 +2769,29 @@ def importance_diagnostics_over_posterior(
     The median is the per-parameter median of ``result.posterior_samples``;
     the draws are a seeded random subset (without replacement) of the
     equal-weight samples.
+
+    The diagnostics must describe the estimator the run sampled. When the
+    result carries its likelihood identity (every HBI result does),
+    ``hbi_config`` defaults to the run's configuration and any difference in
+    parameter names, HBI configuration (other than ``selection_chunk_size``,
+    which only changes the summation order), model or data between the run
+    and the requested diagnostics raises ``ValueError``. A result without a
+    likelihood identity (a non-HBI likelihood or an older result format)
+    requires an explicit ``hbi_config`` or ``diagnostics_fn``.
     """
     n_draws = _as_int("n_draws", n_draws, minimum=1)
     quantiles = tuple(float(q) for q in quantiles)
     if not quantiles or any(not 0.0 <= q <= 1.0 for q in quantiles):
         raise ValueError("quantiles must lie in [0, 1]")
+    stored = result.likelihood_identity
+    if stored is None:
+        if hbi_config is None and diagnostics_fn is None:
+            raise ValueError(
+                "the result carries no likelihood identity (non-HBI likelihood or an older "
+                "result format); pass the run's hbi_config explicitly"
+            )
+    elif hbi_config is None:
+        hbi_config = _hbi_config_from_dict(stored["hbi_config"])
     fn = diagnostics_fn
     if fn is None:
         fn = build_importance_diagnostics(
@@ -2152,6 +2805,15 @@ def importance_diagnostics_over_posterior(
         )
     elif fn.names != tuple(result.names):
         raise ValueError("diagnostics_fn parameter names differ from the result")
+    if stored is not None:
+        diffs = _manifest_differences(
+            _without_chunk_size(stored), _without_chunk_size(fn.likelihood_identity())
+        )
+        if diffs:
+            raise ValueError(
+                "the requested diagnostics evaluate a different likelihood than the one the "
+                f"run sampled; differing keys: {diffs}"
+            )
     draws = np.asarray(result.posterior_samples, dtype=np.float64)
     rng = np.random.default_rng(_as_int("seed", seed, minimum=0))
     k = min(n_draws, draws.shape[0])
