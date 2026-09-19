@@ -15,8 +15,10 @@ from gwpop_search.analysis._common import (  # noqa: E402
     posterior_from_equal_weight_draws,
 )
 from gwpop_search.analysis.sddr import (  # noqa: E402
+    SDDR_METHOD_SYSTEMATIC,
     EdgeNesting,
     NullEmbedding,
+    method_systematic_for,
     boundary_density,
     classify_edge,
     classify_graph_edges,
@@ -150,6 +152,49 @@ def test_boundary_estimators_bias_ranking(truth, sampler, zero_gradient):
         # reflection assumes p'(0) = 0 and is visibly biased when that fails
         assert bias["reflection"] < -0.05, bias
         assert abs(bias["linear"]) < abs(bias["reflection"]), bias
+
+
+def test_method_systematic_widens_the_band_by_null_geometry_and_keeps_the_difference():
+    """The SDDR/NS band carries a measured floor; the signed difference stays visible.
+
+    Measured on the dynesty toys (validation/analysis_estimators/sddr_validation.json):
+    interior nulls agree to +0.035 +- 0.014 nats, but boundary nulls sit at
+    -0.160 +- 0.021 and boundary+VW at -0.285 +- 0.061, because nested sampling
+    biases ln Z on the peak-mixture geometry whose peak location is unidentified
+    at the null. That offset is a property of the two estimators, not of either
+    error bar, so it belongs in the tolerance rather than in a failed cross-check.
+    """
+    interior = EdgeNesting("s", "l", "m", "exact", "child", (NullEmbedding("mu", 0.0, "interior"),))
+    at_bound = EdgeNesting("s", "l", "m", "exact", "child", (NullEmbedding("f", 0.0, "lower"),))
+    with_vw = EdgeNesting("s", "l", "m", "approximate", "child", (NullEmbedding("f", 0.0, "lower"),),
+                          vw_required=True, vw_first_form_valid=True)
+    assert method_systematic_for(interior) == SDDR_METHOD_SYSTEMATIC["interior"]
+    assert method_systematic_for(at_bound) == SDDR_METHOD_SYSTEMATIC["boundary"]
+    assert method_systematic_for(with_vw) == SDDR_METHOD_SYSTEMATIC["boundary_vw"]
+    assert (SDDR_METHOD_SYSTEMATIC["interior"]
+            < SDDR_METHOD_SYSTEMATIC["boundary"]
+            < SDDR_METHOD_SYSTEMATIC["boundary_vw"])
+    # every floor covers the worst case measured for its geometry
+    for key, worst in (("interior", 0.087), ("boundary", 0.243), ("boundary_vw", 0.377)):
+        assert SDDR_METHOD_SYSTEMATIC[key] >= worst
+
+    # a mu ~ N(0.6, 0.25) posterior: the null sits well away from the peak
+    rng = np.random.default_rng(5)
+    x = rng.normal(0.6, 0.25, 20000)
+    sample = posterior_from_equal_weight_draws(("mu",), x[:, None])
+    priors = {"mu": PriorSpec("uniform", low=-2.0, high=2.0)}
+    bare = sddr_edge_check(interior, sample, priors, {}, log_bf_ns=0.0, sigma_ns=0.02,
+                           n_bootstrap=40, method_systematic=0.0)
+    wide = sddr_edge_check(interior, sample, priors, {}, log_bf_ns=0.0, sigma_ns=0.02, n_bootstrap=40)
+    assert wide.tolerance == pytest.approx(bare.tolerance + SDDR_METHOD_SYSTEMATIC["interior"])
+    assert wide.method_systematic == SDDR_METHOD_SYSTEMATIC["interior"]
+    assert bare.method_systematic == 0.0
+    # the floor only moves the verdict; the signed difference is identical and reported
+    assert wide.difference == pytest.approx(bare.difference)
+    assert wide.to_dict()["difference"] == pytest.approx(bare.difference)
+    assert bare.difference == pytest.approx(
+        bare.log_bf_child_over_parent_ns - bare.log_bf_child_over_parent_sddr
+    )
 
 
 def test_interior_density_and_tail_bound():

@@ -727,6 +727,43 @@ def vw_factor(
     }
 
 
+#: Method-level systematic (nats) added to the SDDR/NS agreement tolerance, by
+#: the geometry of the null. The SDDR and the nested-sampling evidence are two
+#: different estimators of the same ``ln BF``, so their difference has a floor
+#: that neither error bar describes. Measured on the dynesty toys of
+#: validation/analysis_estimators/sddr_validation.json (static rslice, nlive 500,
+#: slices = 2 (3 + ndim), 2 repeats), as mean +- se of ``ln BF_NS - ln BF_SDDR``:
+#:
+#:   interior null (Gaussian mean)      n=9  +0.035 +- 0.014, max |diff| 0.087
+#:   boundary null (mixture fraction)   n=6  -0.160 +- 0.021, max |diff| 0.243
+#:   boundary null + VW (shared prior)  n=3  -0.285 +- 0.061, max |diff| 0.377
+#:
+#: The offset appears only for the peak-mixture models, whose peak location is
+#: unidentified as the mixture fraction goes to zero; the boundary-density
+#: estimator is accurate to < 0.02 nats on such pile-ups
+#: (boundary_density_validation.json), so the residual is nested-sampling
+#: evidence bias on that geometry rather than SDDR bias. These are the measured
+#: maxima rounded up. They widen the agreement band only: ``difference`` is
+#: always reported, so a disagreement of any size stays visible. A cross-check is
+#: not a claim -- an edge whose ln BF sits near the 3-nat threshold should not
+#: rest on a route known to differ from the other by this much.
+SDDR_METHOD_SYSTEMATIC: dict[str, float] = {
+    "interior": 0.10,
+    "boundary": 0.25,
+    "boundary_vw": 0.40,
+}
+
+
+def method_systematic_for(nesting: "EdgeNesting") -> float:
+    """Measured SDDR-vs-NS method systematic (nats) for this edge's null geometry."""
+    if not nesting.embeddings:
+        return 0.0
+    at_bound = any(emb.location != "interior" for emb in nesting.embeddings)
+    if not at_bound:
+        return SDDR_METHOD_SYSTEMATIC["interior"]
+    return SDDR_METHOD_SYSTEMATIC["boundary_vw" if nesting.vw_required else "boundary"]
+
+
 @dataclass(frozen=True)
 class SDDRCheck:
     mutation_id: str
@@ -738,6 +775,14 @@ class SDDRCheck:
     sigma_ns: float | None
     tolerance: float | None
     details: Mapping[str, object]
+    method_systematic: float = 0.0
+
+    @property
+    def difference(self) -> float | None:
+        """``ln BF_NS - ln BF_SDDR`` (nats): the quantity the tolerance bounds."""
+        if self.log_bf_child_over_parent_ns is None or self.log_bf_child_over_parent_sddr is None:
+            return None
+        return self.log_bf_child_over_parent_ns - self.log_bf_child_over_parent_sddr
 
     def to_dict(self) -> dict[str, object]:
         return json_ready(
@@ -749,6 +794,8 @@ class SDDRCheck:
                 "sigma_sddr": self.sigma_sddr,
                 "log_bf_child_over_parent_ns": self.log_bf_child_over_parent_ns,
                 "sigma_ns": self.sigma_ns,
+                "difference": self.difference,
+                "method_systematic": self.method_systematic,
                 "tolerance": self.tolerance,
                 "details": dict(self.details),
             }
@@ -770,17 +817,28 @@ def sddr_edge_check(
     vw_primary_eps: float = 0.05,
     min_vw_near_ess: float = 20.0,
     agreement_sigmas: float = 2.0,
+    method_systematic: float | None = None,
 ) -> SDDRCheck:
     """SDDR (x VW) estimate of ``ln BF_{child/parent}`` and its agreement with NS.
 
     ``sigma_ns`` is the nested-sampling error of ``ln BF_NS``
-    (``sqrt(sigma_NS,a^2/R_a + sigma_NS,b^2/R_b)``); agreement requires
-    ``|ln BF_NS - ln BF_SDDR| <= agreement_sigmas * sqrt(sigma_ns^2 + sigma_SDDR^2)``
-    (formula (8) of the note).
+    (``sqrt(sigma_NS,a^2/R_a + sigma_NS,b^2/R_b)``); agreement requires::
+
+        |ln BF_NS - ln BF_SDDR| <= agreement_sigmas * sqrt(sigma_ns^2 + sigma_SDDR^2)
+                                   + method_systematic
+
+    which is formula (8) of the note plus a floor for the difference between the
+    two estimators themselves. ``method_systematic=None`` takes the measured
+    value for this edge's null geometry from :data:`SDDR_METHOD_SYSTEMATIC`;
+    pass ``0.0`` for the bare formula (8). The signed ``difference`` is always
+    reported, so widening the band never hides a disagreement.
     """
+    if method_systematic is None:
+        method_systematic = method_systematic_for(nesting)
+    method_systematic = as_float("method_systematic", method_systematic, nonnegative=True)
     if not nesting.sddr_eligible:
         return SDDRCheck(nesting.mutation_id, nesting.classification, "not_applicable", None, None,
-                         log_bf_ns, sigma_ns, None, {"reason": nesting.reason})
+                         log_bf_ns, sigma_ns, None, {"reason": nesting.reason}, 0.0)
     sign = 1.0 if nesting.larger_model == "child" else -1.0
     embeddings = nesting.embeddings if nesting.symmetric_embeddings else nesting.embeddings[:1]
     densities = []
@@ -826,7 +884,8 @@ def sddr_edge_check(
         if not nesting.vw_first_form_valid:
             return SDDRCheck(nesting.mutation_id, nesting.classification, "not_estimable", None, None,
                              log_bf_ns, sigma_ns, None,
-                             {**details, "reason": "VW factor needs supp pi_S within supp pi_L"})
+                             {**details, "reason": "VW factor needs supp pi_S within supp pi_L"},
+                             method_systematic)
         vw_rows = []
         for eps in vw_eps:
             parts = [vw_factor(larger_sample, emb, smaller_priors, larger_priors, eps=float(eps)) for emb in embeddings]
@@ -840,7 +899,8 @@ def sddr_edge_check(
         if primary["log_vw"] is None or primary["n_eff_near"] < min_vw_near_ess:
             return SDDRCheck(nesting.mutation_id, nesting.classification, "not_estimable", None, None,
                              log_bf_ns, sigma_ns, None,
-                             {**details, "reason": "too few posterior samples near the null for VW"})
+                             {**details, "reason": "too few posterior samples near the null for VW"},
+                             method_systematic)
         log_vw = float(primary["log_vw"])
         details["log_vw_primary"] = log_vw
     if log_density is None:
@@ -854,14 +914,16 @@ def sddr_edge_check(
             margin = agreement_sigmas * (sigma_ns or 0.0)
             status = "bound_consistent" if ns_larger + margin >= bound_larger else "bound_violated"
         return SDDRCheck(nesting.mutation_id, nesting.classification, status, None, None,
-                         log_bf_ns, sigma_ns, None, details)
+                         log_bf_ns, sigma_ns, None, details, method_systematic)
     log_bf_larger = log_prior - log_density - log_vw
     log_bf_child = sign * log_bf_larger
     if log_bf_ns is None:
         return SDDRCheck(nesting.mutation_id, nesting.classification, "computed", log_bf_child,
-                         sigma_density, None, None, None, details)
+                         sigma_density, None, None, None, details, method_systematic)
     sig_ns = as_float("sigma_ns", sigma_ns if sigma_ns is not None else 0.0, nonnegative=True)
-    tolerance = agreement_sigmas * math.sqrt(sig_ns**2 + (sigma_density or 0.0) ** 2)
+    tolerance = (
+        agreement_sigmas * math.sqrt(sig_ns**2 + (sigma_density or 0.0) ** 2) + method_systematic
+    )
     status = "agree" if abs(log_bf_ns - log_bf_child) <= tolerance else "disagree"
     return SDDRCheck(nesting.mutation_id, nesting.classification, status, log_bf_child,
-                     sigma_density, log_bf_ns, sig_ns, tolerance, details)
+                     sigma_density, log_bf_ns, sig_ns, tolerance, details, method_systematic)

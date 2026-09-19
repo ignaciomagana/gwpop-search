@@ -57,6 +57,8 @@ _EXPORTS = {
     "rescaled_prior": ".prior_sensitivity",
     # SDDR
     "EdgeNesting": ".sddr",
+    "SDDR_METHOD_SYSTEMATIC": ".sddr",
+    "method_systematic_for": ".sddr",
     "classify_edge": ".sddr",
     "classify_graph_edges": ".sddr",
     "density_at_null": ".sddr",
