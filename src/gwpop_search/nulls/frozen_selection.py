@@ -1,4 +1,32 @@
-"""Null catalogs drawn from the frozen estimator-ready selection measure."""
+"""Null catalogs drawn from the frozen estimator-ready selection measure.
+
+Truths
+    The null event truths are ``n_events`` rows of the frozen production
+    selection drawn with probability ``p_pop(theta | Lambda_null) /
+    p_draw(theta)`` (normalized over the selected rows). Because the rows are
+    detected injections, this is a draw from the detected-population
+    distribution ``p_pop(theta) P_det(theta) / A`` that the null HBI
+    likelihood assumes, with the real detection process.
+
+PE (declared noisy-observation approximation)
+    Zero-noise, truth-centred PE is disqualifying for null calibration: it
+    puts every truth at the same quantile of its own posterior and biases
+    population widths (Essick & Fishbach 2023, arXiv:2310.02017). Each null
+    event instead receives exactly one synthetic observation
+    ``d = (ln m1_det, q, ln d_L, chi_eff)_true + N(0, diag(s^2))`` with the
+    survey's measurement-noise scales ``s``, and its PE samples are exact
+    draws from ``p(theta | d)`` under the stored uniform detector-box PE
+    prior (sky delta-like at the injection truth). This mirrors
+    ``observation_model="noisy_observation"`` of
+    :mod:`gwpop_search.inference.synthetic` (same noise model, same box
+    prior, same exact posterior sampler).
+
+Remaining declared approximation
+    The frozen injection was detected by the real search with its own noise
+    realisation, which is not linked to the synthetic observation ``d``: the
+    synthetic PE is not conditioned on the detection statistic that selected
+    the row. The metadata records this explicitly.
+"""
 
 from __future__ import annotations
 
@@ -11,10 +39,25 @@ from scipy.special import logsumexp
 from gwpop_search.data import SelectionMode, validate_pair
 from gwpop_search.grammar import ModelSpec, baseline_model_spec
 from gwpop_search.inference.synthetic import (
+    INJECTION_DRAW_UNIFORM_DETECTOR_BOX,
+    OBSERVATION_MODEL_NOISY,
     SyntheticSurveyConfig,
+    _detector_prior_bounds,
     _make_posterior_catalog,
+    _observe,
 )
 from gwpop_search.models import compile_model_spec
+
+FROZEN_SELECTION_NULL_FORMAT_VERSION = "gwpop-search-frozen-selection-null-2.0"
+
+_TRUTH_FIELDS = (
+    "m1_detector",
+    "q",
+    "luminosity_distance",
+    "ra",
+    "dec",
+    "chi_eff",
+)
 
 
 @dataclass(frozen=True)
@@ -24,6 +67,7 @@ class FrozenSelectionNullDataset:
     truth_rows: np.ndarray
     truth_hyperparameters: Mapping[str, float]
     metadata: Mapping[str, object]
+    event_observations: Mapping[str, np.ndarray] | None = None
 
 
 def frozen_selection_resampling_probabilities(
@@ -73,6 +117,26 @@ def frozen_selection_resampling_probabilities(
     return probabilities, diagnostics
 
 
+def require_frozen_selection_survey(survey_config: SyntheticSurveyConfig) -> None:
+    """The survey settings a frozen-selection null may use.
+
+    ``observation_model`` must be ``noisy_observation`` (truth-centred PE is
+    refused) and the injection options must stay at their defaults (the
+    frozen production selection is reused, nothing is injected).
+    """
+    if survey_config.observation_model != OBSERVATION_MODEL_NOISY:
+        raise ValueError(
+            "frozen-selection nulls require observation_model='noisy_observation': "
+            "zero-noise truth-centred PE is disqualifying for null calibration "
+            "(Essick & Fishbach 2023)"
+        )
+    if survey_config.injection_draw != INJECTION_DRAW_UNIFORM_DETECTOR_BOX:
+        raise ValueError(
+            "frozen-selection nulls reuse the frozen production selection; survey "
+            "injection_draw options do not apply"
+        )
+
+
 def generate_frozen_selection_null_dataset(
     *,
     seed: int,
@@ -83,7 +147,14 @@ def generate_frozen_selection_null_dataset(
     min_resampling_ess: float,
     model_spec: ModelSpec | None = None,
 ) -> FrozenSelectionNullDataset:
-    """Generate null PE while reusing the exact frozen production selection."""
+    """Generate one null catalog on the exact frozen production selection.
+
+    ``survey_config`` supplies the event count (must equal the observed
+    catalog), the PE samples per event and the measurement-noise scales of
+    the declared noisy-observation PE approximation (see the module
+    docstring). Generator order: truth rows, then one observation per event,
+    then the PE draws.
+    """
     model_spec = baseline_model_spec() if model_spec is None else model_spec
     if observed_posterior.basis.identity != selection.basis.identity:
         raise ValueError("observed PE and frozen selection basis identities differ")
@@ -98,12 +169,7 @@ def generate_frozen_selection_null_dataset(
         )
     if not np.isfinite(min_resampling_ess) or min_resampling_ess <= 0.0:
         raise ValueError("min_resampling_ess must be finite and positive")
-    if survey_config.uses_v2_options:
-        raise ValueError(
-            "frozen-selection nulls reuse the frozen production selection and "
-            "truth-centered PE; survey injection_draw and observation_model "
-            "options do not apply"
-        )
+    require_frozen_selection_survey(survey_config)
 
     probabilities, diagnostics = frozen_selection_resampling_probabilities(
         selection,
@@ -123,36 +189,31 @@ def generate_frozen_selection_null_dataset(
         replace=True,
         p=probabilities,
     )
-    required_truth = (
-        "m1_detector",
-        "q",
-        "luminosity_distance",
-        "ra",
-        "dec",
-        "chi_eff",
-    )
-    selection.require(required_truth)
+    selection.require(_TRUTH_FIELDS)
     truths = {
         name: np.asarray(selection.samples[name], dtype=float)[truth_rows]
-        for name in required_truth
+        for name in _TRUTH_FIELDS
     }
 
     population_model = compile_model_spec(model_spec)
+    observations = _observe(rng, truths, survey_config)
     posterior = _make_posterior_catalog(
         rng,
         truths,
         population_model,
         survey_config,
         truth_hyperparameters,
+        observations,
     )
     validate_pair(
         posterior,
         selection,
         population_model.required_fields,
     )
+    bounds = _detector_prior_bounds(population_model, survey_config, truth_hyperparameters)
 
     metadata = {
-        "format_version": "gwpop-search-frozen-selection-null-1.0",
+        "format_version": FROZEN_SELECTION_NULL_FORMAT_VERSION,
         "seed": int(seed),
         "model_hash": model_spec.model_hash,
         "selection_basis_identity": selection.basis.identity,
@@ -165,12 +226,31 @@ def generate_frozen_selection_null_dataset(
         **diagnostics,
         "n_unique_truth_rows": int(np.unique(truth_rows).size),
         "pe_approximation": {
-            "m1_fractional_sigma": survey_config.pe_m1_fractional_sigma,
-            "q_sigma": survey_config.pe_q_sigma,
-            "d_l_fractional_sigma": survey_config.pe_d_l_fractional_sigma,
-            "chi_eff_sigma": survey_config.pe_chi_eff_sigma,
-            "sky": "delta_like_at_selected_injection_truth",
+            "observation_model": OBSERVATION_MODEL_NOISY,
+            "observation": (
+                "one synthetic observation per null event: "
+                "(ln m1_detector, q, ln d_L, chi_eff)_true + N(0, diag(sigma^2))"
+            ),
+            "observation_noise_sigma": {
+                "log_m1_detector": float(survey_config.pe_m1_fractional_sigma),
+                "q": float(survey_config.pe_q_sigma),
+                "log_luminosity_distance": float(survey_config.pe_d_l_fractional_sigma),
+                "chi_eff": float(survey_config.pe_chi_eff_sigma),
+            },
+            "pe": (
+                "exact posterior draws given the synthetic observation under the "
+                "stored uniform detector-box PE prior"
+            ),
             "reference_prior": "uniform_detector_basis",
+            "prior_box": {name: float(value) for name, value in bounds.items()},
+            "sky": "delta_like_at_selected_injection_truth",
+            "detection_noise_link": "not_linked",
+            "declared_approximation": (
+                "the frozen injection's detection by the real search used its own noise "
+                "realisation, which is independent of the synthetic PE observation; the "
+                "null PE is therefore not conditioned on the detection statistic that "
+                "selected the row"
+            ),
         },
     }
     return FrozenSelectionNullDataset(
@@ -182,4 +262,5 @@ def generate_frozen_selection_null_dataset(
             for name, value in truth_hyperparameters.items()
         },
         metadata=metadata,
+        event_observations={name: np.asarray(v) for name, v in observations.items()},
     )

@@ -1,4 +1,10 @@
-"""Confirm an injected scout descendant with independent F3 evidence."""
+"""Confirm an injected scout descendant with independent F3 evidence.
+
+The confirmation refits parent and child with the dynesty F3 rung of the
+supplied fidelity configuration (format 2.0) through
+:func:`~gwpop_search.scouts.comparison.compare_scout_descendant_evidence_config`;
+the scout's own HSGP inference (optional, NUTS) is untouched.
+"""
 
 from __future__ import annotations
 
@@ -157,7 +163,8 @@ def confirm_structured_scout_descendant(
     )
 
     result = {
-        "format_version": "gwpop-search-structured-descendant-confirmation-1.0",
+        "format_version": "gwpop-search-structured-descendant-confirmation-1.1",
+        "sampler_backend": "dynesty",
         "campaign_plan_identity": _plan_identity(plan),
         "campaign_root": str(campaign_root.resolve()),
         "run_index": int(selected_index),

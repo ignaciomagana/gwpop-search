@@ -1,4 +1,22 @@
-"""Frozen multi-null replay campaigns using the exact deterministic search."""
+"""Frozen multi-null replay campaigns using the exact deterministic search.
+
+Calibrated statistic (``statistic="f3_completion"``, decision D4)
+    The maximum edge ``ln BF`` and the maximum edge log posterior odds over
+    the declared graph, both floored at zero, computed from F3 evidence after
+    full-graph evidence completion. Nulls therefore run the F0 -> F3 search
+    (stop at F3) followed by F3 completion of every node; the observed
+    statistic uses the identical F3 procedure on the production state
+    (F4 is precision reporting only and never enters the statistic). F3
+    seeds are ``evaluation_seed(root, model, "F3")`` on every path, so the
+    complete F3 evidence set does not depend on the search beam.
+
+Formats: null configuration ``gwpop-search-exact-null-campaign-1.4``
+(frozen-selection PE uses the declared noisy-observation approximation; the
+per-null compute ceiling must be set explicitly), plan
+``gwpop-search-exact-null-plan-1.2`` and summary
+``gwpop-search-exact-null-summary-1.2`` (both record the statistic mode,
+ladder, sampler backend and fidelity-config hash).
+"""
 
 from __future__ import annotations
 
@@ -9,8 +27,12 @@ import math
 from pathlib import Path
 
 from gwpop_search.grammar import ModelGraph, baseline_model_spec
+from gwpop_search.inference.fidelity import fidelity_config_sha256
 from gwpop_search.inference.numpyro import _code_identity
-from gwpop_search.inference.synthetic import SyntheticSurveyConfig
+from gwpop_search.inference.synthetic import (
+    OBSERVATION_MODEL_NOISY,
+    SyntheticSurveyConfig,
+)
 from gwpop_search.models import DEFAULT_BASELINE_HYPERPARAMETERS
 from gwpop_search.production import ProductionCampaignConfig
 from gwpop_search.production.freeze import model_graph_hash
@@ -19,6 +41,43 @@ from gwpop_search.production.runner import (
     model_prior_from_config,
 )
 from gwpop_search.search import Fidelity, SearchExecutionConfig
+
+EXACT_NULL_CONFIG_FORMAT_VERSION = "gwpop-search-exact-null-campaign-1.4"
+LEGACY_EXACT_NULL_CONFIG_FORMATS = (
+    "gwpop-search-exact-null-campaign-1.0",
+    "gwpop-search-exact-null-campaign-1.1",
+    "gwpop-search-exact-null-campaign-1.2",
+    "gwpop-search-exact-null-campaign-1.3",
+)
+EXACT_NULL_PLAN_FORMAT_VERSION = "gwpop-search-exact-null-plan-1.2"
+EXACT_NULL_SUMMARY_FORMAT_VERSION = "gwpop-search-exact-null-summary-1.2"
+STATISTIC_F3_COMPLETION = "f3_completion"
+NULL_STATISTICS = (STATISTIC_F3_COMPLETION,)
+# Rungs a null replay runs and the evidence the statistic is computed from.
+STATISTIC_STOP_FIDELITY = {STATISTIC_F3_COMPLETION: Fidelity.F3_EVIDENCE}
+STATISTIC_EVIDENCE_FIDELITIES = {STATISTIC_F3_COMPLETION: ("F3",)}
+
+
+def _default_null_survey() -> SyntheticSurveyConfig:
+    return SyntheticSurveyConfig(observation_model=OBSERVATION_MODEL_NOISY)
+
+
+def statistic_definition(statistic: str) -> dict[str, object]:
+    """Machine-readable definition of a calibrated null statistic."""
+    if statistic != STATISTIC_F3_COMPLETION:
+        raise ValueError(f"unsupported null statistic {statistic!r}")
+    return {
+        "mode": STATISTIC_F3_COMPLETION,
+        "evidence_fidelities": list(STATISTIC_EVIDENCE_FIDELITIES[statistic]),
+        "replay_ladder_stop": STATISTIC_STOP_FIDELITY[statistic].value,
+        "evidence_completion_required": True,
+        "statistics": ["max_log_bayes_factor", "max_log_posterior_odds"],
+        "definition": (
+            "maximum over graph edges of ln BF (and of ln posterior odds with the frozen "
+            "model prior), floored at 0, from F3 evidence after full-graph F3 completion; "
+            "identical procedure for the observed data and every null; F4 never enters"
+        ),
+    }
 
 from .replay import (
     SearchReplayResult,
@@ -33,20 +92,47 @@ from .search_replay import (
 
 @dataclass(frozen=True)
 class ExactNullCampaignConfig:
+    """Frozen exact-null calibration settings (format 1.4).
+
+    ``survey.observation_model`` must be ``noisy_observation`` in every data
+    mode (zero-noise truth-centred PE is disqualifying). In
+    ``frozen_selection_resample`` mode the survey supplies only the event
+    count, PE samples per event and measurement-noise scales; its injection
+    options must stay unset. ``max_gpu_hours_per_null`` is the per-null
+    compute ceiling in the evaluator's ``compute_cost`` units (wall-clock
+    hours); it has no default because it must be frozen from cost calibration
+    (``None`` = not yet set; a plan cannot be prepared without it).
+    ``statistic`` is the calibrated search statistic (``f3_completion``).
+    """
+
     n_nulls: int = 100
     root_seed: int = 20260918
-    survey: SyntheticSurveyConfig = SyntheticSurveyConfig()
+    survey: SyntheticSurveyConfig = field(default_factory=_default_null_survey)
     truth_hyperparameters: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_BASELINE_HYPERPARAMETERS)
     )
     data_mode: str = "frozen_selection_resample"
     min_resampling_ess: float = 200.0
-    max_gpu_hours_per_null: float = 12.0
-    format_version: str = "gwpop-search-exact-null-campaign-1.3"
+    max_gpu_hours_per_null: float | None = None
+    statistic: str = STATISTIC_F3_COMPLETION
+    format_version: str = EXACT_NULL_CONFIG_FORMAT_VERSION
 
     def __post_init__(self) -> None:
-        if self.format_version != "gwpop-search-exact-null-campaign-1.3":
-            raise ValueError("unsupported exact null campaign format")
+        if self.format_version in LEGACY_EXACT_NULL_CONFIG_FORMATS:
+            raise ValueError(
+                f"unsupported exact null campaign format {self.format_version!r}: "
+                "NUTS/JAXNS-era null configuration (truth-centred PE, full-ladder "
+                f"statistic); re-freeze as {EXACT_NULL_CONFIG_FORMAT_VERSION}"
+            )
+        if self.format_version != EXACT_NULL_CONFIG_FORMAT_VERSION:
+            raise ValueError(
+                f"unsupported exact null campaign format {self.format_version!r}"
+            )
+        if self.statistic not in NULL_STATISTICS:
+            raise ValueError(
+                f"unsupported null statistic {self.statistic!r}; supported: "
+                f"{NULL_STATISTICS}"
+            )
         if self.n_nulls <= 0:
             raise ValueError("n_nulls must be positive")
         truth = {
@@ -64,27 +150,39 @@ class ExactNullCampaignConfig:
             "frozen_selection_resample",
         }:
             raise ValueError(f"unsupported null data mode {self.data_mode!r}")
-        if (
-            self.data_mode == "frozen_selection_resample"
-            and self.survey.uses_v2_options
+        if self.survey.observation_model != OBSERVATION_MODEL_NOISY:
+            raise ValueError(
+                "null calibration requires survey observation_model='noisy_observation': "
+                "zero-noise truth-centred PE is disqualifying (Essick & Fishbach 2023)"
+            )
+        if self.data_mode == "frozen_selection_resample" and (
+            self.survey.injection_draw != "uniform_detector_box"
         ):
             raise ValueError(
-                "frozen_selection_resample reuses the frozen production "
-                "selection and truth-centered PE; survey injection_draw and "
-                "observation_model options do not apply"
+                "frozen_selection_resample reuses the frozen production selection; "
+                "survey injection_draw options do not apply"
             )
         if (
             not math.isfinite(self.min_resampling_ess)
             or self.min_resampling_ess <= 0.0
         ):
             raise ValueError("min_resampling_ess must be finite and positive")
-        if (
-            not math.isfinite(self.max_gpu_hours_per_null)
-            or self.max_gpu_hours_per_null <= 0.0
-        ):
+        if self.max_gpu_hours_per_null is not None:
+            ceiling = float(self.max_gpu_hours_per_null)
+            if not math.isfinite(ceiling) or ceiling <= 0.0:
+                raise ValueError(
+                    "max_gpu_hours_per_null must be finite and positive when set"
+                )
+            object.__setattr__(self, "max_gpu_hours_per_null", ceiling)
+
+    def require_compute_ceiling(self) -> float:
+        """The per-null ceiling; refuses a configuration where it is not yet set."""
+        if self.max_gpu_hours_per_null is None:
             raise ValueError(
-                "max_gpu_hours_per_null must be finite and positive"
+                "max_gpu_hours_per_null is not set: the per-null compute ceiling must be "
+                "frozen explicitly (after cost calibration) before a null plan is prepared"
             )
+        return float(self.max_gpu_hours_per_null)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -95,7 +193,12 @@ class ExactNullCampaignConfig:
             "truth_hyperparameters": dict(self.truth_hyperparameters),
             "data_mode": self.data_mode,
             "min_resampling_ess": float(self.min_resampling_ess),
-            "max_gpu_hours_per_null": float(self.max_gpu_hours_per_null),
+            "max_gpu_hours_per_null": (
+                None
+                if self.max_gpu_hours_per_null is None
+                else float(self.max_gpu_hours_per_null)
+            ),
+            "statistic": self.statistic,
         }
 
     @classmethod
@@ -103,6 +206,14 @@ class ExactNullCampaignConfig:
         cls,
         payload: dict[str, object],
     ) -> "ExactNullCampaignConfig":
+        version = payload.get("format_version")
+        if version != EXACT_NULL_CONFIG_FORMAT_VERSION:
+            raise ValueError(
+                f"unsupported exact null campaign format {version!r}: re-freeze as "
+                f"{EXACT_NULL_CONFIG_FORMAT_VERSION} (noisy-observation PE, "
+                "f3_completion statistic, explicit per-null compute ceiling)"
+            )
+        ceiling = payload.get("max_gpu_hours_per_null")
         return cls(
             n_nulls=int(payload["n_nulls"]),
             root_seed=int(payload["root_seed"]),
@@ -116,18 +227,10 @@ class ExactNullCampaignConfig:
             data_mode=str(
                 payload.get("data_mode", "frozen_selection_resample")
             ),
-            min_resampling_ess=float(
-                payload.get("min_resampling_ess", 200.0)
-            ),
-            max_gpu_hours_per_null=float(
-                payload.get("max_gpu_hours_per_null", 12.0)
-            ),
-            format_version=str(
-                payload.get(
-                    "format_version",
-                    "gwpop-search-exact-null-campaign-1.3",
-                )
-            ),
+            min_resampling_ess=float(payload["min_resampling_ess"]),
+            max_gpu_hours_per_null=None if ceiling is None else float(ceiling),
+            statistic=str(payload["statistic"]),
+            format_version=str(version),
         )
 
 
@@ -172,25 +275,37 @@ def build_exact_null_campaign_plan(
             "exact null calibration requires the production campaign to permit "
             "full-graph F3 evidence completion"
         )
-    return {
-        "format_version": "gwpop-search-exact-null-plan-1.1",
+    ceiling = config.require_compute_ceiling()
+    stop = STATISTIC_STOP_FIDELITY[config.statistic]
+    ladder = list(campaign.scheduler.ladder)
+    if stop.value not in ladder:
+        raise ValueError(
+            f"the {config.statistic} statistic needs {stop.value} in the production "
+            f"ladder {ladder}"
+        )
+    plan = {
+        "format_version": EXACT_NULL_PLAN_FORMAT_VERSION,
         "code": _code_identity(),
         "production_campaign_hash": campaign.campaign_hash,
         "graph_hash": model_graph_hash(graph),
         "graph_root_hash": graph.root_hash,
         "null_config": config.to_dict(),
+        "statistic": statistic_definition(config.statistic),
+        "sampler_backend": dict(campaign.sampler_backend),
+        "fidelity_config_sha256": fidelity_config_sha256(campaign.fidelity),
         "production_dataset_manifest_hash": (
             campaign.dataset_manifest_hash
             if config.data_mode == "frozen_selection_resample"
             else None
         ),
         "replayed_production_search": {
-            "stop_fidelity": Fidelity.F4_PRODUCTION.value,
+            "production_ladder": ladder,
+            "null_ladder": ladder[: ladder.index(stop.value) + 1],
+            "stop_fidelity": stop.value,
             "scheduler": asdict(campaign.scheduler),
-            "max_gpu_hours": config.max_gpu_hours_per_null,
+            "max_gpu_hours": ceiling,
             "source_production_max_gpu_hours": campaign.budget.max_gpu_hours,
             "max_f3_models": campaign.budget.max_f3_models,
-            "max_f4_models": campaign.budget.max_f4_models,
             "evidence_completion_required": True,
         },
         "seed_policy": [
@@ -202,6 +317,8 @@ def build_exact_null_campaign_plan(
             for index in range(config.n_nulls)
         ],
     }
+    # JSON-normalized (tuples -> lists) so a written plan compares equal on reload.
+    return json.loads(json.dumps(plan))
 
 
 def _write_plan_once(path: Path, plan: dict[str, object]) -> None:
@@ -333,11 +450,12 @@ def run_exact_null_index(
         return result
 
     model_prior = model_prior_from_config(campaign.model_prior)
+    ceiling = config.require_compute_ceiling()
     null_campaign = replace(
         campaign,
         budget=replace(
             campaign.budget,
-            max_gpu_hours=config.max_gpu_hours_per_null,
+            max_gpu_hours=ceiling,
         ),
     )
     result = run_baseline_null_search_replay(
@@ -349,12 +467,9 @@ def run_exact_null_index(
         execution_config=SearchExecutionConfig(
             root_seed=null_search_seed(config.root_seed, index),
             scheduler=campaign.scheduler,
-            stop_fidelity=Fidelity.F4_PRODUCTION,
-            max_models_by_fidelity={
-                "F3": campaign.budget.max_f3_models,
-                "F4": campaign.budget.max_f4_models,
-            },
-            max_total_compute_cost=config.max_gpu_hours_per_null,
+            stop_fidelity=STATISTIC_STOP_FIDELITY[config.statistic],
+            max_models_by_fidelity={"F3": campaign.budget.max_f3_models},
+            max_total_compute_cost=ceiling,
         ),
         fidelity_config=campaign.fidelity,
         survey_config=config.survey,
@@ -366,6 +481,7 @@ def run_exact_null_index(
         frozen_selection=production_selection,
         production_dataset_identity=production_dataset_identity,
         min_resampling_ess=config.min_resampling_ess,
+        statistic=config.statistic,
     )
     if result.null_index != index or result.seed != data_seed:
         raise ValueError(
@@ -420,11 +536,14 @@ def finalize_exact_null_campaign(
     model_prior = model_prior_from_config(campaign.model_prior)
     observed = None
     if observed_state_database is not None:
-        evidence = collect_best_available_evidence(observed_state_database)
+        evidence = collect_best_available_evidence(
+            observed_state_database,
+            fidelities=STATISTIC_EVIDENCE_FIDELITIES[config.statistic],
+        )
         if evidence:
             if len(evidence) != len(graph.nodes):
                 raise ValueError(
-                    "observed production state lacks complete valid evidence; "
+                    "observed production state lacks complete valid F3 evidence; "
                     "run complete-production-evidence before null calibration"
                 )
             observed = search_statistics_from_evidence(
@@ -445,10 +564,12 @@ def finalize_exact_null_campaign(
         ),
     )
     summary = {
-        "format_version": "gwpop-search-exact-null-summary-1.1",
+        "format_version": EXACT_NULL_SUMMARY_FORMAT_VERSION,
         "production_campaign_hash": campaign.campaign_hash,
+        "statistic": statistic_definition(config.statistic),
+        "sampler_backend": dict(campaign.sampler_backend),
         "null_data_mode": config.data_mode,
-        "max_gpu_hours_per_null": float(config.max_gpu_hours_per_null),
+        "max_gpu_hours_per_null": config.require_compute_ceiling(),
         "production_dataset_identity": production_dataset_identity,
         "observed_search_statistics": observed,
         "calibration": calibrated,

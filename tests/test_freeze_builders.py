@@ -51,9 +51,19 @@ def test_canonical_hdf5_pair_builds_explicit_dataset_manifest(tmp_path):
 
 
 def test_fidelity_config_file_roundtrip_is_exact(tmp_path):
+    from dataclasses import replace
+
+    from gwpop_search.inference.fidelity import F0SanityConfig
+
     config = FidelityRunConfig(
-        f0_pe_samples_per_event=17,
-        f1_selected_per_campaign=1234,
+        f0=F0SanityConfig(prior_draws=1024, parity_pe_samples_per_event=17),
+        posterior_draws=256,
+    )
+    config = replace(
+        config,
+        f3_evidence=replace(
+            config.f3_evidence, dynesty=replace(config.f3_evidence.dynesty, batch_size=32)
+        ),
     )
     path = tmp_path / "fidelity.json"
     save_fidelity_run_config(path, config)
@@ -61,9 +71,21 @@ def test_fidelity_config_file_roundtrip_is_exact(tmp_path):
 
     assert restored == config
     payload = json.loads(path.read_text())
-    assert payload["f0_pe_samples_per_event"] == 17
-    assert payload["f1_selected_per_campaign"] == 1234
+    assert payload["format_version"] == "gwpop-search-fidelity-config-2.0"
+    assert payload["f0"]["prior_draws"] == 1024
+    assert payload["f0"]["parity_pe_samples_per_event"] == 17
+    assert payload["f3_evidence"]["dynesty"]["batch_size"] == 32
     assert payload["f4_evidence"]["repeats"] == 3
+    assert payload["posterior_draws"] == 256
+
+
+def test_legacy_fidelity_config_file_is_refused(tmp_path):
+    from gwpop_search.inference.fidelity import LegacyFidelityConfigError
+
+    path = tmp_path / "fidelity-1x.json"
+    path.write_text(json.dumps({"f0_pe_samples_per_event": 32, "f4_nuts": {"num_chains": 4}}))
+    with pytest.raises(LegacyFidelityConfigError, match="NUTS/JAXNS-era config; re-freeze"):
+        load_fidelity_run_config(path)
 
 
 def test_campaign_builder_pins_manifest_graph_and_full_fidelity(tmp_path):
@@ -85,7 +107,7 @@ def test_campaign_builder_pins_manifest_graph_and_full_fidelity(tmp_path):
         max_depth=1,
         max_models=10,
     )
-    fidelity = FidelityRunConfig(f0_pe_samples_per_event=19)
+    fidelity = FidelityRunConfig(posterior_draws=128)
     campaign = build_production_campaign(
         manifest,
         graph,
@@ -111,7 +133,8 @@ def test_campaign_builder_pins_manifest_graph_and_full_fidelity(tmp_path):
     assert campaign.model_graph_hash == model_graph_hash(graph)
     assert campaign.model_graph_root_hash == graph.root_hash
     assert campaign.fidelity == fidelity
-    assert campaign.format_version == "gwpop-search-production-campaign-1.1"
+    assert campaign.format_version == "gwpop-search-production-campaign-2.0"
+    assert campaign.sampler_backend == {"name": "dynesty", "version": "3.1.0"}
 
     path = tmp_path / "campaign.json"
     save_production_campaign(path, campaign)
@@ -156,4 +179,7 @@ def test_old_production_campaign_format_is_rejected(tmp_path):
     from gwpop_search.production import ProductionCampaignConfig
 
     with pytest.raises(ValueError, match="unsupported production campaign"):
+        ProductionCampaignConfig.from_dict(payload)
+    payload["format_version"] = "gwpop-search-production-campaign-1.1"
+    with pytest.raises(ValueError, match="re-freeze"):
         ProductionCampaignConfig.from_dict(payload)

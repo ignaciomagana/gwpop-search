@@ -10,7 +10,12 @@ from gwpop_search.grammar import ModelGraph
 from gwpop_search.inference.fidelity import FidelityRunConfig
 from gwpop_search.search import SchedulerConfig
 
-from .config import ProductionCampaignConfig, SearchBudget, SeedPolicy
+from .config import (
+    ProductionCampaignConfig,
+    SearchBudget,
+    SeedPolicy,
+    installed_sampler_backend,
+)
 from .freeze import model_graph_hash
 from .manifest import (
     DatasetManifest,
@@ -75,7 +80,9 @@ def build_production_campaign(
     artifact_root: str,
     state_database: str,
     agents_enabled: bool = False,
+    sampler_backend: Mapping[str, str] | None = None,
 ) -> ProductionCampaignConfig:
+    """Freeze a v2 campaign; the sampler pin defaults to the installed dynesty."""
     return ProductionCampaignConfig(
         campaign_id=campaign_id,
         dataset_manifest_hash=manifest.manifest_hash,
@@ -90,4 +97,7 @@ def build_production_campaign(
         artifact_root=artifact_root,
         state_database=state_database,
         agents_enabled=agents_enabled,
+        sampler_backend=(
+            installed_sampler_backend() if sampler_backend is None else dict(sampler_backend)
+        ),
     )

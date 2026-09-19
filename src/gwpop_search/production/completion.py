@@ -1,4 +1,13 @@
-"""Complete valid F3 evidence over every node in a frozen model graph."""
+"""Complete valid F3 evidence over every node in a frozen model graph.
+
+Completion runs the identical F3 rung (seed ``evaluation_seed(root, model,
+"F3")``, dynesty repeats of the frozen fidelity configuration) for every
+graph node that lacks valid F3/F4 evidence, so the complete F3 evidence set
+does not depend on which models the search beam promoted. A frozen F3 that
+failed its gates (including typed numerical failures such as no finite
+prior support) is never re-run; it blocks the normalized graph posterior.
+Rows are recorded with executor ``evidence-completion-v2``.
+"""
 
 from __future__ import annotations
 
@@ -9,12 +18,17 @@ from pathlib import Path
 from gwpop_search.grammar import ModelGraph
 from gwpop_search.inference.fidelity import DeterministicHBIEvaluator
 from gwpop_search.search import (
+    COMPLETION_EXECUTOR_VERSION,
     Fidelity,
     SearchBudgetExceeded,
+    evaluation_run_config,
     evaluation_run_id,
     evaluation_seed,
+    require_v2_state,
 )
 from gwpop_search.store import ResultStore
+
+EVIDENCE_COMPLETION_FORMAT_VERSION = "gwpop-search-evidence-completion-1.1"
 
 from .config import ProductionCampaignConfig
 from .runner import (
@@ -22,6 +36,21 @@ from .runner import (
     model_prior_from_config,
     write_scientific_scoring,
 )
+
+
+def _evaluation_failure(artifact_path) -> dict[str, object] | None:
+    """The typed failure block of an evaluation artifact, if it records one."""
+    if not artifact_path:
+        return None
+    path = Path(str(artifact_path)) / "evaluation.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except ValueError:
+        return None
+    failure = (payload.get("diagnostics") or {}).get("failure")
+    return failure if isinstance(failure, dict) else None
 
 
 def _total_compute_cost(store: ResultStore) -> float:
@@ -64,6 +93,7 @@ def complete_graph_evidence(
         else int(root_seed)
     )
     store = ResultStore(state_database)
+    require_v2_state(store)
     artifact_root = Path(artifact_root)
     artifact_root.mkdir(parents=True, exist_ok=True)
     evaluator = DeterministicHBIEvaluator(
@@ -116,6 +146,7 @@ def complete_graph_evidence(
                     "status": row["status"],
                     "diagnostics_pass": bool(row["diagnostics_pass"]),
                     "artifact_path": row.get("artifact_path"),
+                    "failure": _evaluation_failure(row.get("artifact_path")),
                 }
             )
             continue
@@ -143,10 +174,9 @@ def complete_graph_evidence(
             run_id,
             record,
             seed=seed,
-            run_config={
-                "executor": "evidence-completion-v1",
-                "fidelity": Fidelity.F3_EVIDENCE.value,
-            },
+            run_config=evaluation_run_config(
+                Fidelity.F3_EVIDENCE, executor=COMPLETION_EXECUTOR_VERSION
+            ),
             artifact_path=str(run_dir),
         )
         total_cost = _total_compute_cost(store)
@@ -166,6 +196,7 @@ def complete_graph_evidence(
                     "status": record.status,
                     "diagnostics_pass": False,
                     "artifact_path": str(run_dir),
+                    "failure": _evaluation_failure(str(run_dir)),
                 }
             )
 
@@ -177,7 +208,9 @@ def complete_graph_evidence(
     )
     valid = collect_best_available_evidence(state_database)
     summary = {
-        "format_version": "gwpop-search-evidence-completion-1.0",
+        "format_version": EVIDENCE_COMPLETION_FORMAT_VERSION,
+        "executor": COMPLETION_EXECUTOR_VERSION,
+        "sampler_backend": dict(campaign.sampler_backend),
         "campaign_id": campaign.campaign_id,
         "dataset_identity": str(dataset_identity),
         "evidence_seed_root": int(seed_root),

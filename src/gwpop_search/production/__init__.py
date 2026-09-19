@@ -6,21 +6,26 @@ from .builders import (
 )
 from .completion import complete_graph_evidence
 from .config import (
+    PRODUCTION_CAMPAIGN_FORMAT_VERSION,
+    LegacyCampaignError,
     ProductionCampaignConfig,
     SearchBudget,
     SeedPolicy,
+    installed_sampler_backend,
     load_production_campaign,
     save_production_campaign,
+    validate_sampler_backend,
 )
 from .freeze import canonical_graph_json, model_graph_hash, verify_graph_file
 from .runner import (
     collect_best_available_evidence,
+    evidence_from_evaluation,
     load_frozen_dataset,
     model_prior_from_config,
     run_production_search,
     write_scientific_scoring,
 )
-from .validate import validate_production_freeze
+from .validate import sampler_backend_status, validate_production_freeze
 from .manifest import (
     ArtifactEntry,
     DatasetManifest,
@@ -32,6 +37,12 @@ from .manifest import (
 )
 
 __all__ = [
+    "LegacyCampaignError",
+    "PRODUCTION_CAMPAIGN_FORMAT_VERSION",
+    "evidence_from_evaluation",
+    "installed_sampler_backend",
+    "sampler_backend_status",
+    "validate_sampler_backend",
     "ArtifactEntry",
     "build_dataset_manifest_from_canonical_files",
     "build_production_campaign",

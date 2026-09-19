@@ -1,4 +1,10 @@
-"""Bridge the declared baseline null to the exact deterministic search pipeline."""
+"""Bridge the declared baseline null to the exact deterministic search pipeline.
+
+One replay generates a baseline-null catalog, runs the frozen search with the
+production evaluator (dynesty ladder) up to the statistic's stop rung, runs
+full-graph F3 evidence completion and computes the calibrated statistic from
+exactly the evidence the statistic declares (``f3_completion``: F3 only).
+"""
 
 from __future__ import annotations
 
@@ -24,8 +30,13 @@ from gwpop_search.search import (
     execute_search,
 )
 
-from .frozen_selection import generate_frozen_selection_null_dataset
+from .frozen_selection import (
+    generate_frozen_selection_null_dataset,
+    require_frozen_selection_survey,
+)
 from .replay import SearchReplayResult
+
+_STATISTIC_EVIDENCE_FIDELITIES = {"f3_completion": ("F3",)}
 
 
 def search_statistics_from_evidence(
@@ -92,8 +103,16 @@ def run_baseline_null_search_replay(
     frozen_selection=None,
     production_dataset_identity: str | None = None,
     min_resampling_ess: float = 200.0,
+    statistic: str = "f3_completion",
 ) -> SearchReplayResult:
-    """Generate one baseline-null catalog and execute the same F0--F4 search."""
+    """Generate one baseline-null catalog and replay the frozen search procedure.
+
+    ``execution_config`` fixes the rungs (``f3_completion``: stop at F3) and
+    ``completion_campaign`` the evidence completion; the statistic is computed
+    from the evidence fidelities the statistic declares.
+    """
+    if statistic not in _STATISTIC_EVIDENCE_FIDELITIES:
+        raise ValueError(f"unsupported null statistic {statistic!r}")
     declared_root = baseline_model_spec()
     if graph.root_hash != declared_root.model_hash:
         raise ValueError(
@@ -133,12 +152,7 @@ def run_baseline_null_search_replay(
             f"baseline-null:{int(seed)}{survey_config.dataset_identity_suffix()}"
         )
     elif data_mode == "frozen_selection_resample":
-        if survey_config.uses_v2_options:
-            raise ValueError(
-                "frozen_selection_resample reuses the frozen production "
-                "selection and truth-centered PE; survey injection_draw and "
-                "observation_model options do not apply"
-            )
+        require_frozen_selection_survey(survey_config)
         if observed_posterior is None or frozen_selection is None:
             raise ValueError(
                 "frozen_selection_resample requires observed_posterior and "
@@ -163,6 +177,7 @@ def run_baseline_null_search_replay(
         null_data_metadata = dict(dataset.metadata)
         dataset_identity = (
             f"frozen-selection-null:{production_dataset_identity}:{int(seed)}"
+            f"{survey_config.dataset_identity_suffix()}"
         )
     else:
         raise ValueError(f"unsupported null data mode {data_mode!r}")
@@ -198,7 +213,9 @@ def run_baseline_null_search_replay(
             root_seed=completion_seed_root,
         )
 
-    evidences = collect_best_available_evidence(database)
+    evidences = collect_best_available_evidence(
+        database, fidelities=_STATISTIC_EVIDENCE_FIDELITIES[statistic]
+    )
     if completion_campaign is not None and len(evidences) != len(graph.nodes):
         raise RuntimeError(
             "exact null replay did not obtain valid evidence for every "
@@ -218,6 +235,8 @@ def run_baseline_null_search_replay(
         best_model_hash=str(stats["best_model_hash"]),
         metadata={
             "null_model_hash": graph.root_hash,
+            "statistic": statistic,
+            "statistic_evidence_fidelities": list(_STATISTIC_EVIDENCE_FIDELITIES[statistic]),
             "n_evidence_edges": int(stats["n_evidence_edges"]),
             "execution": execution.to_dict(),
             "evidence_completion": completion,

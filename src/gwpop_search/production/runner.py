@@ -1,22 +1,41 @@
-"""Frozen-data deterministic production search runner."""
+"""Frozen-data deterministic production search runner (dynesty ladder v2).
+
+Scientific evidence is read only from evaluation artifacts of format
+``gwpop-search-fidelity-evaluation-2.0`` whose state-store row was written by
+a v2 executor (``deterministic-fidelity-v2`` or ``evidence-completion-v2``),
+whose fidelity is F3 or F4 and whose numerical gates passed; F4 is preferred
+over F3 when both passed. Legacy (NUTS/JAXNS-era) rows or evaluation
+artifacts are refused, never silently reused.
+"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Iterable
 
 from gwpop_search.data import PosteriorCatalog, SelectionCatalog
 from gwpop_search.grammar import load_model_graph
-from gwpop_search.inference.fidelity import DeterministicHBIEvaluator
+from gwpop_search.inference.fidelity import (
+    EVALUATION_FORMAT_VERSION,
+    DeterministicHBIEvaluator,
+)
 from gwpop_search.search import (
     ComplexityModelPrior,
+    LegacyStateError,
     ModelEvidence,
     SearchExecutionConfig,
     UniformModelPrior,
+    V2_EXECUTORS,
     execute_search,
+    row_executor,
     score_model_graph,
 )
 from gwpop_search.store import ResultStore
+
+PRODUCTION_RUN_FORMAT_VERSION = "gwpop-search-production-run-1.1"
+EVIDENCE_COVERAGE_FORMAT_VERSION = "gwpop-search-evidence-coverage-1.1"
+EVIDENCE_FIDELITIES = ("F3", "F4")
 
 from .config import ProductionCampaignConfig
 from .manifest import DatasetManifest
@@ -83,22 +102,30 @@ def model_prior_from_config(payload):
     raise ValueError(f"unsupported frozen model prior version {version!r}")
 
 
-def _evidence_from_evaluation(path: Path) -> ModelEvidence | None:
+def evidence_from_evaluation(path: Path) -> ModelEvidence | None:
+    """Scientific evidence of one passed F3/F4 evaluation artifact (format 2.0).
+
+    Returns ``None`` when the artifact is missing, not an evidence rung or did
+    not pass its gates; raises ``LegacyStateError`` for a legacy (1.x)
+    evaluation artifact.
+    """
     if not path.is_file():
         return None
     payload = json.loads(path.read_text())
-    fidelity = payload.get("fidelity")
-    diagnostics = payload.get("diagnostics", {})
-
-    if fidelity == "F3":
-        evidence = diagnostics.get("evidence")
-    elif fidelity == "F4":
-        evidence = diagnostics.get("evidence", {}).get("evidence")
-    else:
+    version = payload.get("format_version")
+    if version != EVALUATION_FORMAT_VERSION:
+        raise LegacyStateError(
+            f"{path} is a {version!r} evaluation artifact; scientific evidence is read "
+            f"only from {EVALUATION_FORMAT_VERSION} (dynesty ladder) evaluations"
+        )
+    if payload.get("fidelity") not in EVIDENCE_FIDELITIES:
         return None
+    diagnostics = payload.get("diagnostics") or {}
+    if not bool(diagnostics.get("passed", False)):
+        return None
+    evidence = diagnostics.get("evidence")
     if not isinstance(evidence, dict):
-        return None
-
+        raise ValueError(f"{path} passed its gates but carries no evidence block")
     return ModelEvidence(
         model_hash=str(payload["model_hash"]),
         log_evidence=float(evidence["log_evidence_mean"]),
@@ -106,31 +133,54 @@ def _evidence_from_evaluation(path: Path) -> ModelEvidence | None:
     )
 
 
+# Backwards-compatible private name.
+_evidence_from_evaluation = evidence_from_evaluation
+
+
 def collect_best_available_evidence(
     state_database: str | Path,
+    *,
+    fidelities: Iterable[str] = EVIDENCE_FIDELITIES,
 ) -> dict[str, ModelEvidence]:
-    """Prefer F4 evidence, falling back to F3 for models not promoted to F4."""
+    """Valid evidence per model: F4 preferred, F3 otherwise (within ``fidelities``).
+
+    Only rows written by a v2 executor with ``status == "complete"`` and
+    passed gates count; a row of a retired executor raises
+    ``LegacyStateError``. ``fidelities=("F3",)`` gives the F3-only evidence
+    set used by the ``f3_completion`` null-calibration statistic.
+    """
+    fidelities = tuple(str(item) for item in fidelities)
+    unknown = sorted(set(fidelities) - set(EVIDENCE_FIDELITIES))
+    if unknown or not fidelities:
+        raise ValueError(f"evidence fidelities must be a subset of {EVIDENCE_FIDELITIES}")
     store = ResultStore(state_database)
     rows = store.evaluations()
+    legacy = [row for row in rows if row_executor(row) not in V2_EXECUTORS]
+    if legacy:
+        raise LegacyStateError(
+            f"state database {state_database} holds {len(legacy)} row(s) of a retired "
+            f"executor (e.g. {legacy[0]['run_id']}: {row_executor(legacy[0])!r}); "
+            "scientific evidence is read only from dynesty-ladder rows"
+        )
     rows = sorted(
         rows,
         key=lambda row: (
             str(row["model_hash"]),
-            0 if row["fidelity"] == "F3" else 1,
+            EVIDENCE_FIDELITIES.index(row["fidelity"])
+            if row["fidelity"] in EVIDENCE_FIDELITIES
+            else -1,
         ),
     )
     result: dict[str, ModelEvidence] = {}
     for row in rows:
-        if row["fidelity"] not in {"F3", "F4"}:
+        if row["fidelity"] not in fidelities:
             continue
         if row["status"] != "complete" or not bool(row["diagnostics_pass"]):
             continue
         artifact = row.get("artifact_path")
         if not artifact:
             continue
-        evidence = _evidence_from_evaluation(
-            Path(str(artifact)) / "evaluation.json"
-        )
+        evidence = evidence_from_evaluation(Path(str(artifact)) / "evaluation.json")
         if evidence is not None:
             result[evidence.model_hash] = evidence
     return result
@@ -147,7 +197,9 @@ def write_scientific_scoring(
     artifact_root = Path(artifact_root)
     evidences = collect_best_available_evidence(state_database)
     coverage = {
-        "format_version": "gwpop-search-evidence-coverage-1.0",
+        "format_version": EVIDENCE_COVERAGE_FORMAT_VERSION,
+        "sampler_backend": "dynesty",
+        "evidence_fidelities": list(EVIDENCE_FIDELITIES),
         "n_graph_models": len(graph.nodes),
         "n_models_with_evidence": len(evidences),
         "complete": len(evidences) == len(graph.nodes),
@@ -196,7 +248,7 @@ def run_production_search(
     work_dir: str | Path = ".",
     require_current_commit: bool = True,
 ) -> dict[str, object]:
-    """Validate the freeze, load canonical HDF5s, and run/resume F0--F4."""
+    """Validate the freeze, load canonical HDF5s, and run/resume the ladder (F0 -> F3 -> F4)."""
     if campaign.agents_enabled:
         raise ValueError(
             "deterministic production runner requires agents_enabled=false; "
@@ -253,7 +305,9 @@ def run_production_search(
         model_prior=model_prior_from_config(campaign.model_prior),
     )
     result = {
-        "format_version": "gwpop-search-production-run-1.0",
+        "format_version": PRODUCTION_RUN_FORMAT_VERSION,
+        "sampler_backend": dict(campaign.sampler_backend),
+        "ladder": list(campaign.scheduler.ladder),
         "campaign_id": campaign.campaign_id,
         "campaign_hash": campaign.campaign_hash,
         "dataset_manifest_hash": manifest.manifest_hash,

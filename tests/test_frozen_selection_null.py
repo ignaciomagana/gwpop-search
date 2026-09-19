@@ -6,6 +6,7 @@ from gwpop_search.grammar import baseline_model_spec
 from gwpop_search.inference.synthetic import (
     SyntheticSurveyConfig,
     generate_baseline_synthetic_dataset,
+    pe_truth_quantiles,
 )
 from gwpop_search.models import DEFAULT_BASELINE_HYPERPARAMETERS, compile_model_spec
 from gwpop_search.nulls import (
@@ -35,9 +36,9 @@ def _estimator_ready_selection(raw):
     )
 
 
-def _fixture(seed=1):
-    config = SyntheticSurveyConfig(
-        n_events=5,
+def _fixture(seed=1, *, n_events=5):
+    source = SyntheticSurveyConfig(
+        n_events=n_events,
         posterior_samples_per_event=12,
         n_injections=2000,
         population_batch_size=128,
@@ -45,9 +46,18 @@ def _fixture(seed=1):
     )
     dataset = generate_baseline_synthetic_dataset(
         seed=seed,
-        config=config,
+        config=source,
     )
     selection = _estimator_ready_selection(dataset.selection)
+    # Null PE: the declared noisy-observation approximation (truth-centred PE is refused).
+    config = SyntheticSurveyConfig(
+        n_events=n_events,
+        posterior_samples_per_event=12,
+        n_injections=2000,
+        population_batch_size=128,
+        redshift_sampling_grid=512,
+        observation_model="noisy_observation",
+    )
     return dataset.posterior, selection, config
 
 
@@ -142,6 +152,7 @@ def test_frozen_selection_null_requires_matching_observed_event_count():
         n_events=observed.n_events + 1,
         posterior_samples_per_event=config.posterior_samples_per_event,
         n_injections=config.n_injections,
+        observation_model="noisy_observation",
     )
     with pytest.raises(ValueError, match="event count"):
         generate_frozen_selection_null_dataset(
@@ -152,3 +163,74 @@ def test_frozen_selection_null_requires_matching_observed_event_count():
             survey_config=bad,
             min_resampling_ess=1.0,
         )
+
+
+def test_frozen_selection_null_refuses_truth_centred_pe_and_injection_options():
+    observed, selection, config = _fixture(seed=6)
+    for survey, match in (
+        (
+            SyntheticSurveyConfig(
+                n_events=config.n_events,
+                posterior_samples_per_event=config.posterior_samples_per_event,
+            ),
+            "noisy_observation",
+        ),
+        (
+            SyntheticSurveyConfig(
+                n_events=config.n_events,
+                posterior_samples_per_event=config.posterior_samples_per_event,
+                observation_model="noisy_observation",
+                injection_draw="population_proxy",
+            ),
+            "do not apply",
+        ),
+    ):
+        with pytest.raises(ValueError, match=match):
+            generate_frozen_selection_null_dataset(
+                seed=21,
+                observed_posterior=observed,
+                selection=selection,
+                truth_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+                survey_config=survey,
+                min_resampling_ess=1.0,
+            )
+
+
+def test_frozen_selection_null_pe_is_drawn_given_one_noisy_observation():
+    observed, selection, config = _fixture(seed=7, n_events=40)
+    null = generate_frozen_selection_null_dataset(
+        seed=23,
+        observed_posterior=observed,
+        selection=selection,
+        truth_hyperparameters=DEFAULT_BASELINE_HYPERPARAMETERS,
+        survey_config=config,
+        min_resampling_ess=1.0,
+    )
+    approximation = null.metadata["pe_approximation"]
+    assert null.metadata["format_version"] == "gwpop-search-frozen-selection-null-2.0"
+    assert approximation["observation_model"] == "noisy_observation"
+    assert approximation["detection_noise_link"] == "not_linked"
+    assert "not conditioned on the detection statistic" in approximation["declared_approximation"]
+    assert approximation["observation_noise_sigma"]["chi_eff"] == config.pe_chi_eff_sigma
+
+    truths = {
+        name: np.asarray(selection.samples[name])[null.truth_rows]
+        for name in ("chi_eff", "q")
+    }
+    # One observation per event; PE is centred on it, not on the truth: the truth's
+    # quantile inside its own PE varies across events (zero-noise PE puts it at ~0.5).
+    assert set(null.event_observations) == {
+        "log_m1_detector", "q", "log_luminosity_distance", "chi_eff",
+    }
+    assert null.event_observations["chi_eff"].shape == (40,)
+    assert not np.allclose(null.event_observations["chi_eff"], truths["chi_eff"])
+    quantiles = pe_truth_quantiles(null.posterior, truths, "chi_eff")
+    assert np.std(quantiles) > 0.15
+    assert np.mean((quantiles > 0.1) & (quantiles < 0.9)) < 0.95
+    for i in range(3):
+        sl = null.posterior.event_slice(i)
+        pe = np.asarray(null.posterior.samples["chi_eff"])[sl]
+        assert abs(np.mean(pe) - null.event_observations["chi_eff"][i]) < 0.1
+    # The PE prior (reference density) is the stored uniform detector box.
+    assert np.all(np.isfinite(null.posterior.log_ref_density))
+    assert np.unique(null.posterior.log_ref_density).size == 1

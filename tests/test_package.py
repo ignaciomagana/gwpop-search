@@ -1,3 +1,5 @@
+import pytest
+
 from gwpop_search import __version__
 from gwpop_search.cli import build_parser
 
@@ -168,7 +170,67 @@ def test_write_default_fidelity_config_cli_parses():
     )
     assert args.command == "write-default-fidelity-config"
     assert args.output == "fidelity.json"
+    assert args.batch_size == 64
+    assert args.f0_prior_draws == 4096
+    assert args.f3_nlive is None and args.f4_maxcall is None
     assert callable(args.func)
+
+
+def test_write_default_fidelity_config_writes_ladder_v2(tmp_path):
+    from gwpop_search.inference.fidelity import load_fidelity_run_config
+
+    output = tmp_path / "fidelity.json"
+    args = build_parser().parse_args(
+        [
+            "write-default-fidelity-config",
+            "--output",
+            str(output),
+            "--batch-size",
+            "32",
+            "--f3-nlive",
+            "800",
+            "--f4-repeats",
+            "4",
+            "--f4-maxcall",
+            "5000000",
+        ]
+    )
+    args.func(args)
+    config = load_fidelity_run_config(output)
+    assert config.format_version == "gwpop-search-fidelity-config-2.0"
+    assert config.f0.batch_size == 32
+    assert config.f3_evidence.dynesty.batch_size == 32
+    assert config.f3_evidence.dynesty.nlive == 800
+    assert config.f4_evidence.dynesty.nlive == 2000
+    assert config.f4_evidence.repeats == 4
+    assert config.f4_evidence.dynesty.maxcall == 5_000_000
+    assert config.f3_evidence.dynesty.maxcall is None
+
+
+def test_fidelity_diagnostic_subcommands_parse():
+    args = build_parser().parse_args(
+        [
+            "run-fidelity-evaluation",
+            "--manifest",
+            "dataset_manifest.json",
+            "--graph",
+            "model_graph.json",
+            "--campaign",
+            "campaign.json",
+            "--fidelity",
+            "F0",
+            "--all-models",
+            "--output-root",
+            "runs/preflight",
+        ]
+    )
+    assert args.command == "run-fidelity-evaluation"
+    assert args.fidelity == "F0" and args.all_models and args.seed is None
+    assert callable(args.func)
+    summary = build_parser().parse_args(
+        ["summarize-fidelity-evaluation", "--evaluation", "evaluation.json", "--all-checks"]
+    )
+    assert summary.command == "summarize-fidelity-evaluation" and summary.all_checks
 
 
 def test_freeze_production_campaign_cli_parses():
@@ -216,6 +278,7 @@ def test_freeze_production_campaign_cli_parses():
     assert args.model_prior == "axis-complexity"
     assert args.model_prior_penalty == 0.7
     assert args.max_f4_models == 8
+    assert args.ladder == "F0,F3,F4"
     assert callable(args.func)
 
 
@@ -395,6 +458,8 @@ def test_write_null_calibration_config_cli_parses():
             "write-null-calibration-config",
             "--n-nulls",
             "50",
+            "--max-gpu-hours-per-null",
+            "3.5",
             "--output",
             "nulls.json",
         ]
@@ -403,10 +468,43 @@ def test_write_null_calibration_config_cli_parses():
     assert args.n_nulls == 50
     assert args.data_mode == "frozen_selection_resample"
     assert args.min_resampling_ess == 200.0
-    assert args.max_gpu_hours_per_null == 12.0
+    assert args.max_gpu_hours_per_null == 3.5
+    assert args.statistic == "f3_completion"
     assert args.n_events is None
     assert not hasattr(args, "stop_fidelity")
     assert callable(args.func)
+    # The per-null compute ceiling has no default: it must be frozen explicitly.
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["write-null-calibration-config", "--output", "nulls.json"]
+        )
+
+
+def test_write_null_calibration_config_writes_format_1_4(tmp_path):
+    from gwpop_search.nulls import load_exact_null_campaign_config
+
+    output = tmp_path / "nulls.json"
+    args = build_parser().parse_args(
+        [
+            "write-null-calibration-config",
+            "--data-mode",
+            "synthetic_survey",
+            "--n-events",
+            "12",
+            "--n-nulls",
+            "5",
+            "--max-gpu-hours-per-null",
+            "2.5",
+            "--output",
+            str(output),
+        ]
+    )
+    args.func(args)
+    config = load_exact_null_campaign_config(output)
+    assert config.format_version == "gwpop-search-exact-null-campaign-1.4"
+    assert config.survey.observation_model == "noisy_observation"
+    assert config.statistic == "f3_completion"
+    assert config.max_gpu_hours_per_null == 2.5
 
 
 def test_run_null_search_calibration_cli_parses():

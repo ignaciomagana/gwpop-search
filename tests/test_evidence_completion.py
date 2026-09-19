@@ -14,11 +14,14 @@ from gwpop_search.production import (
     complete_graph_evidence,
     model_graph_hash,
 )
+from gwpop_search.production import collect_best_available_evidence
 from gwpop_search.search import (
     EvaluationRecord,
     Fidelity,
+    LegacyStateError,
     SchedulerConfig,
     SearchBudgetExceeded,
+    evaluation_run_config,
     evaluation_run_id,
     evaluation_seed,
 )
@@ -60,27 +63,23 @@ def _write_evaluation_artifact(
     fidelity,
     *,
     logz=-10.0,
+    passed=True,
+    failure=None,
 ):
     run_dir.mkdir(parents=True, exist_ok=True)
-    if fidelity == Fidelity.F3_EVIDENCE:
-        diagnostics = {
-            "evidence": {
-                "log_evidence_mean": float(logz),
-                "conservative_error": 0.1,
-            }
-        }
-    else:
-        diagnostics = {
-            "evidence": {
-                "evidence": {
-                    "log_evidence_mean": float(logz),
-                    "conservative_error": 0.05,
-                }
-            }
-        }
+    diagnostics = {
+        "passed": bool(passed),
+        "checks": [],
+        "failure": failure,
+        "evidence": {
+            "log_evidence_mean": float(logz),
+            "conservative_error": 0.1 if fidelity == Fidelity.F3_EVIDENCE else 0.05,
+        },
+    }
     (run_dir / "evaluation.json").write_text(
         json.dumps(
             {
+                "format_version": "gwpop-search-fidelity-evaluation-2.0",
                 "model_hash": model_hash,
                 "fidelity": fidelity.value,
                 "diagnostics": diagnostics,
@@ -112,6 +111,7 @@ def _record_existing(
         model.model_hash,
         fidelity,
         logz=logz,
+        passed=diagnostics_pass,
     )
     store.record_evaluation(
         evaluation_run_id(model.model_hash, fidelity, seed),
@@ -123,7 +123,7 @@ def _record_existing(
             compute_cost=compute_cost,
         ),
         seed=seed,
-        run_config={"test": True},
+        run_config=evaluation_run_config(fidelity),
         artifact_path=str(run_dir),
     )
 
@@ -143,6 +143,8 @@ class _FakeEvaluator:
             model.model_hash,
             fidelity,
             logz=-20.0 + len(type(self).calls),
+            passed=passed,
+            failure=None if passed else {"type": "no_finite_support", "message": "test"},
         )
         return EvaluationRecord(
             model_hash=model.model_hash,
@@ -355,8 +357,14 @@ def test_fresh_failed_f3_remains_outside_scientific_evidence(
 
     assert summary["n_evaluated"] == 1
     assert summary["n_blocked_invalid"] == 1
+    assert summary["blocked_invalid"][0]["failure"]["type"] == "no_finite_support"
     assert summary["n_valid_evidence_final"] == 0
     assert not summary["full_model_posterior_available"]
+    assert summary["format_version"] == "gwpop-search-evidence-completion-1.1"
+    rows = ResultStore(tmp_path / "state.sqlite").evaluations()
+    assert [json.loads(row["run_config_json"])["executor"] for row in rows] == [
+        "evidence-completion-v2"
+    ]
 
 
 def test_completion_cannot_bypass_frozen_f3_model_budget(tmp_path):
@@ -376,4 +384,56 @@ def test_completion_cannot_bypass_frozen_f3_model_budget(tmp_path):
             dataset_identity="dataset",
             state_database=tmp_path / "state.sqlite",
             artifact_root=tmp_path / "artifacts",
+        )
+
+
+def test_collection_prefers_f4_filters_f3_only_and_refuses_legacy_rows(tmp_path):
+    graph = enumerate_model_graph(baseline_model_spec(), max_depth=1, max_models=2)
+    campaign = _campaign(graph)
+    database = tmp_path / "state.sqlite"
+    artifacts = tmp_path / "artifacts"
+    store = ResultStore(database)
+    first, second = graph.nodes
+    _record_existing(store, first, campaign, artifacts, Fidelity.F3_EVIDENCE,
+                     diagnostics_pass=True, logz=-10.0)
+    _record_existing(store, first, campaign, artifacts, Fidelity.F4_PRODUCTION,
+                     diagnostics_pass=True, logz=-9.5)
+    _record_existing(store, second, campaign, artifacts, Fidelity.F3_EVIDENCE,
+                     diagnostics_pass=True, logz=-11.0)
+    _record_existing(store, second, campaign, artifacts, Fidelity.F4_PRODUCTION,
+                     diagnostics_pass=False, logz=-1.0)
+
+    best = collect_best_available_evidence(database)
+    assert best[first.model_hash].log_evidence == -9.5  # passed F4 preferred
+    assert best[second.model_hash].log_evidence == -11.0  # failed F4 falls back to F3
+    f3_only = collect_best_available_evidence(database, fidelities=("F3",))
+    assert f3_only[first.model_hash].log_evidence == -10.0
+    with pytest.raises(ValueError, match="subset"):
+        collect_best_available_evidence(database, fidelities=("F2",))
+
+    # A NUTS/JAXNS-era evaluation artifact behind a valid row is refused.
+    legacy_dir = artifacts / "F3" / first.model_hash
+    payload = json.loads((legacy_dir / "evaluation.json").read_text())
+    payload["format_version"] = "gwpop-search-fidelity-evaluation-1.0"
+    (legacy_dir / "evaluation.json").write_text(json.dumps(payload))
+    with pytest.raises(LegacyStateError, match="evaluation-1.0"):
+        collect_best_available_evidence(database, fidelities=("F3",))
+
+    # So is a state database with rows of a retired executor.
+    old_db = tmp_path / "old.sqlite"
+    old_store = ResultStore(old_db)
+    old_store.register_model(first)
+    old_store.record_evaluation(
+        "F3-old",
+        EvaluationRecord(first.model_hash, Fidelity.F3_EVIDENCE, True, -10.0, 0.1),
+        seed=1,
+        run_config={"executor": "evidence-completion-v1", "fidelity": "F3"},
+        artifact_path=str(tmp_path),
+    )
+    with pytest.raises(LegacyStateError, match="retired executor"):
+        collect_best_available_evidence(old_db)
+    with pytest.raises(LegacyStateError, match="retired executor"):
+        complete_graph_evidence(
+            graph, object(), object(), campaign, dataset_identity="dataset",
+            state_database=old_db, artifact_root=tmp_path / "x",
         )

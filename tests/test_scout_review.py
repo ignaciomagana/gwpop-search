@@ -194,6 +194,12 @@ def test_reviewed_descendant_is_independently_refit_and_compared(
     assert result["interpretation"] == "independent_full_hbi_refit"
     assert (tmp_path / "parent" / "evaluation.json").exists()
     assert (tmp_path / "child" / "evaluation.json").exists()
+    from gwpop_search.inference.fidelity import fidelity_config_sha256
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["format_version"] == "gwpop-search-scout-descendant-comparison-1.2"
+    assert manifest["sampler_backend"] == "dynesty"
+    assert manifest["fidelity_config_sha256"] == fidelity_config_sha256(_campaign().fidelity)
 
 
 def test_descendant_bayes_factor_is_blocked_by_numerical_failure(

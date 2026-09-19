@@ -60,10 +60,14 @@ def _config():
             n_events=4,
             posterior_samples_per_event=8,
             n_injections=200,
+            observation_model="noisy_observation",
         ),
         data_mode="synthetic_survey",
         max_gpu_hours_per_null=3.0,
     )
+
+
+replay_kwargs = {}
 
 
 def _fake_replay_factory(calls):
@@ -72,6 +76,8 @@ def _fake_replay_factory(calls):
         seed,
         **kwargs,
     ):
+        replay_kwargs.clear()
+        replay_kwargs.update(kwargs)
         calls.append((int(null_index), int(seed)))
         return SearchReplayResult(
             null_index=int(null_index),
@@ -142,6 +148,12 @@ def test_indexed_null_replay_is_deterministic_and_resumable(
     assert first == second
     assert first.seed == expected_seed
     assert calls == [(1, expected_seed)]
+    assert replay_kwargs["statistic"] == "f3_completion"
+    execution = replay_kwargs["execution_config"]
+    assert execution.stop_fidelity.value == "F3"
+    assert execution.max_total_compute_cost == 3.0
+    assert "F4" not in execution.max_models_by_fidelity
+    assert replay_kwargs["completion_campaign"].budget.max_gpu_hours == 3.0
     payload = json.loads((tmp_path / "null_00001.json").read_text())
     assert payload["null_index"] == 1
     assert payload["seed"] == expected_seed
@@ -242,6 +254,8 @@ def test_indexed_and_serial_null_campaigns_finalize_identically(
 
     assert indexed["calibration"] == serial["calibration"]
     assert indexed["format_version"] == serial["format_version"]
+    assert indexed["format_version"] == "gwpop-search-exact-null-summary-1.2"
+    assert indexed["statistic"]["mode"] == "f3_completion"
     assert indexed["calibration"]["n_null_replays"] == 2
     assert indexed_calls == serial_calls
 
@@ -253,6 +267,7 @@ def test_frozen_selection_finalize_requires_matching_dataset_identity(tmp_path):
     config = ExactNullCampaignConfig(
         n_nulls=1,
         data_mode="frozen_selection_resample",
+        max_gpu_hours_per_null=1.0,
     )
     with pytest.raises(ValueError, match="dataset identity"):
         finalize_exact_null_campaign(
