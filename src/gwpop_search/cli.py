@@ -969,6 +969,7 @@ def _canonicalize_gwcat_v2(args: argparse.Namespace) -> None:
         Path(args.selection_export),
         Path(args.output_dir),
         required_spin_basis=args.spin_basis,
+        required_selection_spin_basis=args.selection_spin_basis,
     )
     print(json.dumps(report, sort_keys=True, indent=2))
 
@@ -1572,6 +1573,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--spin-basis",
         choices=("chieff", "chieff_chip", "component"),
         required=True,
+    )
+    canonicalize.add_argument(
+        "--selection-spin-basis",
+        choices=("chieff", "chieff_chip", "component", "chieff_reference"),
+        default=None,
+        help=(
+            "explicit selection-export basis (default: same as --spin-basis); "
+            "chieff_reference is accepted only with --spin-basis chieff and a PE "
+            "export whose chi_eff prior ceilings all equal the reference ceiling"
+        ),
     )
     canonicalize.add_argument("--output-dir", required=True)
     canonicalize.set_defaults(func=_canonicalize_gwcat_v2)
