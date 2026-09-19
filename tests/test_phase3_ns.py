@@ -124,7 +124,13 @@ def test_default_plan_pins_the_v2_decisions_and_reuses_the_v1_catalog_seeds():
     assert survey["n_events"] == 48 and survey["posterior_samples_per_event"] == 1024
     assert survey["n_injections"] == 100_000
     assert plan["hbi_config"]["selection_chunk_size"] is None
-    assert plan["diagnostics"]["importance_draws"] == 512
+    # The importance diagnostics must evaluate every pooled posterior draw of a
+    # planned fit: otherwise the gated tail quantiles are Monte-Carlo estimates
+    # whose verdict depends on the seed the plan happens to pin, and the plan
+    # cannot be changed once a campaign root exists.
+    pooled_draws = plan["repeats"] * dynesty["num_posterior_samples"]
+    assert pooled_draws == 16000
+    assert plan["diagnostics"]["importance_draws"] == 16384 >= pooled_draws
 
     criteria = plan["criteria"]
     assert criteria["format_version"] == NSRecoveryAcceptanceCriteria.FORMAT_VERSION
@@ -249,7 +255,7 @@ def good_fit(n_repeats=4):
         "n_repeats": n_repeats,
         "totals": {
             "min_kish_ess": 3000.0,
-            "n_nan_or_posinf_evaluations": 0,
+            "n_nan_or_posinf_log_likelihoods": 0,
             "n_selection_unsupported": 0,
             "all_converged": True,
         },
@@ -300,6 +306,12 @@ def test_criteria_defaults_are_the_phase3_v2_values_and_round_trip():
         dict(tail_ess_quantile=0.9),
         dict(tail_weight_quantile=0.3),
         dict(tail_ess_quantile=0.2),
+        # The tail must lie strictly beyond the median: a tail at 0.5 would
+        # serialize and validate while enforcing nothing the draw-median checks
+        # do not already enforce.
+        dict(tail_ess_quantile=0.5),
+        dict(tail_weight_quantile=0.5),
+        dict(tail_ess_quantile=0.5, tail_weight_quantile=0.5),
         dict(min_repeats=1),
         dict(min_runs=0),
         dict(max_selection_unsupported_evaluations=-1),
@@ -376,7 +388,11 @@ def test_assessment_sampler_and_evidence_gates():
         "max_log_evidence_error": ("evidence", "max_reported_error", 0.21),
         "max_pairwise_repeat_z": ("evidence", "max_pairwise_z", 3.2),
         "n_selection_unsupported": ("totals", "n_selection_unsupported", 1),
-        "n_nan_or_posinf_evaluations": ("totals", "n_nan_or_posinf_evaluations", 2),
+        "n_nan_or_posinf_log_likelihoods": (
+            "totals",
+            "n_nan_or_posinf_log_likelihoods",
+            2,
+        ),
         "all_runs_terminated_by_dlogz": ("totals", "all_converged", False),
     }
     for name, (block, key, value) in cases.items():
@@ -444,6 +460,84 @@ def test_campaign_gate_needs_enough_catalogs_and_every_catalog_passing():
         aggregate_ns_recovery_summaries([{**summary_for(1, good_fit()), "format_version": "x"}])
 
 
+def test_campaign_gate_needs_every_planned_catalog_not_just_min_runs(tmp_path):
+    """A subset of the planned catalogs is a selection effect, not a campaign."""
+    plan = build_ns_campaign_plan(
+        n_runs=6,
+        root_seed=20260917,
+        repeats=4,
+        survey_config=default_phase3_survey_config(),
+        dynesty_config=default_phase3_dynesty_config(),
+        hbi_config=phase3_hbi_config(),
+        criteria=NSRecoveryAcceptanceCriteria(),
+    )
+    write_or_verify_plan(tmp_path / CAMPAIGN_PLAN_NAME, plan)
+    pairs = plan["seed_pairs"]
+    for index, pair in enumerate(pairs[:4]):
+        directory = tmp_path / f"run_{index:03d}"
+        directory.mkdir()
+        summary = summary_for(pair["data_seed"], good_fit())
+        summary["sampler_seed"] = pair["sampler_seed"]
+        (directory / "recovery_summary.json").write_text(json.dumps(summary))
+
+    partial = assess_ns_recovery_campaign(tmp_path)
+    assert partial["n_runs"] == 4 and partial["n_planned_runs"] == 6
+    assert partial["all_numerical_pass"] and partial["enough_runs"]
+    assert not partial["all_planned_catalogs_present"]
+    assert not partial["phase3_numerical_gate_passed"]
+    assert [item["data_seed"] for item in partial["missing_seed_pairs"]] == [
+        pair["data_seed"] for pair in pairs[4:]
+    ]
+
+    for index, pair in enumerate(pairs[4:], start=4):
+        directory = tmp_path / f"run_{index:03d}"
+        directory.mkdir()
+        summary = summary_for(pair["data_seed"], good_fit())
+        summary["sampler_seed"] = pair["sampler_seed"]
+        (directory / "recovery_summary.json").write_text(json.dumps(summary))
+    complete = assess_ns_recovery_campaign(tmp_path)
+    assert complete["missing_seed_pairs"] == [] and complete["n_planned_runs"] == 6
+    assert complete["phase3_numerical_gate_passed"]
+
+
+def test_checks_fail_closed_on_a_non_numeric_summary_field():
+    """A corrupted summary is reported as a failure, never raised out of."""
+    criteria = NSRecoveryAcceptanceCriteria()
+    for value in ("not-a-number", [1, 2], {"a": 1}):
+        fit = good_fit()
+        fit["totals"]["min_kish_ess"] = value
+        assessment = assess_ns_fit(fit, criteria)
+        assert failed(assessment) == ["min_kish_ess_per_run"]
+        record = next(
+            item for item in assessment["checks"] if item["name"] == "min_kish_ess_per_run"
+        )
+        assert record["value"] is None and record["raw_value"] == repr(value)
+    fit = good_fit()
+    fit["importance_diagnostics"]["over_posterior"]["min_event_ess"]["q0.1"] = "nan"
+    assert failed(assess_ns_fit(fit, criteria)) == ["tail.min_event_ess"]
+
+
+def test_nan_or_posinf_criterion_is_a_measurement_of_the_stored_log_likelihoods():
+    """``-inf`` is support; NaN and ``+inf`` are counted and gated."""
+    from gwpop_search.inference.phase3_ns import n_nan_or_posinf_log_likelihoods
+
+    class _Fake:
+        def __init__(self, values):
+            self.log_likelihoods = np.asarray(values, dtype=float)
+
+    assert n_nan_or_posinf_log_likelihoods(_Fake([-1.0, -np.inf, -3.0])) == 0
+    assert n_nan_or_posinf_log_likelihoods(_Fake([np.nan, -1.0])) == 1
+    assert n_nan_or_posinf_log_likelihoods(_Fake([np.inf, np.nan, -np.inf])) == 2
+
+    criteria = NSRecoveryAcceptanceCriteria()
+    fit = good_fit()
+    fit["totals"]["n_nan_or_posinf_log_likelihoods"] = 1
+    assert failed(assess_ns_fit(fit, criteria)) == ["n_nan_or_posinf_log_likelihoods"]
+    # The unmeasurable quantity is not gated behind a hard-coded literal.
+    names = {item["name"] for item in assess_ns_fit(good_fit(), criteria)["checks"]}
+    assert "n_nan_or_posinf_evaluations" not in names
+
+
 # ---------------------------------------------------------------------------
 # End to end on a tiny catalog: layout, summary, reuse, resume
 # ---------------------------------------------------------------------------
@@ -507,12 +601,29 @@ def test_tiny_campaign_writes_the_v2_summary(tiny_campaign):
 
     importance = fit["importance_diagnostics"]
     assert importance["n_draws"] == TINY_SETTINGS["importance_draws"]
+    assert importance["n_pooled_draws"] == 2 * 200
+    assert importance["all_pooled_draws_evaluated"] is False
     assert importance["hbi_config"]["selection_chunk_size"] is None
     for block in ("posterior_median", "truth"):
         assert importance[block]["min_event_ess"] > 0.0
         assert importance[block]["worst_event"].startswith("SYNTH_")
     for key, distribution in importance["over_posterior"].items():
         assert {"q0.1", "q0.5", "q0.9", "min", "max", "n_nonfinite"} <= set(distribution)
+        # This tiny fit deliberately subsamples, so the quantiles carry noise
+        # and the reported standard error says so.
+        errors = distribution["subsample_standard_error"]
+        assert set(errors) == {f"q{q:g}" for q in (0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95,
+                                                   0.99)}
+    assert any(
+        distribution["subsample_standard_error"]["q0.1"] > 0.0
+        for distribution in importance["over_posterior"].values()
+    )
+
+    guarantees = fit["guarantees"]["nan_or_posinf_evaluations"]
+    assert guarantees["count"] is None and guarantees["measured"] is False
+    assert "PopulationDensityError" in guarantees["enforced_by"]
+    assert fit["totals"]["n_nan_or_posinf_log_likelihoods"] == 0
+    assert all(run["n_nan_or_posinf_log_likelihoods"] == 0 for run in fit["runs"])
 
     ranks = summary["truth_rank_diagnostics"]
     assert ranks["observation_model"] == "noisy_observation"
@@ -527,6 +638,49 @@ def test_tiny_campaign_writes_the_v2_summary(tiny_campaign):
     assert {"max_cross_run_r_hat", "min_kish_ess_per_run", "tail.selection_ess"} <= checks
     # 100-iteration test runs never pass the Phase-3 gates.
     assert not campaign["phase3_numerical_gate_passed"]
+
+
+def test_gated_importance_quantiles_are_seed_free_once_every_pooled_draw_is_used(tiny_campaign):
+    """The tail gate must not depend on which draws the pinned seed happened to pick."""
+    from gwpop_search.inference.phase3_ns import _generate_catalog, pooled_importance_diagnostics
+
+    root, _ = tiny_campaign
+    dataset, model = _generate_catalog(V1_DATA_SEEDS[0], tiny_survey())
+    results = [
+        load_dynesty_result(root / "run_000" / f"repeats/repeat_{r:03d}" / "result.npz")
+        for r in (0, 1)
+    ]
+
+    def tail(seed, n_draws):
+        payload = pooled_importance_diagnostics(
+            results,
+            dataset.posterior,
+            dataset.selection,
+            model,
+            hbi_config=phase3_hbi_config(),
+            n_draws=n_draws,
+            seed=seed,
+        )
+        return payload, payload["over_posterior"]["min_event_ess"]["q0.1"]
+
+    small = [tail(seed, 48) for seed in (1, 2, 3, 4)]
+    assert all(payload["n_draws"] == 48 for payload, _ in small)
+    assert all(payload["all_pooled_draws_evaluated"] is False for payload, _ in small)
+    # Subsampling: the recorded tail moves with the seed, and the reported
+    # standard error is positive.
+    assert len({value for _, value in small}) > 1
+    assert all(
+        payload["over_posterior"]["min_event_ess"]["subsample_standard_error"]["q0.1"] > 0.0
+        for payload, _ in small
+    )
+
+    full = [tail(seed, 16384) for seed in (1, 2, 3, 4)]
+    assert all(payload["n_draws"] == payload["n_pooled_draws"] == 400 for payload, _ in full)
+    assert all(payload["all_pooled_draws_evaluated"] is True for payload, _ in full)
+    assert len({value for _, value in full}) == 1
+    for payload, _ in full:
+        for distribution in payload["over_posterior"].values():
+            assert set(distribution["subsample_standard_error"].values()) == {0.0}
 
 
 def test_rerunning_a_completed_campaign_reuses_every_run_untouched(tiny_campaign):
@@ -740,7 +894,8 @@ def test_cli_ns_commands_default_to_the_v2_plan(tmp_path):
     assert _ns_survey_config(args) == default_phase3_survey_config()
     config = _ns_dynesty_config(args, slices=slices_for_ndim(10))
     assert config.identity_dict() == default_phase3_dynesty_config().identity_dict()
-    assert args.importance_draws == 512 and args.slices is None
+    assert args.importance_draws == 16384 and args.slices is None
+    assert args.importance_draws >= args.repeats * args.num_posterior_samples
 
     evidence = parser.parse_args(["synthetic-evidence-check", "--root", str(tmp_path)])
     assert evidence.func.__name__ == "_run_synthetic_evidence_check"
@@ -832,3 +987,68 @@ def test_fingerprints_only_cover_completed_run_artifacts(tmp_path):
         "added": ["c"],
         "passed": False,
     }
+
+
+# ---------------------------------------------------------------------------
+# Launcher and cross-module contract
+# ---------------------------------------------------------------------------
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_h100_launcher_runs_the_pinned_checkout_not_the_installed_package():
+    """The environment unsets PYTHONPATH and installs the package from main."""
+    script = (REPO_ROOT / "scripts/slurm/phase3_ns_h100.sbatch.example").read_text()
+    assert 'export PYTHONPATH="${GWPOP_CODE}/src"' in script
+    assert script.index("source \"${GWPOP_ENV}\"") < script.index("export PYTHONPATH")
+    assert 'GWPOP="python -m gwpop_search.cli"' in script
+    # The console script belongs to the environment's editable install of the
+    # MAIN checkout; a bare invocation would silently run the wrong code (and,
+    # before this branch is merged, would not know the subcommands at all).
+    for command in ("synthetic-campaign-ns", "fingerprint-ns-run", "synthetic-evidence-check"):
+        assert f"gwpop-search {command}" not in script
+        assert f"${{GWPOP}} {command}" in script
+    # The pre-flight block refuses a mismatched package before burning GPU time.
+    assert "gwpop_search.__file__" in script or "import gwpop_search" in script
+    assert "is_relative_to" in script
+
+
+def test_private_helpers_this_module_imports_still_behave_as_assumed(tmp_path):
+    """Track A's plan/manifest identity rests on private helpers of other tracks."""
+    from gwpop_search.inference import campaign as campaign_module
+    from gwpop_search.inference import numpyro as numpyro_module
+    from gwpop_search.inference import phase3_evidence, phase3_ns
+
+    for module, names in (
+        (
+            dynesty_backend,
+            (
+                "_atomic_write_text",
+                "_json_ready",
+                "_json_sha256",
+                "_manifest_differences",
+                "_without_chunk_size",
+            ),
+        ),
+        (campaign_module, ("_derived_seed", "file_sha256")),
+        (numpyro_module, ("_hbi_config_dict",)),
+    ):
+        for name in names:
+            assert callable(getattr(module, name)), f"{module.__name__}.{name}"
+
+    assert dynesty_backend._json_ready({"a": np.float64(1.5)}) == {"a": 1.5}
+    digest = dynesty_backend._json_sha256({"a": 1})
+    assert len(digest) == 64 and digest == dynesty_backend._json_sha256({"a": 1})
+    assert dynesty_backend._manifest_differences({"a": 1}, {"a": 1}) == []
+    assert dynesty_backend._manifest_differences({"a": 1}, {"a": 2}) == ["a"]
+    chunked = {"hbi_config": {"selection_chunk_size": 4096, "log_selection_floor": None}}
+    assert "selection_chunk_size" not in dynesty_backend._without_chunk_size(chunked)["hbi_config"]
+    path = tmp_path / "x.json"
+    dynesty_backend._atomic_write_text(path, "{}")
+    assert path.read_text() == "{}"
+    assert len(campaign_module.file_sha256(path)) == 64
+    assert campaign_module._derived_seed(7, "tag", 0) == campaign_module._derived_seed(7, "tag", 0)
+    assert numpyro_module._hbi_config_dict(phase3_hbi_config())["selection_chunk_size"] is None
+    # The evidence check reuses the recovery module's private helpers too.
+    assert phase3_evidence._finite_or_none is phase3_ns._finite_or_none

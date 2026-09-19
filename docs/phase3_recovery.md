@@ -29,7 +29,7 @@ population model, the hyperpriors and the grammar are unchanged; every fit is
 | model / priors / truth | `GwcatChiEffBBHModel`, `BASELINE_SYNTHETIC_PRIORS`, `DEFAULT_BASELINE_HYPERPARAMETERS` |
 | dynesty | static `NestedSampler`, `bound="multi"`, `sample="rslice"`, `slices = 2*(3+ndim) = 26`, `nlive=1000`, `dlogz=0.1`, `batch_size=64` (queue size and device batch), other fields dynesty defaults, no budget |
 | HBI | `HBIConfig(selection_chunk_size=None)` (one selection chunk) |
-| diagnostics | 512 pooled importance draws, R-hat chains of `min(2000, floor(min Kish))` draws |
+| diagnostics | 16384 pooled importance draws (>= the 4 x 4000 = 16000 pooled draws of a planned fit, so every draw is evaluated and the gated quantiles carry no subsample noise), R-hat chains of `min(2000, floor(min Kish))` draws |
 | criteria | `NSRecoveryAcceptanceCriteria` (below) |
 
 The plan pins every `DynestyConfig` field except `checkpoint_every` (I/O
@@ -66,14 +66,22 @@ All options default to the plan above (`--nlive`, `--sample`, `--bound`,
 - Per run: `logz`, `logzerr`, information, `niter`, `ncall`, efficiency, Kish
   ESS, elapsed time, likelihood evaluations, selection-unsupported
   evaluations, dlogz termination, `sqrt(H/nlive)`.
-- Evidence repeats: mean, std (ddof 1), maximum reported error, conservative
-  error `max(std, max logzerr)`, all pairwise `|dlnZ|/sqrt(err_a^2+err_b^2)`.
+- Evidence repeats: mean, std (ddof 1), mean and maximum reported error,
+  conservative error `max(std, max logzerr)`, all pairwise
+  `|dlnZ|/sqrt(err_a^2+err_b^2)`, and `sqrt(H/nlive)` per run.
+  `ns_evidence_sigma` turns them into `sigma_NS = max(repeat std, mean logzerr,
+  kappa_hat sqrt(H/nlive))` and `sigma_NS/sqrt(R)` of
+  MODEL_COMPARISON_MATH.md 9.1(6) (`kappa_hat = 1` until it is calibrated).
 - Cross-run rank-normalized split R-hat per parameter (runs as chains;
   identical to `arviz.rhat(method="rank")`).
 - Importance diagnostics with the backend's jitted diagnostics under the runs'
   own HBI configuration (checked against every run's likelihood identity) at
-  the pooled posterior-median point, as quantiles over 512 seeded pooled draws
-  (`inverted_cdf`), and at the truth (reported only).
+  the pooled posterior-median point, as quantiles over the pooled draws
+  (`inverted_cdf`; `importance_draws` of them, every one at the default), and
+  at the truth (reported only). Each quantile carries a
+  `subsample_standard_error`: the finite-population-corrected bootstrap
+  standard deviation of the subsample estimator, exactly 0 when every pooled
+  draw was evaluated. It is reported, never gated.
 
 ### Acceptance criteria v2 (`NSRecoveryAcceptanceCriteria`, format `gwpop-search-ns-acceptance-criteria-2.0`)
 
@@ -87,7 +95,7 @@ Per catalog, every check must pass:
 | evidence repeat std | <= 0.2 |
 | max reported logzerr | <= 0.2 |
 | max pairwise repeat z | <= 3.0 |
-| NaN/+inf evaluations | 0 (structural: the backend raises) |
+| NaN/+inf stored log-likelihoods | 0 (measured on `result.npz`; NaN/+inf *evaluations* cannot be counted -- the backend raises on the first one -- and that guarantee is recorded unmeasured under `fit.guarantees`) |
 | selection-unsupported evaluations | 0 |
 | every run terminated by `dlogz` | yes |
 | min event ESS | >= 20 at the point, the draw median and the draw q10 |
@@ -97,7 +105,9 @@ Per catalog, every check must pass:
 | Var(log L) | <= 1.0 at the point, the draw median and the draw q90 |
 
 Campaign (`gwpop-search-phase3-campaign-2.0`): `phase3_numerical_gate_passed`
-iff at least `min_runs = 4` catalogs exist and every catalog passes. Ensemble
+iff at least `min_runs = 4` catalogs exist, every catalog of the plan is
+present (`missing_seed_pairs` empty: assessing only the catalogs that finished
+is a selection effect) and every catalog passes. Ensemble
 central-90% coverage fractions and median standardized offsets are reported,
 not thresholded. `NSRecoveryAcceptanceCriteria.f3_level()` holds the F3 gates
 of the dynesty ladder (R-hat 1.05, Kish 500, evidence 0.5/0.5, z 3.5,
@@ -110,12 +120,19 @@ the real survey-v2 catalog 0 with every plan setting except `nlive = 250` and
 `R = 2` (8 CPU threads, ~440 likelihood evaluations/s). Per run: H = 11.5-11.8
 nats, logzerr 0.24-0.26, Kish ESS ~1930, ~0.5M evaluations (~20 min), dlogz
 termination, no selection-unsupported evaluations; repeat std 0.14, max
-cross-run R-hat 1.002. Importance over 512 pooled draws (q0.1 / q0.5 / q0.9):
-min event ESS 26.7 / 81.7 / 185, selection ESS 9.5k / 14.4k / 21.1k, max event
-weight 0.029 / 0.060 / 0.137, Var(log L) 0.13 / 0.21 / 0.33. The only failed
-check was logzerr > 0.2, expected at nlive 250 (about 0.12 at nlive 1000); the
-tail of the minimum event ESS is the closest importance margin. At nlive 1000 a
-run needs about 2M evaluations.
+cross-run R-hat 1.002. Importance over all 8000 pooled draws (q0.1 / q0.5 /
+q0.9): min event ESS 30.0 / 88.2 / 185, selection ESS 9.5k / 14.4k / 21.1k, max
+event weight 0.029 / 0.060 / 0.137, Var(log L) 0.13 / 0.21 / 0.33. The only
+failed check was logzerr > 0.2, expected at nlive 250 (about 0.12 at nlive
+1000); the tail of the minimum event ESS is the closest importance margin. At
+nlive 1000 a run needs about 2M evaluations.
+
+The rehearsal was produced with the earlier default of 512 importance draws,
+which subsamples: on this catalog the recorded q0.1 of the minimum event ESS
+was 26.7 at the plan's seed, 24.5 and 27.8 at two others, with a subsample
+standard deviation of 2.6 around the full-pool value 30.0 -- against a hard
+gate at 20. Evaluating all 8000 draws instead costs 10.5 s (1.6 s at 512) and
+removes the noise exactly, which is why the plan now pins 16384.
 
 ### Layout
 
@@ -159,9 +176,16 @@ U(-0.6, 0.6)) and `pairing.beta.linear_m1` (`beta_q_m1_slope` ~ U(-0.3, 0.3)).
   evidence (`R = 2`, the campaign's dynesty settings, `slices = 2*(3+ndim)`:
   26 for the root, 28 for each child) of the declarative root
   `compile_model_spec(baseline_model_spec())` and of both children.
-  `ln BF(child/root) = mean lnZ_child - mean lnZ_root`,
-  `sigma = sqrt(cons_child^2 + cons_root^2)` with `cons = max(repeat std, max
-  logzerr)`, and the Savage-Dickey cross-check `ln pi(0) - ln p(0|D)` (NS-weighted
+  `ln BF(child/root) = mean lnZ_child - mean lnZ_root` with
+  `sigma^2 = sigma_NS,child^2/R_child + sigma_NS,root^2/R_root` and
+  `sigma_NS,M = max(repeat std, mean logzerr, kappa_hat sqrt(H_M/nlive))`
+  (MODEL_COMPARISON_MATH.md 9.1(6); the `sigma_MC` term is not computed here
+  and is common to both routes, so the reported sigma is
+  nested-sampling-only). The single-run formula of the original task text
+  (`sqrt(cons_child^2 + cons_root^2)`, `cons = max(repeat std, max logzerr)`)
+  is recorded beside it as `ln_bf_sigma_task_text` and is larger by about
+  `sqrt(R)`; no check uses it. Then the Savage-Dickey cross-check
+  `ln pi(0) - ln p(0|D)` (NS-weighted
   Gaussian KDE of the pooled child posterior of the slope; 0 is interior, the
   Verdinelli-Wasserman factor is 1).
 - (b) Injected: one catalog per atom drawn from the child model with the slope
@@ -177,8 +201,11 @@ U(-0.6, 0.6)) and `pairing.beta.linear_m1` (`beta_q_m1_slope` ~ U(-0.3, 0.3)).
 Pre-declared engineering pass rule (`EvidenceCheckPassRule`, recorded in the
 plan and the summary): (1) every fit passes the F3-level gates; (2)
 `ln BF(child/root) < 3` in all 8 null cases; (3) `ln BF(child/root) > 0` in both
-injected cases; (4) `|ln BF - ln BF_SDDR| <= max(0.3, 2 sigma)` in every null
-case.
+injected cases; (4) `|ln BF - ln BF_SDDR| <= max(0.3, 2 sqrt(sigma^2 +
+sigma_SDDR^2))` in every null case (9.1(8); `sigma_SDDR` is the bootstrap
+standard deviation of the Savage-Dickey estimate). The expected case counts of
+(2) and (3) follow the plan (`n_catalogs x len(atoms)` and `len(atoms)`), so a
+check run with fewer catalogs is not failed on the count alone.
 
 Injection strengths. With 48 events the atoms are only moderately detectable:
 the conditional profile likelihood of the slope (other hyperparameters at the
