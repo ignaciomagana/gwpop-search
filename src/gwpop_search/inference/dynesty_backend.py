@@ -1462,8 +1462,11 @@ class DynestyResult:
     ``n_likelihood_evaluations``: it also counts slice steps outside the unit
     cube, which are rejected without an evaluation, and it does not count the
     evaluations of proposals still queued when the run stopped
-    (``diagnostics["n_queued_evaluations"]``). For ``sample="unif"``,
-    ``ncall + n_queued_evaluations == n_likelihood_evaluations`` exactly.
+    (``diagnostics["n_queued_evaluations"]``; ``rwalk`` also re-evaluates,
+    uncounted, the start of a walk that accepted no step). For
+    ``sample="unif"``, ``ncall + n_queued_evaluations ==
+    n_likelihood_evaluations`` exactly; for the slice samplers
+    ``ncall + n_queued_evaluations >= n_likelihood_evaluations``.
     ``efficiency`` is dynesty's ``eff`` in percent (``niter / ncall``).
 
     ``provenance`` records ``code`` (package version, git commit,
