@@ -922,10 +922,13 @@ validation report.
 The current fully integrated scientific/software checkpoint is:
 
 ```text
-commit: 6b05f764075900188e0edfa0016675a8a1a1b37f
-tests:  283 passed
+commit: 19d9eed1d2d74675aa6095bf2f0ac99039178d88
+tests:  301 passed
 CI:     GitHub Actions / Python 3.12 / JAX x64
 ```
+
+(`19d9eed` = previous checkpoint `6b05f76` + the operator-approved
+`chieff_reference` selection pairing in the data layer.)
 
 This checkpoint includes the frozen-selection exact-null path, v1.3 per-null
 compute ceiling, exact-null plan v1.1 budget accounting, array-safe

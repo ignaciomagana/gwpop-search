@@ -36,10 +36,16 @@ Package version remains `0.2.0` until the Phase-3 acceptance gate is closed.
 Authoritative fully green integrated checkpoint:
 
 ~~~text
-commit: 6b05f764075900188e0edfa0016675a8a1a1b37f
-tests:  283 passed
-CI:     GitHub Actions / Python 3.12 / JAX x64
+commit: 19d9eed1d2d74675aa6095bf2f0ac99039178d88
+tests:  301 passed
+CI:     GitHub Actions / Python 3.12 / JAX x64 (run 35422984242, PR #1)
 ~~~
+
+`19d9eed` adds the operator-approved gwcat `chieff_reference` selection
+pairing (data layer only) on top of the previous checkpoint
+`6b05f764075900188e0edfa0016675a8a1a1b37f` (283 tests). The Phase-3 synthetic
+recovery code path, HBI likelihood, priors, thresholds and model grammar are
+unchanged by it.
 
 Commits after that checkpoint are handover/documentation synchronization unless
 this file is updated again.
