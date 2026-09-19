@@ -18,17 +18,23 @@ Execute in this order:
 
 1. exact repository/environment verification;
 2. Phase-3 multi-seed H100 recovery and manual review;
-3. Phase-7 structured-scout H100 engineering validation;
-4. canonicalize and review the real gwcat-v2 data;
-5. freeze the GWTC-5 dataset/model/numerical/search configuration;
-6. adaptive production search;
-7. mandatory full-graph evidence completion;
-8. real-data HSGP scouts and explicit proposal review;
-9. held-out/event-drop/nearby-baseline robustness;
-10. exact full-search null calibration using the frozen production selection;
-11. final validation package and human decision.
+3. canonicalize and review the real gwcat-v2 data;
+4. freeze the GWTC-5 atomic model graph, numerical ladder, model prior, seeds,
+   and budgets;
+5. run the atomic production search;
+6. run mandatory full-graph evidence completion;
+7. run held-out/event-drop/nearby-baseline robustness on the atomic results;
+8. run exact full-search null calibration of the atomic search using the frozen
+   production selection;
+9. only if the atomic results leave a specific unresolved residual structure,
+   optionally run the HSGP scout for that targeted direction and validate that
+   scout before interpreting any descendant;
+10. assemble the final validation package and human decision.
 
-**Do not proceed to step 4 if Phase 3 is rejected.**
+**Do not proceed to real GWTC-5 production if Phase 3 is rejected.**
+
+The core science is the finite, interpretable atomic model graph. HSGP is not a
+prerequisite for the main analysis and must not delay the atomic search.
 
 Always read first:
 
@@ -60,11 +66,12 @@ Always read first:
 - Adaptive search is followed by explicit evidence completion.
 - Search-level null calibration replays the same adaptive search **plus evidence
   completion**.
-- HSGP scouts propose registered interpretable descendants only.
-- Scouts never auto-modify the frozen graph.
-- Every real-data scout proposal is explicitly accepted/rejected.
-- Every accepted real-data scout child is independently F3-refit against its
-  parent.
+- The atomic grammar/model graph is the primary scientific search space.
+- HSGP is an optional residual scout used only after the atomic search if a
+  targeted unresolved structure is scientifically motivated.
+- If HSGP is invoked, scouts propose registered interpretable descendants only,
+  never auto-modify the frozen graph, every proposal is explicitly reviewed,
+  and every accepted child is independently F3-refit against its parent.
 - Failed numerical evaluations remain failed; do not weaken thresholds after
   seeing a result.
 - Failed/abandoned artifacts stay in the audit trail.
@@ -210,95 +217,34 @@ test.
 
 If rejected, stop. Diagnose/fix/re-run; do not proceed to real GWTC-5 work.
 
-## 4. Phase-7 structured HSGP validation on H100
+## 4. Core science — atomic model search, not HSGP
 
-This stage validates the scout as an engineering discovery mechanism before it
-is allowed to suggest real-data descendants.
+The main analysis is the finite declarative population grammar. Each model is
+built from interpretable atoms and each graph edge changes one controlled
+structural ingredient.
 
-The gate is frozen in code before execution:
+Examples include:
 
-- at least 8 independent catalogs per matrix member;
-- every run numerically valid;
-- reachable strong injection proposed in at least 75% of runs;
-- off-target proposals in at most 25% of runs;
-- null controls produce any proposal in at most 25% of runs.
+- primary-mass family changes;
+- pairing-family changes;
+- q-mass dependence such as `pairing.beta.linear_m1`;
+- `chi_eff` mean/width dependence on m1, q, or z;
+- redshift-evolution family changes.
 
-These are engineering thresholds, **not** GWTC-5 significance thresholds.
+Claude must treat this finite graph as the central scientific object. The
+required questions are:
 
-### 4.1 Frozen 88-run matrix
+1. which atoms/atomic combinations receive support from GWTC-5 under the common
+   HBI likelihood?
+2. which edge Bayes factors/posterior odds survive complete evidence coverage?
+3. which structural conclusions survive held-out/event-drop/nearby-baseline
+   checks?
+4. how unusual is the strongest result when the **entire same atom search** is
+   replayed under the declared null?
 
-Use:
-
-```text
-scripts/h100/structured_scout_validation_matrix.sh.example
-scripts/slurm/scout_validation_h100.sbatch.example
-```
-
-The fixed matrix is:
-
-| scout | injection | strength | runs | root seed |
-| --- | --- | ---: | ---: | ---: |
-| q given m1 | null | 0 | 8 | 20261001 |
-| q given m1 | pairing.beta.linear_m1 | +0.225 | 8 | 20261002 |
-| chi_eff given m1 | null | 0 | 8 | 20261011 |
-| chi_eff given m1 | chieff.mean.linear_m1 | +0.015 | 8 | 20261012 |
-| chi_eff given m1 | chieff.width.linear_m1 | +0.0375 | 8 | 20261013 |
-| chi_eff given q | null | 0 | 8 | 20261021 |
-| chi_eff given q | chieff.mean.linear_q | +0.45 | 8 | 20261022 |
-| chi_eff given q | chieff.width.linear_q | +1.5 | 8 | 20261023 |
-| chi_eff given z | null | 0 | 8 | 20261031 |
-| chi_eff given z | chieff.mean.linear_z | +0.30 | 8 | 20261032 |
-| chi_eff given z | chieff.width.linear_z | +0.75 | 8 | 20261033 |
-
-Every strength lies inside the registered child hyperprior. Do not alter these
-numbers after seeing results.
-
-Example submission:
-
-```bash
-export GWPOP_ENV=/path/to/environment/activate
-export GWPOP_SCOUT_VALIDATION_ROOT=/persistent/gwpop/scout-validation
-sbatch scripts/slurm/scout_validation_h100.sbatch.example
-```
-
-Review every `campaign_summary.json`. Every production-enabled scout surface
-must pass its null and injected cases.
-
-### 4.2 Independent injected-descendant F3 confirmation
-
-Write one explicit F3 configuration for this engineering confirmation:
-
-```bash
-gwpop-search write-default-fidelity-config \
-  --output "$GWPOP_SCOUT_VALIDATION_ROOT/fidelity.json"
-```
-
-After the `chieff_q_mean` campaign passes, independently confirm one of its
-successful injected proposals:
-
-```bash
-gwpop-search confirm-structured-scout-descendant \
-  --campaign-root "$GWPOP_SCOUT_VALIDATION_ROOT/chieff_q_mean" \
-  --fidelity-config "$GWPOP_SCOUT_VALIDATION_ROOT/fidelity.json" \
-  --output-root "$GWPOP_SCOUT_VALIDATION_ROOT/chieff_q_mean_confirmation"
-```
-
-The command deterministically chooses the lowest-index numerically valid run
-that proposed the injected mutation unless `--run-index` is explicitly
-supplied. It writes the engineering review, exact parent/child specs, independent
-F3 evaluations, and `confirmation_summary.json`.
-
-The command refuses to run unless the full structured-scout campaign passed its
-frozen engineering gate. Require both parent and child F3 evaluations to pass
-numerical diagnostics and require
-`log BF(child/parent) > 0` for
-`engineering_confirmation_passed=true`.
-
-Record the child/parent log Bayes factor. This validates the injected discovery
-and review/refit mechanism; it is not an astrophysical claim.
-
-If the scout matrix or confirmation fails, do not use the affected scout surface
-for production interpretation.
+Do not run the 88-run HSGP validation matrix at this stage. The HSGP machinery
+remains available later as an optional residual scout if the atomic results
+leave a specific scientifically motivated gap.
 
 ## 5. Canonicalize the reviewed real data
 
@@ -480,9 +426,19 @@ Do not report full model probabilities unless
 
 A failed F3/F4 numerical gate is not discarded to make the graph complete.
 
-## 8. Real-data HSGP scouts
+## 8. OPTIONAL extension — targeted real-data HSGP residual scout
 
-Only scout surfaces that passed Section 4 may be used.
+**Skip this entire section on the mandatory core path.**
+
+Only return here after the atomic production search, evidence completion,
+robustness checks, and search-level null calibration if the atomic results leave
+a specific unresolved residual structure that is worth probing.
+
+Do not launch all four scout surfaces automatically. Choose only the targeted
+direction motivated by the atomic result. Before interpreting that scout, run
+the corresponding structured injection/null validation for that direction
+using the existing Phase-7 machinery. The full 88-run matrix is available as a
+comprehensive validation option but is not required for the atomic paper.
 
 ### 8.1 Freeze the scout baseline from a valid full-data fit
 
@@ -511,9 +467,11 @@ gwpop-search export-scout-baseline \
 
 Keep the `.provenance.json` sidecar.
 
-### 8.2 Run the four production scouts
+### 8.2 Configure only the targeted scout direction
 
-Write the same four surface configs used in validation:
+The repository can configure all supported surfaces, but production should run
+only the direction motivated by the atomic residual. Example configuration
+commands are:
 
 ```bash
 mkdir -p "$GWPOP_FREEZE_DIR/scouts"
@@ -555,7 +513,8 @@ gwpop-search run-hsgp-scout \
   --seed 20261203
 ```
 
-Run the analogous three other surfaces.
+Do not automatically run the analogous surfaces. Run additional directions
+only if separately motivated.
 
 ### 8.3 Explicit real-data review boundary
 
@@ -724,13 +683,29 @@ synthetic detector survey.
 
 ### 12.1 Null population truth
 
-Use the same valid root-model F3/F4 posterior median exported in Section 8:
+Use a valid full-data root-model F3/F4 posterior median as the null population
+truth. This is required for null calibration regardless of whether HSGP is ever
+used.
 
-```text
-$GWPOP_FREEZE_DIR/root_hyperparameters.json
+Materialize the root model and export the median if not already done:
+
+```bash
+export GWPOP_ROOT_HASH=<ROOT_HASH>
+
+gwpop-search extract-model \
+  --graph "$GWPOP_GRAPH" \
+  --model-hash "$GWPOP_ROOT_HASH" \
+  --output "$GWPOP_FREEZE_DIR/root_model.json"
+
+gwpop-search export-scout-baseline \
+  --evaluation <VALID_ROOT_F3_OR_F4_EVALUATION_JSON> \
+  --model "$GWPOP_FREEZE_DIR/root_model.json" \
+  --output "$GWPOP_FREEZE_DIR/root_hyperparameters.json"
 ```
 
-This choice is frozen before null results are seen.
+The command name reflects the original scout use, but the exported posterior
+median is also the frozen baseline/null-population point. Freeze this choice
+before null results are seen.
 
 ### 12.2 Preflight real selection support
 
@@ -865,8 +840,8 @@ The package must contain or reference:
 - Phase-3 plans, chain checkpoints, posterior/recovery summaries, and
   before/after fingerprint files;
 - explicit human Phase-3 ACCEPT/REJECT decision;
-- all 88 structured-scout plans/summaries;
-- injected-descendant F3 confirmation artifacts;
+- structured-scout plans/summaries and injected-descendant confirmation
+  artifacts **only if the optional HSGP extension was invoked**;
 - gwcat source hashes and canonicalization report;
 - dataset manifest;
 - event-selection/waveform policy JSON;
@@ -878,7 +853,7 @@ The package must contain or reference:
 - evidence coverage/completion summaries;
 - full scored graph if evidence-complete;
 - production scout configs/posteriors/summaries/review records/children/F3
-  comparisons;
+  comparisons **only if the optional HSGP extension was invoked**;
 - holdout manifest/fold/model summaries;
 - LOO and explicit event-drop configs/summaries;
 - nearby-baseline plans/summaries;
