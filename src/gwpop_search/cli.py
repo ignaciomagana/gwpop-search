@@ -239,7 +239,7 @@ def _enumerate_models(args: argparse.Namespace) -> None:
     )
 
     graph = enumerate_model_graph(
-        baseline_model_spec(),
+        baseline_model_spec(args.hyperprior_profile),
         max_depth=args.max_depth,
         max_models=args.max_models,
     )
@@ -1299,6 +1299,14 @@ def build_parser() -> argparse.ArgumentParser:
     enumerate_parser.add_argument("--output", required=True)
     enumerate_parser.add_argument("--max-depth", type=int, default=2)
     enumerate_parser.add_argument("--max-models", type=int, default=40)
+    enumerate_parser.add_argument(
+        "--hyperprior-profile",
+        default="phase3",
+        help=(
+            "registered root hyperprior profile (grammar.HYPERPRIOR_PROFILES); "
+            "'phase3' reproduces the original graph, 'gwtc5-v1' is GWTC-5 production"
+        ),
+    )
     enumerate_parser.set_defaults(func=_enumerate_models)
 
     validate_parser = subparsers.add_parser(

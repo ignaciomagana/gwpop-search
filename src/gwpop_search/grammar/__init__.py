@@ -1,6 +1,11 @@
 """Declarative model grammar and deterministic enumeration."""
 
-from .baseline import baseline_model_spec
+from .baseline import (
+    DEFAULT_HYPERPRIOR_PROFILE,
+    HYPERPRIOR_PROFILES,
+    baseline_hyperprior_profile,
+    baseline_model_spec,
+)
 from .enumerate import ModelEdge, ModelGraph, enumerate_model_graph
 from .io import load_model_graph, load_model_spec, save_model_graph, save_model_spec
 from .mutations import (
@@ -23,6 +28,8 @@ from .schema import (
 
 __all__ = [
     "BlockSpec",
+    "DEFAULT_HYPERPRIOR_PROFILE",
+    "HYPERPRIOR_PROFILES",
     "ComponentRegistry",
     "DEFAULT_COMPONENT_REGISTRY",
     "DEFAULT_MUTATIONS",
@@ -36,6 +43,7 @@ __all__ = [
     "MutationSpec",
     "PriorConfig",
     "apply_mutation",
+    "baseline_hyperprior_profile",
     "baseline_model_spec",
     "enumerate_model_graph",
     "save_model_graph",
