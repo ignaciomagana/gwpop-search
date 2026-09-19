@@ -161,68 +161,46 @@ Scored-graph outputs:
 
 Do not describe F1/F2 allocation scores as Bayes factors.
 
-## 6. Phase-7 HSGP validation matrix
+## 6. Atomic-search scientific result
 
-The engineering gate is frozen before H100 execution:
-- minimum 8 independent runs;
-- every run numerically valid;
-- reachable strong injection proposed in at least 75% of runs;
-- off-target proposals in at most 25% of runs;
-- null controls produce any proposal in at most 25% of runs.
+Summarize the core finite-grammar result before any optional flexible scout:
 
-For each matrix member record `campaign_summary.json`:
+- root model hash:
+- graph node count:
+- complete evidence coverage: yes / no
+- dominant model(s):
+- highest posterior-mass structural atoms:
+- strongest edge log Bayes factors:
+- strongest posterior odds:
+- structural-axis posterior masses:
+- central scientific claim(s):
+- numerical caveats:
 
-| scout surface | injected mutation | strength | n runs | numerical pass | expected-proposal fraction | off-target-run fraction | any-proposal fraction | engineering gate |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| q(m1) | null | 0 | 8 | | n/a | | | |
-| q(m1) | pairing.beta.linear_m1 | +0.225 | 8 | | | | | |
-| chi_eff(m1) | null | 0 | 8 | | n/a | | | |
-| chi_eff(m1) | chieff.mean.linear_m1 | +0.015 | 8 | | | | | |
-| chi_eff(m1) | chieff.width.linear_m1 | +0.0375 | 8 | | | | | |
-| chi_eff(q) | null | 0 | 8 | | n/a | | | |
-| chi_eff(q) | chieff.mean.linear_q | +0.45 | 8 | | | | | |
-| chi_eff(q) | chieff.width.linear_q | +1.5 | 8 | | | | | |
-| chi_eff(z) | null | 0 | 8 | | n/a | | | |
-| chi_eff(z) | chieff.mean.linear_z | +0.30 | 8 | | | | | |
-| chi_eff(z) | chieff.width.linear_z | +0.75 | 8 | | | | | |
+This is the main result of the project.
 
-**Phase-7 software-validation decision:** ACCEPT / REJECT
+## 7. OPTIONAL HSGP residual extension
 
-At least one accepted injected proposal must then be materialized through the
-review API and independently F3 evidence-compared to its parent. Record:
-- proposal ID:
-- review record:
-- parent hash:
-- child hash:
-- independent comparison path:
-- campaign engineering gate passed before confirmation: yes / no
-- both numerically valid: yes / no
+Skip this section unless the completed atomic analysis leaves a specific,
+scientifically motivated residual question.
+
+If invoked:
+
+- targeted conditional surface:
+- reason the atomic search motivates this surface:
+- structured injection/null validation root:
+- engineering gate passed: yes / no
+- real-data scout config/run:
+- numerical diagnostics passed: yes / no
+- validated proposal(s):
+- explicit review record(s):
+- accepted child model(s):
+- independent F3 comparison(s):
 - log BF child/parent:
-- log BF child/parent > 0: yes / no
-- `engineering_confirmation_passed`: yes / no
+- interpretation:
 
-This injected-descendant comparison validates the injected discovery and
-review/refit mechanism; it is not a GWTC-5 discovery claim.
-
-## 7. Production HSGP scouts
-
-Base model hash:
-
-Source F3/F4 evaluation:
-
-`export-scout-baseline` provenance sidecar:
-
-Run only scout surfaces that passed Section 6. For each:
-- scout config:
-- run directory:
-- seed:
-- numerical diagnostics:
-- raw proposals:
-- validated proposals:
-
-For every proposal, create an explicit ACCEPTED or REJECTED review record.
-Accepted children must be independently F3-refit against the parent before any
-scientific interpretation.
+Do not run or report a blanket 88-run HSGP program as a prerequisite for the
+atomic result. The comprehensive matrix remains available if a full scout
+validation study is later desired.
 
 ## 8. Held-out predictive validation
 
@@ -320,8 +298,8 @@ do not extrapolate it to a smaller p-value.
 | production freeze | | |
 | production numerical diagnostics | | |
 | complete graph evidence | | |
-| Phase-7 scout validation | | |
-| production scout review/refit | | |
+| atomic model-graph result | | |
+| optional HSGP extension (if invoked) | N/A / | |
 | held-out prediction | | |
 | event-drop robustness | | |
 | nearby-baseline robustness | | |
@@ -342,9 +320,8 @@ Record paths and SHA-256 hashes where applicable:
 - search execution summary;
 - evidence coverage/completion summaries;
 - scored graph;
-- scout configs, posteriors, summaries, review records, child specs, independent
-  comparisons;
-- structured-scout campaign plans/summaries;
+- scout configs/posteriors/reviews/independent comparisons and structured-scout
+  campaign artifacts only if the optional HSGP extension was invoked;
 - holdout manifest/fold/model summaries;
 - event-drop and nearby-baseline configs/summaries;
 - exact-null plan, per-null replay records, and exact-null summary;
