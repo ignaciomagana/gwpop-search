@@ -130,3 +130,47 @@ __all__ = [
     "serialize_prior_map",
     "summarize_evidence_repeats",
 ]
+
+
+# -- Phase-3 v2 (dynesty recovery campaign) and Phase-3c evidence check ---------
+# Lazy wrappers: importing gwpop_search.inference does not import the campaign
+# modules (they pull in the synthetic survey and the population models).
+
+
+def run_ns_recovery_campaign(*args, **kwargs):
+    from .phase3_ns import run_ns_recovery_campaign as _run
+
+    return _run(*args, **kwargs)
+
+
+def run_ns_synthetic_recovery(*args, **kwargs):
+    from .phase3_ns import run_ns_synthetic_recovery as _run
+
+    return _run(*args, **kwargs)
+
+
+def assess_ns_recovery_campaign(*args, **kwargs):
+    from .phase3_ns import assess_ns_recovery_campaign as _assess
+
+    return _assess(*args, **kwargs)
+
+
+def ns_run_fingerprints(*args, **kwargs):
+    from .phase3_ns import ns_run_fingerprints as _fingerprints
+
+    return _fingerprints(*args, **kwargs)
+
+
+def run_evidence_check(*args, **kwargs):
+    from .phase3_evidence import run_evidence_check as _run
+
+    return _run(*args, **kwargs)
+
+
+__all__ += [
+    "assess_ns_recovery_campaign",
+    "ns_run_fingerprints",
+    "run_evidence_check",
+    "run_ns_recovery_campaign",
+    "run_ns_synthetic_recovery",
+]

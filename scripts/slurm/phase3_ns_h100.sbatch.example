@@ -1,0 +1,53 @@
+#!/bin/bash
+#SBATCH --job-name=gwpop-p3-ns
+#SBATCH --output=slurm-%j.out
+#SBATCH --error=slurm-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gpus=1
+#SBATCH --time=24:00:00
+
+# Phase-3 v2: multi-catalog synthetic recovery on dynesty (and, optionally, the
+# Phase-3c evidence check). Site-specific partition/account/module directives
+# belong above this line. Re-submitting with the same roots resumes: completed
+# dynesty repeats are reused untouched and interrupted ones continue from their
+# checkpoints. A different plan is refused.
+
+set -euo pipefail
+
+: "${GWPOP_ENV:?Set GWPOP_ENV to the environment activation script}"
+: "${GWPOP_RUN_DIR:?Set GWPOP_RUN_DIR to a persistent campaign root}"
+
+source "${GWPOP_ENV}"
+
+export JAX_ENABLE_X64=true
+if git rev-parse HEAD >/dev/null 2>&1; then
+    export GWPOP_GIT_COMMIT="${GWPOP_GIT_COMMIT:-$(git rev-parse HEAD)}"
+fi
+
+python - <<'PY'
+import jax
+devices = jax.devices()
+print("JAX devices:", devices)
+if not any(device.platform == "gpu" for device in devices):
+    raise SystemExit("No JAX GPU device visible; refusing H100 campaign")
+PY
+
+gwpop-search synthetic-campaign-ns \
+  --root "${GWPOP_RUN_DIR}" \
+  --n-runs "${GWPOP_N_RUNS:-4}" \
+  --repeats "${GWPOP_REPEATS:-4}" \
+  --root-seed "${GWPOP_ROOT_SEED:-20260917}" \
+  --checkpoint-every "${GWPOP_CHECKPOINT_EVERY:-300}"
+
+gwpop-search fingerprint-ns-run \
+  --run-dir "${GWPOP_RUN_DIR}" \
+  --output "${GWPOP_RUN_DIR}/fingerprints_after_job_${SLURM_JOB_ID:-local}.json" > /dev/null
+
+if [[ -n "${GWPOP_EVIDENCE_CHECK_DIR:-}" ]]; then
+  gwpop-search synthetic-evidence-check \
+    --root "${GWPOP_EVIDENCE_CHECK_DIR}" \
+    --root-seed "${GWPOP_ROOT_SEED:-20260917}" \
+    --checkpoint-every "${GWPOP_CHECKPOINT_EVERY:-300}"
+fi

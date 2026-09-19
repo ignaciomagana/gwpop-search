@@ -4,6 +4,199 @@ Phase 3 is accepted only after the conventional baseline model recovers from
 multiple independent closed synthetic catalogs under the same standardized HBI
 engine that will later score GWTC-5 models.
 
+> **Status (2026-09-19).** The NumPyro-NUTS campaign described in the later
+> sections was rejected: NUTS froze against the hard support edges of the
+> likelihood, and the uniform-box injections gave a selection Monte-Carlo
+> variance of 7-12 at the truth. Its code, commands and formats (`...-1.0`) are
+> kept only to reproduce that record. The Phase-3 re-run uses dynesty nested
+> sampling for posteriors and evidences on the survey-v2 catalogs:
+> "Phase 3 v2 on dynesty" directly below.
+
+## Phase 3 v2 on dynesty
+
+Module `gwpop_search.inference.phase3_ns` (campaign) and
+`gwpop_search.inference.phase3_evidence` (Phase 3c). The likelihood, the
+population model, the hyperpriors and the grammar are unchanged; every fit is
+`run_dynesty_population` of the standardized HBI shape likelihood.
+
+### Plan (`gwpop-search-phase3-campaign-plan-2.0`)
+
+| item | v2 default |
+|---|---|
+| catalogs `n_runs` | 4, seed pairs `recovery_seed_pairs(n_runs, 20260917)` exactly as v1 (data seeds 1685370682, 1653124771, 610249415, 200179658) |
+| repeats per catalog `R` | 4, seeds `sha256(sampler_seed:dynesty-repeat:r)` |
+| survey | `noisy_observation`, `population_proxy` (eps 0.3), 48 events, 1024 PE samples/event, 100000 injections |
+| model / priors / truth | `GwcatChiEffBBHModel`, `BASELINE_SYNTHETIC_PRIORS`, `DEFAULT_BASELINE_HYPERPARAMETERS` |
+| dynesty | static `NestedSampler`, `bound="multi"`, `sample="rslice"`, `slices = 2*(3+ndim) = 26`, `nlive=1000`, `dlogz=0.1`, `batch_size=64` (queue size and device batch), other fields dynesty defaults, no budget |
+| HBI | `HBIConfig(selection_chunk_size=None)` (one selection chunk) |
+| diagnostics | 512 pooled importance draws, R-hat chains of `min(2000, floor(min Kish))` draws |
+| criteria | `NSRecoveryAcceptanceCriteria` (below) |
+
+The plan pins every `DynestyConfig` field except `checkpoint_every` (I/O
+cadence only). A root whose `campaign_plan.json` differs is refused before any
+computation, which also rejects a v1 (NUTS) root.
+
+### Commands
+
+```bash
+gwpop-search synthetic-campaign-ns --root <ROOT>          # run / resume / reuse
+gwpop-search assess-synthetic-campaign-ns --root <ROOT>   # re-assess with the plan's criteria
+gwpop-search fingerprint-ns-run --run-dir <ROOT> --output before.json
+gwpop-search fingerprint-ns-run --run-dir <ROOT> --compare-to before.json   # exit 1 on any change
+gwpop-search synthetic-evidence-check --root <ROOT_3C>    # Phase 3c
+```
+
+All options default to the plan above (`--nlive`, `--sample`, `--bound`,
+`--slices` [default `2*(3+ndim)` of each model], `--dlogz`, `--batch-size`,
+`--maxiter`, `--maxcall`, `--num-posterior-samples`, `--checkpoint-every`
+[300 s], `--n-events`, `--pe-samples`, `--n-injections`, `--injection-draw`,
+`--observation-model`, `--importance-draws`, `--rhat-draws-per-run`,
+`--root-seed`; the campaign also takes `--n-runs`, `--repeats`,
+`--min-runs`, `--min-repeats`).
+
+### Per-catalog summary (`gwpop-search-phase3-recovery-2.0`)
+
+- Pooled posterior = equal-weight mixture of the `R` separately normalized
+  runs (each run's `num_posterior_samples` equal-weight draws, concatenated;
+  never `merge_runs`/`jitter_run`/`resample_run`): 5/50/95% quantiles, mean,
+  std, truth-in-90%-interval, standardized offset `(median - truth)/std`;
+  `posterior_pooled.npz`.
+- Truth-rank diagnostics (`pe_truth_quantiles` per PE coordinate with a KS
+  p-value; uniformity is expected for chi_eff only).
+- Per run: `logz`, `logzerr`, information, `niter`, `ncall`, efficiency, Kish
+  ESS, elapsed time, likelihood evaluations, selection-unsupported
+  evaluations, dlogz termination, `sqrt(H/nlive)`.
+- Evidence repeats: mean, std (ddof 1), maximum reported error, conservative
+  error `max(std, max logzerr)`, all pairwise `|dlnZ|/sqrt(err_a^2+err_b^2)`.
+- Cross-run rank-normalized split R-hat per parameter (runs as chains;
+  identical to `arviz.rhat(method="rank")`).
+- Importance diagnostics with the backend's jitted diagnostics under the runs'
+  own HBI configuration (checked against every run's likelihood identity) at
+  the pooled posterior-median point, as quantiles over 512 seeded pooled draws
+  (`inverted_cdf`), and at the truth (reported only).
+
+### Acceptance criteria v2 (`NSRecoveryAcceptanceCriteria`, format `gwpop-search-ns-acceptance-criteria-2.0`)
+
+Per catalog, every check must pass:
+
+| check | limit |
+|---|---|
+| repeats | >= 4 |
+| max cross-run R-hat over parameters | <= 1.01 |
+| min Kish ESS per run | >= 1000 |
+| evidence repeat std | <= 0.2 |
+| max reported logzerr | <= 0.2 |
+| max pairwise repeat z | <= 3.0 |
+| NaN/+inf evaluations | 0 (structural: the backend raises) |
+| selection-unsupported evaluations | 0 |
+| every run terminated by `dlogz` | yes |
+| min event ESS | >= 20 at the point, the draw median and the draw q10 |
+| selection ESS | >= 200 at the point, the draw median and the draw q10 |
+| max event weight | <= 0.25 at the point, the draw median and the draw q90 |
+| max selection weight | <= 0.10 at the point, the draw median and the draw q90 |
+| Var(log L) | <= 1.0 at the point, the draw median and the draw q90 |
+
+Campaign (`gwpop-search-phase3-campaign-2.0`): `phase3_numerical_gate_passed`
+iff at least `min_runs = 4` catalogs exist and every catalog passes. Ensemble
+central-90% coverage fractions and median standardized offsets are reported,
+not thresholded. `NSRecoveryAcceptanceCriteria.f3_level()` holds the F3 gates
+of the dynesty ladder (R-hat 1.05, Kish 500, evidence 0.5/0.5, z 3.5,
+importance 10/100/0.35/0.15/2.0).
+
+### CPU rehearsal (nlive 250, 2 repeats, catalog 0)
+
+`gwpop-search-data/validation/phase3_ns_cpu_rehearsal/` ran the campaign code on
+the real survey-v2 catalog 0 with every plan setting except `nlive = 250` and
+`R = 2` (8 CPU threads, ~440 likelihood evaluations/s). Per run: H = 11.5-11.8
+nats, logzerr 0.24-0.26, Kish ESS ~1930, ~0.5M evaluations (~20 min), dlogz
+termination, no selection-unsupported evaluations; repeat std 0.14, max
+cross-run R-hat 1.002. Importance over 512 pooled draws (q0.1 / q0.5 / q0.9):
+min event ESS 26.7 / 81.7 / 185, selection ESS 9.5k / 14.4k / 21.1k, max event
+weight 0.029 / 0.060 / 0.137, Var(log L) 0.13 / 0.21 / 0.33. The only failed
+check was logzerr > 0.2, expected at nlive 250 (about 0.12 at nlive 1000); the
+tail of the minimum event ESS is the closest importance margin. At nlive 1000 a
+run needs about 2M evaluations.
+
+### Layout
+
+```text
+<ROOT>/campaign_plan.json
+<ROOT>/campaign_summary.json
+<ROOT>/run_000/recovery_summary.json
+<ROOT>/run_000/posterior_pooled.npz
+<ROOT>/run_000/repeats/repeat_000/{manifest.json, checkpoint.pkl, result.npz, result.npz.json}
+...
+```
+
+### Resume integrity
+
+Every repeat is resumable on its own: `checkpoint.pkl` (written atomically by
+dynesty every `--checkpoint-every` seconds and at the end) lets a killed job
+continue the identical trajectory, and a completed repeat (`result.npz` +
+sidecar) is reused without rewriting any file. The manifest pins the data
+digests, priors, HBI and dynesty configuration, code (including uncommitted
+edits) and runtime, so a resume refuses anything else.
+`tests/test_phase3_ns.py` SIGKILLs a campaign process mid-way through a repeat
+and verifies that the resumed campaign reproduces the uninterrupted control bit
+for bit while the completed repeat's fingerprints stay unchanged.
+
+Exercise on H100: fingerprint, kill the job with `SIGKILL` while a repeat is
+running (after its first checkpoint), re-submit the identical command, then
+compare:
+
+```bash
+gwpop-search fingerprint-ns-run --run-dir <ROOT> --output fp_before.json
+# kill -9 <pid>; re-run the identical synthetic-campaign-ns command
+gwpop-search fingerprint-ns-run --run-dir <ROOT> --compare-to fp_before.json --output fp_after.json
+```
+
+### Phase 3c: Bayes-factor sanity check (`gwpop-search-phase3-evidence-check-1.0`)
+
+Two exactly nested atoms: `chieff.mean.linear_q` (`chi_mu_q_slope` ~
+U(-0.6, 0.6)) and `pairing.beta.linear_m1` (`beta_q_m1_slope` ~ U(-0.3, 0.3)).
+
+- (a) Null: on each of the 4 campaign catalogs (same seeds and survey), F3-style
+  evidence (`R = 2`, the campaign's dynesty settings, `slices = 2*(3+ndim)`:
+  26 for the root, 28 for each child) of the declarative root
+  `compile_model_spec(baseline_model_spec())` and of both children.
+  `ln BF(child/root) = mean lnZ_child - mean lnZ_root`,
+  `sigma = sqrt(cons_child^2 + cons_root^2)` with `cons = max(repeat std, max
+  logzerr)`, and the Savage-Dickey cross-check `ln pi(0) - ln p(0|D)` (NS-weighted
+  Gaussian KDE of the pooled child posterior of the slope; 0 is interior, the
+  Verdinelli-Wasserman factor is 1).
+- (b) Injected: one catalog per atom drawn from the child model with the slope
+  at 0.9 x its upper prior bound (0.54, 0.27), all else at the root truth, by the
+  grammar-matched structured generator (`scouts.synthetic`), which applies the
+  survey's `noisy_observation` model (detection on observed data, PE drawn given
+  the observation). `tests/test_phase3_evidence_check.py` verifies that the
+  draws follow the compiled child densities exactly.
+- Before any fit the declarative root and `GwcatChiEffBBHModel` are compared on
+  every catalog's PE and selection samples at the truth and 16 prior draws
+  (same support, `|delta log p| <= 1e-10`; measured 1.7e-13 on a v2 catalog).
+
+Pre-declared engineering pass rule (`EvidenceCheckPassRule`, recorded in the
+plan and the summary): (1) every fit passes the F3-level gates; (2)
+`ln BF(child/root) < 3` in all 8 null cases; (3) `ln BF(child/root) > 0` in both
+injected cases; (4) `|ln BF - ln BF_SDDR| <= max(0.3, 2 sigma)` in every null
+case.
+
+Injection strengths. With 48 events the atoms are only moderately detectable:
+the conditional profile likelihood of the slope (other hyperparameters at the
+truth, the partner intercept profiled) on v2 catalogs drawn from the child model
+gave slope widths of about 0.18 (`chi_mu_q_slope`) and 0.04-0.09
+(`beta_q_m1_slope`, growing with the slope), and profile approximations of
+`ln BF` of 0.54-4.97 at `chi_mu_q_slope = 0.55` (9 catalogs) and 0.51-9.73 at
+`beta_q_m1_slope = 0.25` and 0.3 (6 and 9 catalogs), all positive
+(`gwpop-search-data/validation/phase3c_injection_strength_probe/`). The
+marginal evidence is lower than this conditional approximation, so (3) is a
+weak power check with a few-percent chance of a non-detection by noise, not a
+calibration.
+
+Layout: `<ROOT_3C>/evidence_check_plan.json`,
+`<ROOT_3C>/evidence_check_summary.json`,
+`<ROOT_3C>/null/catalog_XXX/{root,<atom>}/{fit_summary.json,repeat_YYY/}`,
+`<ROOT_3C>/injected/<atom>/{root,<atom>}/...`. Resumable like the campaign.
+
 ## Purpose
 
 This campaign exercises, end to end:
