@@ -8,7 +8,7 @@ import numpy as np
 
 try:
     import jax.numpy as jnp
-    from jax.scipy.special import ndtr
+    from jax.scipy.special import log_ndtr, ndtr
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "baseline population models require JAX: install gwpop-search[inference]"
@@ -54,6 +54,26 @@ def powerlaw_logpdf(x, *, alpha, xmin, xmax):
     return jnp.where(valid, logp, -jnp.inf)
 
 
+def _log_normal_interval_mass(a, b):
+    """Stable ``log(Phi(b) - Phi(a))`` for standardized bounds ``a < b``.
+
+    ``ndtr(b) - ndtr(a)`` cancels catastrophically when the interval lies far in
+    a tail: at ``a = 10`` it returns exactly zero (``-inf`` in the log) where the
+    true value is about ``-21.9``, which turns a finite population density into
+    spurious zero support. Both branches below are the same quantity written on
+    the side where no cancellation occurs: for ``a >= 0`` the right tails
+    ``Phi(-a) - Phi(-b)``, otherwise the left tails ``Phi(b) - Phi(a)``. The
+    subtraction is done in log space with ``log1p(-exp(delta))`` and
+    ``delta <= 0``; a degenerate interval gives ``-inf`` and is rejected by the
+    caller's support mask rather than floored.
+    """
+    right = a >= 0.0
+    hi = jnp.where(right, log_ndtr(-a), log_ndtr(b))
+    lo = jnp.where(right, log_ndtr(-b), log_ndtr(a))
+    delta = jnp.minimum(lo - hi, 0.0)
+    return hi + jnp.log1p(-jnp.exp(delta))
+
+
 def truncated_normal_logpdf(x, *, mu, sigma, low, high):
     """Normalized normal distribution truncated to [low, high]."""
     x = jnp.asarray(x)
@@ -65,20 +85,19 @@ def truncated_normal_logpdf(x, *, mu, sigma, low, high):
     a = (low - mu) / safe_sigma
     b = (high - mu) / safe_sigma
     z = (x - mu) / safe_sigma
-    norm = ndtr(b) - ndtr(a)
+    log_norm = _log_normal_interval_mass(a, b)
     valid_hyper = (
         valid_sigma
         & (high > low)
-        & jnp.isfinite(norm)
-        & (norm > 0.0)
+        & jnp.isfinite(log_norm)
     )
-    safe_norm = jnp.where(valid_hyper, norm, 1.0)
+    safe_log_norm = jnp.where(valid_hyper, log_norm, 0.0)
     valid = valid_hyper & (x >= low) & (x <= high)
     logp = (
         -0.5 * z**2
         - jnp.log(safe_sigma)
         - 0.5 * LOG2PI
-        - jnp.log(safe_norm)
+        - safe_log_norm
     )
     return jnp.where(valid, logp, -jnp.inf)
 
