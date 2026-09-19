@@ -25,6 +25,7 @@ __all__ = [
     "run_event_drop_stress_suite",
     "run_holdout_campaign",
     "save_event_stress_suite_spec",
+    "scenarios_from_psis_flags",
     "stress_dataset_identity",
     "stress_seed",
     "NearbyBaselineConfig",
@@ -51,6 +52,7 @@ from .stress import (
     load_event_stress_suite_spec,
     run_event_drop_stress_suite,
     save_event_stress_suite_spec,
+    scenarios_from_psis_flags,
     stress_dataset_identity,
     stress_seed,
 )

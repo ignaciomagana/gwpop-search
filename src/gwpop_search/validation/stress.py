@@ -25,6 +25,11 @@ from gwpop_search.search import (
 
 
 _SCENARIO_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+_EVIDENCE_RUNGS = (Fidelity.F3_EVIDENCE, Fidelity.F4_PRODUCTION)
+SUITE_FORMAT = "gwpop-search-event-stress-suite-1.1"
+_READABLE_SUITE_FORMATS = ("gwpop-search-event-stress-suite-1.0", SUITE_FORMAT)
+PLAN_FORMAT = "gwpop-search-event-stress-plan-1.1"
+SUMMARY_FORMAT = "gwpop-search-event-stress-summary-1.1"
 
 
 @dataclass(frozen=True)
@@ -66,8 +71,11 @@ class EventStressConfig:
             "stop_fidelity",
             Fidelity(self.stop_fidelity),
         )
-        if self.stop_fidelity.rank < Fidelity.F2_INFERENCE.rank:
-            raise ValueError("stress suite must run through at least F2")
+        if self.stop_fidelity not in _EVIDENCE_RUNGS:
+            raise ValueError(
+                "stress suite must stop at an evidence rung of fidelity ladder v2 "
+                f"(F3 or F4); got {self.stop_fidelity.value} (F2 is not in the ladder)"
+            )
         if (
             not math.isfinite(self.max_gpu_hours_per_scenario)
             or self.max_gpu_hours_per_scenario <= 0.0
@@ -81,11 +89,13 @@ class EventStressConfig:
 class EventStressSuiteSpec:
     scenarios: tuple[EventDropScenario, ...]
     config: EventStressConfig
-    format_version: str = "gwpop-search-event-stress-suite-1.0"
+    format_version: str = SUITE_FORMAT
 
     def __post_init__(self) -> None:
-        if self.format_version != "gwpop-search-event-stress-suite-1.0":
+        if self.format_version not in _READABLE_SUITE_FORMATS:
             raise ValueError("unsupported event stress suite format")
+        # 1.0 specs are read (their stop fidelity is re-validated) and written as 1.1
+        object.__setattr__(self, "format_version", SUITE_FORMAT)
         scenarios = tuple(self.scenarios)
         if not scenarios:
             raise ValueError("event stress suite requires at least one scenario")
@@ -134,6 +144,34 @@ class EventStressSuiteSpec:
                 )
             ),
         )
+
+
+def scenarios_from_psis_flags(
+    loo_report: Mapping[str, object],
+    *,
+    note: str = "PSIS-LOO flagged: exact drop-one refit required",
+) -> tuple[EventDropScenario, ...]:
+    """Leave-one-out scenarios for the events a PSIS-LOO report flags.
+
+    ``loo_report`` is the output of
+    :func:`gwpop_search.analysis.psis_loo.psis_loo_report`; every event listed
+    in ``exact_refit_required`` for at least one model gets one
+    ``leave_one_out`` scenario (exact refits replace the PSIS estimate).
+    """
+    from gwpop_search.analysis.psis_loo import PSIS_LOO_FORMAT, flagged_events
+
+    if loo_report.get("format_version") != PSIS_LOO_FORMAT:
+        raise ValueError(f"expected a {PSIS_LOO_FORMAT} report")
+    names = flagged_events(loo_report)
+    return tuple(
+        EventDropScenario(
+            scenario_id=f"psis_loo_{index:03d}_{name}",
+            drop_events=(name,),
+            category="leave_one_out",
+            note=note,
+        )
+        for index, name in enumerate(names)
+    )
 
 
 def save_event_stress_suite_spec(
@@ -260,8 +298,10 @@ def build_event_stress_plan(
     if len(set(ids)) != len(ids):
         raise ValueError("stress scenario IDs must be unique")
     return {
-        "format_version": "gwpop-search-event-stress-plan-1.0",
+        "format_version": PLAN_FORMAT,
         "code": _code_identity(),
+        "sampler_backend": "dynesty",
+        "ladder": _ladder(campaign),
         "campaign_hash": campaign.campaign_hash,
         "base_dataset_identity": str(base_dataset_identity),
         "graph_root_hash": graph.root_hash,
@@ -273,6 +313,13 @@ def build_event_stress_plan(
         },
         "scenarios": [asdict(item) for item in scenarios],
     }
+
+
+def _ladder(campaign) -> list[str] | None:
+    ladder = getattr(campaign.scheduler, "ladder", None)
+    if ladder is None:
+        return None
+    return [Fidelity(item).value for item in ladder]
 
 
 def _write_plan_once(path: Path, payload: dict[str, object]) -> None:
@@ -402,7 +449,7 @@ def run_event_drop_stress_suite(
         )
     ]
     summary = {
-        "format_version": "gwpop-search-event-stress-summary-1.0",
+        "format_version": SUMMARY_FORMAT,
         "n_scenarios": len(scenario_results),
         "reference_evidence_available": bool(reference_edges),
         "max_abs_delta_log_bayes_factor_across_scenarios": (
