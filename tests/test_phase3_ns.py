@@ -477,6 +477,7 @@ def test_tiny_campaign_writes_the_v2_summary(tiny_campaign):
 
     fit = summary["fit"]
     assert fit["n_repeats"] == 2 and len(fit["runs"]) == 2
+    assert fit["data_identity"]["n_events"] == 6 and len(fit["data_identity"]["pe_sha256"]) == 64
     for r, run in enumerate(fit["runs"]):
         assert run["run_dir"] == f"repeats/repeat_{r:03d}"
         for key in (
@@ -720,7 +721,11 @@ def test_campaign_survives_sigkill_mid_run(tmp_path, tiny_campaign):
 
 
 def test_cli_ns_commands_default_to_the_v2_plan(tmp_path):
-    from gwpop_search.cli import _ns_dynesty_config, _ns_survey_config
+    from gwpop_search.cli import (
+        _evidence_check_dynesty,
+        _ns_dynesty_config,
+        _ns_survey_config,
+    )
 
     parser = build_parser()
     args = parser.parse_args(["synthetic-campaign-ns", "--root", str(tmp_path)])
@@ -741,6 +746,13 @@ def test_cli_ns_commands_default_to_the_v2_plan(tmp_path):
     assert evidence.func.__name__ == "_run_synthetic_evidence_check"
     assert (evidence.n_catalogs, evidence.repeats, evidence.slices) == (4, 2, None)
     assert _ns_survey_config(evidence) == default_phase3_survey_config()
+    base, rule = _evidence_check_dynesty(evidence)
+    assert rule == "2*(3+ndim)" and base.slices is None and base.nlive == 1000
+    fixed = parser.parse_args(["synthetic-evidence-check", "--root", "x", "--slices", "30"])
+    assert _evidence_check_dynesty(fixed)[1] == "fixed"
+    assert _evidence_check_dynesty(fixed)[0].slices == 30
+    rwalk = parser.parse_args(["synthetic-evidence-check", "--root", "x", "--sample", "rwalk"])
+    assert _evidence_check_dynesty(rwalk)[1] == "fixed"
 
     fingerprint = parser.parse_args(["fingerprint-ns-run", "--run-dir", str(tmp_path)])
     assert fingerprint.func.__name__ == "_fingerprint_ns_run"

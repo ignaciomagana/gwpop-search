@@ -749,6 +749,7 @@ def _bayes_factor_case(
         "parameter": parameter,
         "root_model_hash": root_fit["model_hash"],
         "child_model_hash": child_fit["model_hash"],
+        "data_identity": dict(root_fit["fit"])["data_identity"],
         "root_log_evidence": float(root_evidence["mean"]),
         "root_conservative_error": errors[1],
         "child_log_evidence": float(child_evidence["mean"]),

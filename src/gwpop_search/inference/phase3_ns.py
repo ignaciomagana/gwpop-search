@@ -308,6 +308,23 @@ def _common_names(results: Sequence[DynestyResult]) -> tuple[str, ...]:
     return names
 
 
+def data_identity_digest(results: Sequence[DynestyResult]) -> dict[str, object]:
+    """PE/selection digests of the catalog every run sampled (they must agree)."""
+    identities = [dict(result.likelihood_identity or {}).get("data") for result in results]
+    if not identities or any(item is None for item in identities):
+        raise ValueError("every run must carry the likelihood identity of its data")
+    if any(item != identities[0] for item in identities[1:]):
+        raise ValueError("the runs sampled different catalogs")
+    data = dict(identities[0])
+    return {
+        "pe_sha256": data["pe_sha256"],
+        "selection_sha256": data["selection_sha256"],
+        "n_events": int(data["n_events"]),
+        "n_pe_samples": int(data["n_pe_samples"]),
+        "n_selected": int(data["n_selected"]),
+    }
+
+
 def pooled_posterior_draws(results: Sequence[DynestyResult]) -> np.ndarray:
     """Equal-weight mixture of separately normalized runs, ``[R * n, ndim]``.
 
@@ -574,6 +591,7 @@ def summarize_ns_fit(
     return {
         "names": list(names),
         "n_repeats": len(results),
+        "data_identity": data_identity_digest(results),
         "runs": runs,
         "totals": {
             "min_kish_ess": float(min(run["kish_ess"] for run in runs)),

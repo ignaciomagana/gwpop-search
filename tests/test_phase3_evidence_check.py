@@ -422,6 +422,9 @@ def test_tiny_evidence_check_end_to_end_and_resume(tmp_path):
         assert case["sddr"]["parameter"] == ATOM_SLOPE_PARAMETERS[case["atom"]]
         assert math.isfinite(case["sddr"]["ln_bf"])
         assert child_fit["dynesty_config"]["slices"] == 28
+        # Root and child fits of a case see the same catalog.
+        assert root_fit["fit"]["data_identity"] == child_fit["fit"]["data_identity"]
+        assert case["data_identity"] == root_fit["fit"]["data_identity"]
     for case in summary["injected_cases"]:
         assert case["injected_slope"] == default_injection_strengths()[case["atom"]]
         assert {"q05", "median", "q95", "truth_in_90pct_interval"} <= set(case["slope_posterior"])

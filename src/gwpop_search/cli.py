@@ -300,13 +300,20 @@ def _fingerprint_ns_run(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _evidence_check_dynesty(args: argparse.Namespace):
+    """Dynesty base configuration and slices rule of the evidence check.
+
+    Without ``--slices`` a slice sampler uses ``2*(3+ndim)`` of each model.
+    """
+    from .inference.phase3_evidence import SLICES_RULE_FIXED, SLICES_RULE_PER_MODEL
+
+    per_model = args.slices is None and args.sample in ("slice", "rslice")
+    rule = SLICES_RULE_PER_MODEL if per_model else SLICES_RULE_FIXED
+    return _ns_dynesty_config(args, slices=args.slices), rule
+
+
 def _run_synthetic_evidence_check(args: argparse.Namespace) -> None:
-    from .inference.phase3_evidence import (
-        SLICES_RULE_FIXED,
-        SLICES_RULE_PER_MODEL,
-        default_injection_strengths,
-        run_evidence_check,
-    )
+    from .inference.phase3_evidence import default_injection_strengths, run_evidence_check
     from .inference.phase3_ns import phase3_hbi_config
 
     strengths = default_injection_strengths()
@@ -314,14 +321,15 @@ def _run_synthetic_evidence_check(args: argparse.Namespace) -> None:
         strengths["chieff.mean.linear_q"] = args.chi_mu_q_slope
     if args.beta_q_m1_slope is not None:
         strengths["pairing.beta.linear_m1"] = args.beta_q_m1_slope
+    dynesty_config, slices_rule = _evidence_check_dynesty(args)
     summary = run_evidence_check(
         Path(args.root),
         n_catalogs=args.n_catalogs,
         root_seed=args.root_seed,
         repeats=args.repeats,
         survey_config=_ns_survey_config(args),
-        dynesty_config=_ns_dynesty_config(args, slices=args.slices),
-        slices_rule=SLICES_RULE_PER_MODEL if args.slices is None else SLICES_RULE_FIXED,
+        dynesty_config=dynesty_config,
+        slices_rule=slices_rule,
         hbi_config=phase3_hbi_config(),
         injection_strengths=strengths,
         importance_draws=args.importance_draws,
