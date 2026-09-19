@@ -23,6 +23,7 @@ inference = [
     "jax",
     "numpyro",
     "arviz",
+    "dynesty>=3.1",
 ]
 evidence = [
     "gwpop-search[inference]",
