@@ -36,10 +36,16 @@ Package version remains `0.2.0` until the Phase-3 acceptance gate is closed.
 Authoritative fully green integrated checkpoint:
 
 ~~~text
-commit: 6b05f764075900188e0edfa0016675a8a1a1b37f
-tests:  283 passed
-CI:     GitHub Actions / Python 3.12 / JAX x64
+commit: 19d9eed1d2d74675aa6095bf2f0ac99039178d88
+tests:  301 passed
+CI:     GitHub Actions / Python 3.12 / JAX x64 (run 35422984242, PR #1)
 ~~~
+
+`19d9eed` adds the operator-approved gwcat `chieff_reference` selection
+pairing (data layer only) on top of the previous checkpoint
+`6b05f764075900188e0edfa0016675a8a1a1b37f` (283 tests). The Phase-3 synthetic
+recovery code path, HBI likelihood, priors, thresholds and model grammar are
+unchanged by it.
 
 Commits after that checkpoint are handover/documentation synchronization unless
 this file is updated again.
@@ -109,6 +115,12 @@ Important contract carried into `gwpop-search`:
   campaign/exposure convention;
 - component-spin exports may carry `chi_eff` as a derived column.
 
+As of 2026-09-19 this commit is also the latest gwcat `master`. It refuses the
+substituting `chieff` selection basis for the O4ab injections (non-uniform,
+non-isotropic spin draws). The exact chi_eff-space selection for GWTC-5 is
+gwcat's `chieff_reference` basis paired with a `chieff` PE export at the same
+ceiling (see Phase 1 below and `docs/data_contract.md`).
+
 ## Phase 1 - canonical data layer
 
 Implemented:
@@ -122,6 +134,17 @@ Implemented:
 - `src/gwpop_search/data/thinning.py`
 
 The gwcat-v2 basis constructor is exposed as `gwcat_v2_basis_for_spin`.
+
+Reference-reweighted chi_eff selection (operator-approved 2026-09-19, H100
+data-provenance gate): the adapter accepts a gwcat `chieff_reference`
+selection export only paired with a `chieff` PE export whose per-event
+analytic prior ceilings all equal `spin_reference_amax`. It loads the pair in
+the `gwcat_v2_chieff` density basis, and removes the selection's declared
+zero-weight rows outside the reference support after verifying both the
+recorded sentinel and the support rule (exact for `A = sum p_pop / pdraw`;
+`ndraw` unchanged). `canonicalize-gwcat-v2 --selection-spin-basis
+chieff_reference` makes that requirement explicit; the canonicalization report
+is format 1.1 and records the verified pairing.
 
 Screening reductions are explicit:
 

@@ -277,6 +277,26 @@ gwpop-search canonicalize-gwcat-v2 \
   --output-dir "$GWPOP_CANONICAL_DATA"
 ```
 
+**O4 injections (operator-approved 2026-09-19).** gwcat `8f9e2f1` refuses the
+substituting `chieff` selection basis for the O4ab injections (non-uniform,
+non-isotropic spin draws). The exact chi_eff-space selection is gwcat's
+`chieff_reference` basis at `a_ref = 0.99`, paired with a `chieff` PE export
+whose per-event prior ceilings all equal `a_ref` (see
+`docs/data_contract.md`). Canonicalize that pair with the explicit selection
+requirement:
+
+```bash
+gwpop-search canonicalize-gwcat-v2 \
+  --pe-export "$GWPOP_GWCAT_PE" \
+  --selection-export "$GWPOP_GWCAT_SELECTION" \
+  --spin-basis chieff \
+  --selection-spin-basis chieff_reference \
+  --output-dir "$GWPOP_CANONICAL_DATA"
+```
+
+The report then also records the verified reference ceiling and the number of
+declared zero-weight selection rows removed.
+
 Read `canonicalization_report.json`. Verify:
 
 - source hashes match the reviewed gwcat products;
@@ -902,10 +922,13 @@ validation report.
 The current fully integrated scientific/software checkpoint is:
 
 ```text
-commit: 6b05f764075900188e0edfa0016675a8a1a1b37f
-tests:  283 passed
+commit: 19d9eed1d2d74675aa6095bf2f0ac99039178d88
+tests:  301 passed
 CI:     GitHub Actions / Python 3.12 / JAX x64
 ```
+
+(`19d9eed` = previous checkpoint `6b05f76` + the operator-approved
+`chieff_reference` selection pairing in the data layer.)
 
 This checkpoint includes the frozen-selection exact-null path, v1.3 per-null
 compute ceiling, exact-null plan v1.1 budget accounting, array-safe

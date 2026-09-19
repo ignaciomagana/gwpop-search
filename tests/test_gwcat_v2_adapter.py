@@ -157,7 +157,9 @@ def test_gwcat_canonicalization_writes_audited_internal_pair(tmp_path):
         required_spin_basis="chieff",
     )
 
-    assert report["format_version"] == "gwpop-search-gwcat-canonicalization-1.0"
+    assert report["format_version"] == "gwpop-search-gwcat-canonicalization-1.1"
+    assert report["required_selection_spin_basis"] == "chieff"
+    assert report["selection_reference_pairing"] is None
     assert report["required_spin_basis"] == "chieff"
     assert report["selection_mode"] == "estimator_ready"
     assert report["n_events"] == 2
