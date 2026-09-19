@@ -45,8 +45,12 @@ element ``Delta X_k``::
     L_-i = prod_{j != i} lambda_j
 
 ``c_i`` is the fraction of the leave-one-out evidence integrand that the PSIS
-estimate cannot see (``Z_-i`` is underestimated by the factor ``1 - c_i``).
-Volumes follow dynesty 3.1 bookkeeping (``X_0 = X_init nlive/(nlive+1)``).
+estimate cannot see (``Z_-i`` is underestimated by the factor ``1 - c_i``, so
+``elpd_i`` is overestimated by ``-ln(1 - c_i)``; the advisory
+``elpd_complement_corrected = elpd_i + ln(1 - c_i)`` is reported, but flagged
+events still need exact refits because ``c_i`` rests on the prior draws of
+the plateau phase). Volumes follow dynesty 3.1 bookkeeping
+(``X_0 = X_init nlive/(nlive+1)``).
 
 Flags (exact refit required): ``k-hat > k_threshold`` (or undefined), LOO
 ESS below ``min_loo_ess``, ``c_i > max_complement_mass``, repeat scatter
@@ -464,11 +468,21 @@ class ModelLOOResult:
                     "repeat_scatter": float(self.repeat_scatter[i]),
                     "complement_mass": float(self.complement_mass[i]),
                     "complement_mass_max": float(self.complement_mass_max[i]),
+                    "elpd_complement_corrected": _complement_corrected(
+                        float(self.elpd[i]), float(self.complement_mass[i])
+                    ),
                     "flags": list(self.flags[i]),
                     "flagged": bool(self.flags[i]),
                 }
             )
         return rows
+
+
+def _complement_corrected(elpd: float, complement: float) -> float | None:
+    """``elpd + ln(1 - c)`` (advisory); ``None`` when ``c`` is undefined or 1."""
+    if not math.isfinite(complement) or complement >= 1.0:
+        return None
+    return float(elpd + math.log1p(-complement))
 
 
 def psis_loo_model(

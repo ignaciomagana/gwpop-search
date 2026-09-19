@@ -181,3 +181,51 @@ def test_holdout_config_validation_and_round_trip():
     with pytest.raises(ValueError, match="1.0 campaigns"):
         HoldoutCampaignConfig(format_version="gwpop-search-holdout-campaign-1.0")
     assert config.format_version == CAMPAIGN_FORMAT
+
+
+def test_holdout_campaign_end_to_end_with_real_dynesty_refits(tmp_path):
+    pytest.importorskip("dynesty")
+    jax = pytest.importorskip("jax")
+    jax.config.update("jax_enable_x64", True)
+    from gwpop_search.analysis.posterior_gates import PosteriorGateCriteria
+    from gwpop_search.inference.synthetic import SyntheticSurveyConfig, generate_baseline_synthetic_dataset
+
+    dataset = generate_baseline_synthetic_dataset(
+        seed=5,
+        config=SyntheticSurveyConfig(n_events=6, posterior_samples_per_event=32, n_injections=3_000,
+                                     population_batch_size=512, redshift_sampling_grid=1024),
+    )
+    lenient = PosteriorGateCriteria(
+        max_cross_run_rhat=5.0, min_kish_ess_per_run=5.0, require_dlogz_termination=False,
+        min_event_ess=1.0, min_selection_ess=1.0, max_event_weight_fraction=1.0,
+        max_selection_weight_fraction=1.0, max_shape_log_likelihood_variance=1e6, n_draws=16,
+    )
+    config = HoldoutCampaignConfig(
+        n_folds=2, seed=3, criteria=lenient, predictive_draws=64,
+        posterior_config=DynestyConfig(nlive=30, sample="rslice", batch_size=16, maxiter=60,
+                                       num_posterior_samples=100),
+    )
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        summary = run_holdout_campaign(
+            tmp_path, dataset.posterior, dataset.selection, _campaign(), dataset_identity="synthetic",
+            models=(baseline_model_spec(),), config=config,
+        )
+    model = summary["models"][0]
+    # whichever folds pass their gates (tiny runs), the bookkeeping must be consistent
+    for fold in model["folds"]:
+        diagnostics = fold["diagnostics"]
+        assert diagnostics["format_version"] == "gwpop-search-posterior-gates-1.0"
+        assert diagnostics["passed"] == all(c["passed"] for c in diagnostics["checks"] if c["stage"] == "gate")
+        assert fold["dynesty_config"]["slices"] == 2 * (3 + 10)
+        if diagnostics["passed"]:
+            assert set(fold["heldout_log_predictive"]) == set(fold["heldout_events"])
+            assert all(np.isfinite(v) for v in fold["heldout_log_predictive"].values())
+        else:
+            assert fold["heldout_log_predictive"] == {}
+    all_passed = all(fold["diagnostics"]["passed"] for fold in model["folds"])
+    assert model["all_folds_numerically_valid"] == all_passed
+    assert (baseline_model_spec().model_hash in summary["model_total_log_predictive"]) == all_passed
+    assert (tmp_path / baseline_model_spec().model_hash / "fold_00" / "repeat_001" / "result.npz").exists()

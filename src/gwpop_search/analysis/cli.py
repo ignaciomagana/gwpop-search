@@ -154,7 +154,9 @@ def _analyze_edge_mc_error(args) -> None:
     for model_hash, results in sorted(grouped.items()):
         spec = graph.by_hash[model_hash]
         models[model_hash] = compile_model_spec(spec)
-        samples[model_hash] = pool_dynesty_results(results, n_draws=args.n_draws, seed=args.seed)
+        samples[model_hash] = pool_dynesty_results(
+            results, n_draws=None if args.all_points else args.n_draws, seed=args.seed
+        )
         catalogs[model_hash] = pad_catalog(posterior, selection, models[model_hash])
         weights[model_hash] = compute_model_mc_weights(
             samples[model_hash], posterior, selection, models[model_hash], label=model_hash,
@@ -192,7 +194,7 @@ def _analyze_edge_mc_error(args) -> None:
     payload = {
         "format_version": "gwpop-search-edge-mc-error-campaign-1.0",
         "graph_root_hash": graph.root_hash,
-        "n_draws": args.n_draws,
+        "n_draws": None if args.all_points else args.n_draws,
         "models": {h: weights[h].summary() for h in keys},
         "sigma_mc": {"model_hashes": keys, "matrix": mc_covariance_matrix([weights[h] for h in keys]).tolist()},
         "edges": edges,
@@ -439,8 +441,10 @@ def register_analysis_subcommands(subparsers) -> None:
     )
     _add_data_arguments(mc)
     _add_results_arguments(mc)
-    mc.add_argument("--n-draws", type=int, default=None,
-                    help="pooled resampled draws for the weight averages (default: every weighted point)")
+    mc.add_argument("--n-draws", type=int, default=4096,
+                    help="pooled systematic-resampling draws for the weight averages")
+    mc.add_argument("--all-points", action="store_true",
+                    help="average over every weighted nested-sampling point instead of --n-draws draws")
     mc.add_argument("--bootstrap-replicates", type=int, default=0,
                     help="bootstrap-reweighting replicates per edge (0 = formula only)")
     mc.add_argument("--bootstrap-draws", type=int, default=2048)

@@ -191,3 +191,7 @@ def test_support_complement_flags_the_event_that_defines_an_edge(tmp_path):
     assert result.complement_mass_max[-1] > 0.05
     assert "support_complement" in result.flags[-1]
     assert np.all(result.complement_mass_max[:3] < 1e-3)
+    row = result.to_rows()[-1]
+    assert row["elpd_complement_corrected"] == pytest.approx(
+        result.elpd[-1] + math.log1p(-result.complement_mass[-1])
+    )
