@@ -23,6 +23,7 @@ from gwpop_search.analysis.sddr import (  # noqa: E402
     density_at_null,
     edge_classification_report,
     sddr_edge_check,
+    silverman_bandwidth,
     verify_nesting,
     vw_factor,
 )
@@ -110,6 +111,45 @@ def test_boundary_density_removes_the_factor_two_bias():
     assert abs(est.log_density - math.log(b)) < 3 * est.sigma + 0.02
     upper = boundary_density(1.0 - x, w, 1.0, 0.02, side="upper", method="linear")
     assert upper == pytest.approx(b, rel=0.06)
+
+
+@pytest.mark.parametrize(
+    "truth,sampler,zero_gradient",
+    [
+        # p'(0) = 0: reflection is exact here, so it must be unbiased too
+        (2.0 / math.sqrt(2.0 * math.pi), lambda r, n: np.abs(r.normal(0.0, 1.0, n)), True),
+        # p'(0) != 0: only the local-linear boundary kernel stays unbiased
+        (2.0, lambda r, n: r.exponential(0.5, n), False),
+        (4.0, lambda r, n: r.beta(1.0, 4.0, size=n), False),
+    ],
+)
+def test_boundary_estimators_bias_ranking(truth, sampler, zero_gradient):
+    """The default 'linear' kernel is unbiased at a bound; the alternatives are not.
+
+    Averaged over independent samples, so this is a bias statement rather than
+    one realization. The full 6-target, 200-trial study is recorded under
+    gwpop-search-data/validation/analysis_estimators/boundary_density_validation.*.
+    A boundary null (peak_fraction = 0) puts this bias straight into ln BF, so a
+    naive symmetric kernel would shift ln BF by about ln 2.
+    """
+    rng = np.random.default_rng(3)
+    values: dict[str, list[float]] = {m: [] for m in ("linear", "reflection", "naive")}
+    for _ in range(25):
+        x = sampler(rng, 4000)
+        w = np.full(x.size, 1.0 / x.size)
+        h = silverman_bandwidth(x, w)
+        for method in values:
+            values[method].append(boundary_density(x, w, 0.0, h, side="lower", method=method))
+    bias = {m: float(np.mean(v)) / truth - 1.0 for m, v in values.items()}
+    assert abs(bias["linear"]) < 0.03, bias
+    # a symmetric kernel at a bound keeps only half its mass: ~ -50%, i.e. ~ -ln 2 in ln BF
+    assert -0.60 < bias["naive"] < -0.45, bias
+    if zero_gradient:
+        assert abs(bias["reflection"]) < 0.03, bias
+    else:
+        # reflection assumes p'(0) = 0 and is visibly biased when that fails
+        assert bias["reflection"] < -0.05, bias
+        assert abs(bias["linear"]) < abs(bias["reflection"]), bias
 
 
 def test_interior_density_and_tail_bound():
