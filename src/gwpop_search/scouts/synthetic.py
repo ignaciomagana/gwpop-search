@@ -12,13 +12,14 @@ from gwpop_search.grammar import DEFAULT_MUTATIONS, baseline_model_spec
 from gwpop_search.inference.synthetic import (
     SyntheticDataset,
     SyntheticSurveyConfig,
+    _detected_events,
     _make_posterior_catalog,
     _make_selection_catalog,
+    _require_truth_inside_proxy,
     _sample_chi_eff,
     _sample_primary_mass,
     _sample_q,
     _sample_redshift,
-    detection_mask,
 )
 from gwpop_search.models import (
     DEFAULT_BASELINE_HYPERPARAMETERS,
@@ -234,38 +235,26 @@ def _detected_structured_truths(
     survey,
     injection,
 ):
-    pieces: dict[str, list[np.ndarray]] = {}
-    n_have = 0
-    attempts = 0
+    """Detected event truths and observations of the structured population.
 
-    while n_have < survey.n_events:
-        attempts += 1
-        if attempts > 10_000:
-            raise RuntimeError(
-                "failed to draw enough detected structured synthetic events"
-            )
-        draw = _draw_structured_population(
-            rng,
-            max(
-                survey.population_batch_size,
-                2 * (survey.n_events - n_have),
-            ),
+    Detection follows ``survey.observation_model`` exactly as for the baseline
+    survey (``inference.synthetic._detected_events``).
+    """
+    return _detected_events(
+        rng,
+        lambda generator, n: _draw_structured_population(
+            generator,
+            n,
             hp,
             model,
             survey,
             injection,
-        )
-        keep = detection_mask(draw, survey)
-        if not np.any(keep):
-            continue
-        for name, values in draw.items():
-            pieces.setdefault(name, []).append(np.asarray(values)[keep])
-        n_have += int(keep.sum())
-
-    return {
-        name: np.concatenate(chunks)[: survey.n_events]
-        for name, chunks in pieces.items()
-    }
+        ),
+        model,
+        survey,
+        hp,
+        what="structured synthetic events",
+    )
 
 
 def generate_structured_scout_dataset(
@@ -294,8 +283,10 @@ def generate_structured_scout_dataset(
             f"structured synthetic truth is missing {sorted(missing)}"
         )
 
+    _require_truth_inside_proxy(survey, hp)
+
     rng = np.random.default_rng(int(seed))
-    truths = _detected_structured_truths(
+    truths, observations = _detected_structured_truths(
         rng,
         hp,
         model,
@@ -308,6 +299,7 @@ def generate_structured_scout_dataset(
         model,
         survey,
         hp,
+        observations,
     )
     selection = _make_selection_catalog(
         rng,
@@ -329,4 +321,5 @@ def generate_structured_scout_dataset(
         truth_hyperparameters=truth,
         config=survey,
         seed=int(seed),
+        event_observations=observations,
     )

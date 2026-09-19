@@ -18,6 +18,7 @@ from gwpop_search.inference.numpyro import (
     save_result,
 )
 from gwpop_search.inference.recovery import chain_diagnostics
+from gwpop_search.inference.synthetic import require_population_proxy_coverage
 
 from .conditional import (
     ConditionalHSGPConfig,
@@ -266,6 +267,13 @@ def run_conditional_hsgp_scout(
         ConditionalScoutRunConfig()
         if config is None
         else config
+    )
+    # The scout holds the base hyperparameters fixed and only modulates within
+    # the base family's support, so that single point must be covered.
+    require_population_proxy_coverage(
+        selection,
+        hyperparameters=base_hyperparameters,
+        context="conditional HSGP scout base hyperparameters",
     )
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)

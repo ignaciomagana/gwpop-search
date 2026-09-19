@@ -13,7 +13,11 @@ from gwpop_search.models import GwcatChiEffBBHModel
 
 from .numpyro import NUTSConfig, run_resumable_chains, save_result
 from .priors import BASELINE_SYNTHETIC_PRIORS
-from .synthetic import SyntheticSurveyConfig, generate_baseline_synthetic_dataset
+from .synthetic import (
+    SyntheticSurveyConfig,
+    generate_baseline_synthetic_dataset,
+    require_population_proxy_coverage,
+)
 
 
 def posterior_summary(samples, truth):
@@ -123,6 +127,11 @@ def run_synthetic_baseline_recovery(
         seed=int(data_seed),
         model=model,
         config=survey_cfg,
+    )
+    require_population_proxy_coverage(
+        dataset.selection,
+        priors=BASELINE_SYNTHETIC_PRIORS,
+        context="Phase-3 synthetic recovery hyperprior",
     )
     hbi_config = HBIConfig(selection_chunk_size=selection_chunk_size)
 

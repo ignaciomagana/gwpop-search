@@ -9,9 +9,11 @@ from gwpop_search.inference.fidelity import (
     DeterministicHBIEvaluator,
     FidelityRunConfig,
 )
+from gwpop_search.inference.model_spec import prior_specs_from_model_spec
 from gwpop_search.inference.synthetic import (
     SyntheticSurveyConfig,
     generate_baseline_synthetic_dataset,
+    require_population_proxy_coverage,
 )
 from gwpop_search.production.completion import complete_graph_evidence
 from gwpop_search.production.runner import collect_best_available_evidence
@@ -117,8 +119,26 @@ def run_baseline_null_search_replay(
             "mode": data_mode,
             "survey_config": survey_config.to_dict(),
         }
-        dataset_identity = f"baseline-null:{int(seed)}"
+        # Every graph node's selection integral reads these injections; check
+        # coverage for all of them before any compute is spent.
+        for node in graph.nodes:
+            require_population_proxy_coverage(
+                null_selection,
+                priors=prior_specs_from_model_spec(node),
+                context=f"null replay model {node.model_hash}",
+            )
+        # Survey-v2 options change the data drawn for the same seed, so they
+        # enter the identity; legacy configurations keep the original identity.
+        dataset_identity = (
+            f"baseline-null:{int(seed)}{survey_config.dataset_identity_suffix()}"
+        )
     elif data_mode == "frozen_selection_resample":
+        if survey_config.uses_v2_options:
+            raise ValueError(
+                "frozen_selection_resample reuses the frozen production "
+                "selection and truth-centered PE; survey injection_draw and "
+                "observation_model options do not apply"
+            )
         if observed_posterior is None or frozen_selection is None:
             raise ValueError(
                 "frozen_selection_resample requires observed_posterior and "

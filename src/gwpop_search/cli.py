@@ -5,19 +5,45 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from . import __version__
 
+_LEGACY_DEFAULT_N_INJECTIONS = 20_000
+
 
 def _survey_config(args: argparse.Namespace):
-    from .inference.synthetic import SyntheticSurveyConfig
+    from .inference.synthetic import (
+        INJECTION_DRAW_POPULATION_PROXY,
+        RECOMMENDED_POPULATION_PROXY_N_INJECTIONS,
+        SyntheticSurveyConfig,
+    )
 
+    proxy = args.injection_draw == INJECTION_DRAW_POPULATION_PROXY
+    n_injections = args.n_injections
+    if n_injections is None:
+        # The legacy box keeps its historical default so existing campaign
+        # plans reproduce; population_proxy defaults to the recommended size.
+        n_injections = (
+            RECOMMENDED_POPULATION_PROXY_N_INJECTIONS
+            if proxy
+            else _LEGACY_DEFAULT_N_INJECTIONS
+        )
+    elif proxy and n_injections < RECOMMENDED_POPULATION_PROXY_N_INJECTIONS:
+        print(
+            "warning: --n-injections "
+            f"{n_injections} is below the recommended "
+            f"{RECOMMENDED_POPULATION_PROXY_N_INJECTIONS} for population_proxy "
+            "(see docs/phase3_recovery.md)",
+            file=sys.stderr,
+        )
     return SyntheticSurveyConfig(
         n_events=args.n_events,
         posterior_samples_per_event=args.pe_samples,
-        n_injections=args.n_injections,
+        n_injections=n_injections,
         injection_draw=args.injection_draw,
+        observation_model=args.observation_model,
     )
 
 
@@ -122,7 +148,15 @@ def _add_stress_arguments(parser: argparse.ArgumentParser) -> None:
 def _add_common_recovery_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--n-events", type=int, default=48)
     parser.add_argument("--pe-samples", type=int, default=256)
-    parser.add_argument("--n-injections", type=int, default=20_000)
+    parser.add_argument(
+        "--n-injections",
+        type=int,
+        default=None,
+        help=(
+            "selection draws N_draw (default: 20000 for uniform_detector_box, "
+            "the recommended 100000 for population_proxy)"
+        ),
+    )
     parser.add_argument(
         "--injection-draw",
         choices=("uniform_detector_box", "population_proxy"),
@@ -130,7 +164,19 @@ def _add_common_recovery_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "selection-injection distribution: the legacy uniform detector-frame "
             "box, or draws from the baseline population at the default proxy "
-            "hyperparameters (draw density = model log density at the proxy)"
+            "hyperparameters mixed with a defensive q -> 1 pairing component "
+            "(stored draw density = that exact mixture density)"
+        ),
+    )
+    parser.add_argument(
+        "--observation-model",
+        choices=("truth_centered", "noisy_observation"),
+        default="truth_centered",
+        help=(
+            "truth_centered: legacy zero-noise PE and detection on true "
+            "parameters; noisy_observation: one noise realisation per event and "
+            "injection, detection on the observed data and PE drawn from the "
+            "posterior given those data (DAG-consistent)"
         ),
     )
     parser.add_argument("--num-warmup", type=int, default=1000)

@@ -65,6 +65,15 @@ class ExactNullCampaignConfig:
         }:
             raise ValueError(f"unsupported null data mode {self.data_mode!r}")
         if (
+            self.data_mode == "frozen_selection_resample"
+            and self.survey.uses_v2_options
+        ):
+            raise ValueError(
+                "frozen_selection_resample reuses the frozen production "
+                "selection and truth-centered PE; survey injection_draw and "
+                "observation_model options do not apply"
+            )
+        if (
             not math.isfinite(self.min_resampling_ess)
             or self.min_resampling_ess <= 0.0
         ):

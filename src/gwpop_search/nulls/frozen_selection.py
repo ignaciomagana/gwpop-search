@@ -98,6 +98,12 @@ def generate_frozen_selection_null_dataset(
         )
     if not np.isfinite(min_resampling_ess) or min_resampling_ess <= 0.0:
         raise ValueError("min_resampling_ess must be finite and positive")
+    if survey_config.uses_v2_options:
+        raise ValueError(
+            "frozen-selection nulls reuse the frozen production selection and "
+            "truth-centered PE; survey injection_draw and observation_model "
+            "options do not apply"
+        )
 
     probabilities, diagnostics = frozen_selection_resampling_probabilities(
         selection,

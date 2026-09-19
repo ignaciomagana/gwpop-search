@@ -22,6 +22,7 @@ from .evidence import (
 )
 from .model_spec import prior_specs_from_model_spec
 from .numpyro import _code_identity
+from .synthetic import require_population_proxy_coverage
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,11 @@ def run_model_evidence_repeats(
     hbi_config=None,
     dataset_identity: str = "unspecified",
 ) -> tuple[list[EvidenceResult], dict[str, object]]:
+    require_population_proxy_coverage(
+        selection,
+        priors=prior_specs_from_model_spec(spec),
+        context=f"evidence for model {spec.model_hash}",
+    )
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
     _write_model_spec_once(model_dir, spec)

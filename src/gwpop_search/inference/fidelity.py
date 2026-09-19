@@ -29,6 +29,7 @@ from .numpyro import (
     save_result,
 )
 from .recovery import chain_diagnostics
+from .synthetic import require_population_proxy_coverage
 
 
 @dataclass(frozen=True)
@@ -602,6 +603,11 @@ class DeterministicHBIEvaluator:
 
         population_model = compile_model_spec(model)
         priors = prior_specs_from_model_spec(model)
+        require_population_proxy_coverage(
+            self.selection,
+            priors=priors,
+            context=f"model {model.model_hash}",
+        )
 
         if fidelity is Fidelity.F0_SANITY:
             pe, sel = thin_catalog_pair(
