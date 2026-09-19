@@ -296,7 +296,7 @@ Concrete evaluator:
 
 All stages use the same population compiler and standardized HBI likelihood.
 
-## Phase 7 - flexible scouts (software staged; H100 acceptance pending)
+## Phase 7 - optional flexible residual scouts (software staged)
 
 Implemented:
 
@@ -327,14 +327,17 @@ Implemented:
   its frozen engineering gate, both F3 evaluations are numerically valid, and
   log BF(child/parent) > 0.
 
-Still outstanding before Phase 7 scientific acceptance:
+Phase 7 is **not a prerequisite for the core atomic GWTC-5 analysis**.
 
-- run and review the declared multi-seed H100 structured-injection/null matrix;
-- verify each production-enabled scout axis recovers declared strong injections
-  without unacceptable null/off-target proposal behavior;
-- verify at least one accepted injected proposal is independently refit and
-  evidence-compared successfully using
-  `confirm-structured-scout-descendant`.
+The finite atomic grammar/model graph is the primary scientific search. HSGP is
+an optional residual scout to be invoked only after the atomic search,
+full-evidence scoring, robustness checks, and null calibration identify a
+specific unresolved structural question.
+
+If a targeted HSGP extension is invoked, then its corresponding structured
+injection/null validation and independent descendant F3 confirmation become
+mandatory before interpreting that scout. The comprehensive 88-run matrix
+remains available but is not on the core production critical path.
 
 No scout result automatically changes the production graph.
 
@@ -368,16 +371,20 @@ Implemented:
   adaptive F0--F4 search plus full valid evidence completion;
 - observed-state calibration blocked until the observed graph has complete valid
   evidence;
-- structured-scout injection/null campaigns described in Phase 7.
+- optional structured-scout injection/null campaigns are available for any
+  later targeted HSGP extension, but are not part of the mandatory atom-search
+  null calibration.
 
 Still outstanding before Phase 8 scientific acceptance:
 
-- execute the predeclared H100 structured-injection/null campaigns;
-- execute the selected production holdout/event-drop/nearby-baseline suites;
-- execute the frozen exact-search null campaign and inspect the empirical
-  maximum-BF/posterior-odds distribution;
-- document the measured false-proposal/search-tail behavior rather than
-  substituting nominal single-comparison thresholds.
+- execute the selected atomic-search holdout/event-drop/nearby-baseline suites;
+- execute the frozen exact-search null campaign for the full atomic search and
+  inspect the empirical maximum-BF/posterior-odds distribution;
+- document the measured search-tail behavior rather than substituting nominal
+  single-comparison thresholds.
+
+Structured HSGP calibration is required only if the optional scout extension is
+actually invoked.
 
 ## Phase 9 - optional agents (staged safety boundary)
 
@@ -468,20 +475,21 @@ not infer them from filenames or release conventions.
 
 ## Immediate next actions
 
-1. Require a final green Actions run after the handover/state documentation
+1. Require a final green Actions run after this atom-first handover/state
    synchronization.
 2. Hand the exact green revision and
    `docs/CLAUDE_H100_VALIDATION_HANDOVER.md` to Claude on H100.
 3. Run and **manually review** Phase 3. Phase 3 remains open until that review
    is explicitly recorded.
-4. Run the frozen 88-run Phase-7 scout matrix and one injected descendant F3
-   confirmation.
-5. Only after Phase 3 acceptance, canonicalize/freeze the reviewed real data and
+4. Only after Phase 3 acceptance, canonicalize/freeze the reviewed real data and
    human-approved GWTC-5 scientific policies.
-6. Run production adaptive search + mandatory evidence completion.
-7. Run real-data scouts, holdout, event-drop, nearby-baseline, and v1.3
-   frozen-selection exact-null validation; preserve every failed run and fill
-   `docs/H100_VALIDATION_REPORT_TEMPLATE.md`.
+5. Run the finite **atomic** production search + mandatory full evidence
+   completion. This is the main science.
+6. Run held-out, event-drop, nearby-baseline, and v1.3 frozen-selection
+   exact-null calibration of the atomic search.
+7. Only if those atomic results motivate a specific missing residual structure,
+   optionally run the corresponding targeted HSGP scout and its required
+   injection/descendant validation.
 
 ## Rule for future ChatGPT/Codex/Fable work
 
