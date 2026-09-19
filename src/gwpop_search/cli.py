@@ -1387,12 +1387,17 @@ def _freeze_production_campaign(args: argparse.Namespace) -> None:
         artifact_root=args.artifact_root,
         state_database=args.state_database,
         agents_enabled=False,
+        require_root_profile=args.require_root_profile,
     )
     save_production_campaign(Path(args.output), campaign)
+    from .production.validate import root_hyperprior_profile_for_hash
+
+    profile = root_hyperprior_profile_for_hash(campaign.model_graph_root_hash)
     print(
         f"production campaign frozen: {args.output} "
         f"sha256={campaign.campaign_hash} "
         f"ladder={','.join(campaign.scheduler.ladder)} "
+        f"root_hyperprior_profile={profile} "
         f"sampler={campaign.sampler_backend['name']}=={campaign.sampler_backend['version']}"
     )
 
@@ -1620,6 +1625,8 @@ def _summarize_fidelity_evaluation(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from .grammar import HYPERPRIOR_PROFILES
+
     parser = argparse.ArgumentParser(
         prog="gwpop-search",
         description="Systematic gravitational-wave population-model search.",
@@ -2185,6 +2192,14 @@ def build_parser() -> argparse.ArgumentParser:
     freeze_campaign.add_argument("--max-null-replays", type=int, required=True)
     freeze_campaign.add_argument("--artifact-root", required=True)
     freeze_campaign.add_argument("--state-database", required=True)
+    freeze_campaign.add_argument(
+        "--require-root-profile",
+        choices=HYPERPRIOR_PROFILES,
+        help=(
+            "refuse the freeze unless the graph root is this registered root "
+            "hyperprior profile (GWTC-5 production: gwtc5-v1)"
+        ),
+    )
     freeze_campaign.add_argument("--git-commit")
     freeze_campaign.add_argument("--output", required=True)
     freeze_campaign.set_defaults(func=_freeze_production_campaign)

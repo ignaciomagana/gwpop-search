@@ -26,7 +26,7 @@ import json
 import math
 from pathlib import Path
 
-from gwpop_search.grammar import ModelGraph, baseline_model_spec
+from gwpop_search.grammar import ModelGraph
 from gwpop_search.inference.fidelity import fidelity_config_sha256
 from gwpop_search.inference.numpyro import _code_identity
 from gwpop_search.inference.synthetic import (
@@ -85,6 +85,7 @@ from .replay import (
     null_replay_seed,
 )
 from .search_replay import (
+    declared_null_root,
     run_baseline_null_search_replay,
     search_statistics_from_evidence,
 )
@@ -261,10 +262,10 @@ def build_exact_null_campaign_plan(
     campaign: ProductionCampaignConfig,
     config: ExactNullCampaignConfig,
 ) -> dict[str, object]:
-    if graph.root_hash != baseline_model_spec().model_hash:
-        raise ValueError(
-            "exact baseline-null campaign requires the declared baseline root"
-        )
+    # Any registered root hyperprior profile is admissible; the profile is
+    # resolved from the graph so the null is drawn under the priors the search
+    # actually scores (production: ``gwtc5-v1``).
+    _, root_profile = declared_null_root(graph)
     if config.n_nulls > campaign.budget.max_null_replays:
         raise ValueError(
             f"requested {config.n_nulls} nulls exceeds frozen campaign budget "
@@ -289,6 +290,7 @@ def build_exact_null_campaign_plan(
         "production_campaign_hash": campaign.campaign_hash,
         "graph_hash": model_graph_hash(graph),
         "graph_root_hash": graph.root_hash,
+        "root_hyperprior_profile": root_profile,
         "null_config": config.to_dict(),
         "statistic": statistic_definition(config.statistic),
         "sampler_backend": dict(campaign.sampler_backend),
@@ -568,6 +570,8 @@ def finalize_exact_null_campaign(
         "production_campaign_hash": campaign.campaign_hash,
         "statistic": statistic_definition(config.statistic),
         "sampler_backend": dict(campaign.sampler_backend),
+        "graph_root_hash": graph.root_hash,
+        "root_hyperprior_profile": declared_null_root(graph)[1],
         "null_data_mode": config.data_mode,
         "max_gpu_hours_per_null": config.require_compute_ceiling(),
         "production_dataset_identity": production_dataset_identity,

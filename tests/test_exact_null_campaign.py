@@ -242,3 +242,66 @@ def test_exact_null_plan_records_per_null_compute_cap():
     assert plan["format_version"] == "gwpop-search-exact-null-plan-1.2"
     assert plan["null_config"]["max_gpu_hours_per_null"] == 3.5
     assert plan["replayed_production_search"]["max_gpu_hours"] == 3.5
+
+
+def test_exact_null_plan_accepts_and_records_any_registered_root_profile():
+    from gwpop_search.grammar import HYPERPRIOR_PROFILES
+
+    for profile in HYPERPRIOR_PROFILES:
+        graph = enumerate_model_graph(
+            baseline_model_spec(profile), max_depth=1, max_models=5
+        )
+        campaign = ProductionCampaignConfig(
+            campaign_id="null-profile",
+            dataset_manifest_hash="a" * 64,
+            model_graph_hash="b" * 64,
+            model_graph_root_hash=graph.root_hash,
+            git_commit="d" * 40,
+            model_prior={"version": "axis-complexity-v1", "penalty_per_axis": 0.5},
+            fidelity=FidelityRunConfig(),
+            scheduler=SchedulerConfig(),
+            seed_policy=SeedPolicy(root_seed=7),
+            budget=SearchBudget(100.0, 10, 4, 20),
+            artifact_root="runs",
+            state_database="runs/state.sqlite",
+        )
+        plan = build_exact_null_campaign_plan(
+            graph,
+            campaign,
+            ExactNullCampaignConfig(
+                n_nulls=2,
+                root_seed=5,
+                survey=_noisy_survey(),
+                data_mode="synthetic_survey",
+                max_gpu_hours_per_null=1.0,
+            ),
+        )
+        assert plan["root_hyperprior_profile"] == profile
+        assert plan["graph_root_hash"] == graph.root_hash
+
+
+def test_exact_null_plan_refuses_an_unregistered_root():
+    from dataclasses import replace
+
+    from gwpop_search.grammar import PriorConfig
+
+    root = baseline_model_spec()
+    drifted = replace(
+        root,
+        priors={**root.priors, "mmax": PriorConfig("uniform", {"low": 60.0, "high": 90.0})},
+    )
+    graph = enumerate_model_graph(drifted, max_depth=1, max_models=5)
+    _, campaign = _campaign()
+    campaign = replace(campaign, model_graph_root_hash=graph.root_hash)
+    with pytest.raises(ValueError, match="registered hyperprior profile"):
+        build_exact_null_campaign_plan(
+            graph,
+            campaign,
+            ExactNullCampaignConfig(
+                n_nulls=2,
+                root_seed=5,
+                survey=_noisy_survey(),
+                data_mode="synthetic_survey",
+                max_gpu_hours_per_null=1.0,
+            ),
+        )

@@ -154,6 +154,11 @@ def generate_frozen_selection_null_dataset(
     the declared noisy-observation PE approximation (see the module
     docstring). Generator order: truth rows, then one observation per event,
     then the PE draws.
+
+    ``model_spec`` supplies only the population *density* evaluated at
+    ``truth_hyperparameters``; its hyperpriors never enter. The null catalog is
+    therefore identical under every registered root hyperprior profile, and the
+    default baseline is safe when no spec is given.
     """
     model_spec = baseline_model_spec() if model_spec is None else model_spec
     if observed_posterior.basis.identity != selection.basis.identity:

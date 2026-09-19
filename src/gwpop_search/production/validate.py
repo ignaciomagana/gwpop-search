@@ -5,9 +5,26 @@ from __future__ import annotations
 import importlib.metadata
 from pathlib import Path
 
+from gwpop_search.grammar import HYPERPRIOR_PROFILES, baseline_model_spec
 from gwpop_search.inference.numpyro import _code_identity
 
 from .config import ProductionCampaignConfig
+
+
+def root_hyperprior_profile_for_hash(root_hash: str | None) -> str | None:
+    """Registered root hyperprior profile with this baseline hash, else None.
+
+    The profile is fully determined by the graph root hash (priors are part of
+    every ``ModelSpec`` hash), so a frozen campaign already carries it. Naming
+    it makes the freeze report state which hyperpriors the graph was enumerated
+    under (GWTC-5 production: ``gwtc5-v1``).
+    """
+    if not root_hash:
+        return None
+    for profile in HYPERPRIOR_PROFILES:
+        if baseline_model_spec(profile).model_hash == root_hash:
+            return profile
+    return None
 
 
 def _installed_version(package: str) -> str | None:
@@ -47,6 +64,7 @@ def validate_production_freeze(
     graph = verify_graph_file(graph_path)
     code = _code_identity()
     backend = sampler_backend_status(campaign)
+    root_profile = root_hyperprior_profile_for_hash(graph.get("root_hash"))
 
     checks = {
         "dataset_files_valid": bool(data["valid"]),
@@ -67,6 +85,10 @@ def validate_production_freeze(
             )
         ),
         "sampler_backend_pin_matches": bool(backend["matches"]),
+        # A production graph must be rooted at a registered baseline hyperprior
+        # profile; an unregistered root means the enumeration drifted from the
+        # declared grammar and the null calibration would have no defined null.
+        "model_graph_root_is_registered_baseline": root_profile is not None,
     }
     return {
         "valid": bool(all(checks.values())),
@@ -75,6 +97,7 @@ def validate_production_freeze(
         "graph": graph,
         "code": code,
         "sampler_backend": backend,
+        "root_hyperprior_profile": root_profile,
         "campaign_id": campaign.campaign_id,
         "campaign_hash": campaign.campaign_hash,
     }

@@ -4,13 +4,26 @@ One replay generates a baseline-null catalog, runs the frozen search with the
 production evaluator (dynesty ladder) up to the statistic's stop rung, runs
 full-graph F3 evidence completion and computes the calibrated statistic from
 exactly the evidence the statistic declares (``f3_completion``: F3 only).
+
+The null is the *graph's own root*: a replay is admissible for any registered
+root hyperprior profile (``phase3``, ``gwtc5-v1``, ...) whose baseline model
+hash equals ``graph.root_hash``. The profile is resolved from the graph, never
+assumed, so a production graph enumerated under ``gwtc5-v1`` draws its null
+truths and its frozen-selection resampling weights from the same root priors
+the search scores.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from gwpop_search.grammar import ModelGraph, baseline_model_spec
+from gwpop_search.grammar import (
+    HYPERPRIOR_PROFILES,
+    ModelGraph,
+    ModelSpec,
+    baseline_hyperprior_profile,
+    baseline_model_spec,
+)
 from gwpop_search.inference.fidelity import (
     DeterministicHBIEvaluator,
     FidelityRunConfig,
@@ -37,6 +50,29 @@ from .frozen_selection import (
 from .replay import SearchReplayResult
 
 _STATISTIC_EVIDENCE_FIDELITIES = {"f3_completion": ("F3",)}
+
+
+def declared_null_root(graph: ModelGraph) -> tuple[ModelSpec, str]:
+    """Return the graph root spec and its registered hyperprior profile.
+
+    The baseline null is defined by the declarative baseline under *some*
+    registered hyperprior profile. Any profile is admissible as long as its
+    baseline model hash is the graph root; this keeps the null aligned with the
+    graph that is actually searched instead of pinning it to one profile.
+
+    Raises ``ValueError`` when the graph root is not a registered baseline,
+    because then the null catalogs would be drawn from a different model than
+    the search's null hypothesis.
+    """
+    profile = baseline_hyperprior_profile(graph.by_hash[graph.root_hash])
+    if profile is None:
+        raise ValueError(
+            "baseline null replay requires the declarative baseline to be the "
+            "model-graph root under a registered hyperprior profile "
+            f"(registered={list(HYPERPRIOR_PROFILES)}); graph root "
+            f"{graph.root_hash} matches none of them"
+        )
+    return baseline_model_spec(profile), profile
 
 
 def search_statistics_from_evidence(
@@ -113,12 +149,7 @@ def run_baseline_null_search_replay(
     """
     if statistic not in _STATISTIC_EVIDENCE_FIDELITIES:
         raise ValueError(f"unsupported null statistic {statistic!r}")
-    declared_root = baseline_model_spec()
-    if graph.root_hash != declared_root.model_hash:
-        raise ValueError(
-            "baseline null replay currently requires the declarative baseline "
-            "to be the model-graph root"
-        )
+    declared_root, root_profile = declared_null_root(graph)
 
     survey_config = (
         SyntheticSurveyConfig()
@@ -137,6 +168,7 @@ def run_baseline_null_search_replay(
         null_data_metadata = {
             "mode": data_mode,
             "survey_config": survey_config.to_dict(),
+            "root_hyperprior_profile": root_profile,
         }
         # Every graph node's selection integral reads these injections; check
         # coverage for all of them before any compute is spent.
@@ -175,6 +207,7 @@ def run_baseline_null_search_replay(
         null_selection = dataset.selection
         null_truth_hyperparameters = dict(dataset.truth_hyperparameters)
         null_data_metadata = dict(dataset.metadata)
+        null_data_metadata["root_hyperprior_profile"] = root_profile
         dataset_identity = (
             f"frozen-selection-null:{production_dataset_identity}:{int(seed)}"
             f"{survey_config.dataset_identity_suffix()}"

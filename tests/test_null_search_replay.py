@@ -1,5 +1,7 @@
 """One exact-null replay under the f3_completion statistic (decision D4)."""
 
+from dataclasses import replace
+
 import json
 
 import pytest
@@ -132,3 +134,70 @@ def test_f3_completion_null_replay_runs_f0_and_f3_only(monkeypatch, tmp_path):
             execution_config=SearchExecutionConfig(), fidelity_config=campaign.fidelity,
             statistic="best_available",
         )
+
+
+def test_declared_null_root_accepts_any_registered_profile():
+    from gwpop_search.grammar import HYPERPRIOR_PROFILES
+    from gwpop_search.nulls.search_replay import declared_null_root
+
+    for profile in HYPERPRIOR_PROFILES:
+        graph = enumerate_model_graph(
+            baseline_model_spec(profile), max_depth=1, max_models=3
+        )
+        spec, resolved = declared_null_root(graph)
+        assert resolved == profile
+        assert spec.model_hash == graph.root_hash
+
+
+def test_declared_null_root_refuses_an_unregistered_root():
+    from gwpop_search.grammar import PriorConfig
+    from gwpop_search.nulls.search_replay import declared_null_root
+
+    root = baseline_model_spec()
+    drifted = replace(
+        root,
+        priors={**root.priors, "mmax": PriorConfig("uniform", {"low": 60.0, "high": 90.0})},
+    )
+    graph = enumerate_model_graph(drifted, max_depth=1, max_models=3)
+    with pytest.raises(ValueError, match="registered hyperprior profile"):
+        declared_null_root(graph)
+
+
+def test_gwtc5_null_replay_records_the_root_profile(monkeypatch, tmp_path):
+    graph = enumerate_model_graph(
+        baseline_model_spec("gwtc5-v1"), max_depth=1, max_models=3
+    )
+    assert graph.root_hash != baseline_model_spec("phase3").model_hash
+    _FakeEvaluator.calls = []
+    _FakeEvaluator.log_evidence = {
+        node.model_hash: -50.0 + index for index, node in enumerate(graph.nodes)
+    }
+    monkeypatch.setattr(
+        "gwpop_search.nulls.search_replay.DeterministicHBIEvaluator", _FakeEvaluator
+    )
+    result = run_baseline_null_search_replay(
+        0,
+        11,
+        root=tmp_path,
+        graph=graph,
+        model_prior=ComplexityModelPrior(penalty_per_axis=0.5),
+        execution_config=SearchExecutionConfig(
+            root_seed=7,
+            scheduler=SchedulerConfig(beam_width=1, exploration_quota=0),
+            stop_fidelity=Fidelity.F3_EVIDENCE,
+            max_models_by_fidelity={"F3": len(graph.nodes)},
+            max_total_compute_cost=5.0,
+        ),
+        fidelity_config=FidelityRunConfig(),
+        survey_config=SyntheticSurveyConfig(
+            n_events=4,
+            posterior_samples_per_event=8,
+            n_injections=300,
+            population_batch_size=128,
+            redshift_sampling_grid=512,
+            observation_model="noisy_observation",
+        ),
+        data_mode="synthetic_survey",
+        statistic="f3_completion",
+    )
+    assert result.metadata["null_data_metadata"]["root_hyperprior_profile"] == "gwtc5-v1"
