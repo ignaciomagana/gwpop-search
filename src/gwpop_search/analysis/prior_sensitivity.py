@@ -8,7 +8,13 @@ Hyperprior width (MODEL_COMPARISON_MATH.md Sec. 3):
 
   estimated from the weighted posterior points ``W_k`` of every repeat (pooled
   as the equal mixture of runs and also per repeat, for the repeat scatter),
-  with the reweighting ESS ``(sum W r)^2 / sum (W r)^2``.
+  with the reweighting ESS ``(sum W r)^2 / sum (W r)^2``. The narrowed prior
+  keeps only the posterior draws inside its support, so the ESS collapses when
+  the posterior sits away from the new support: below
+  ``min_reweighting_ess`` no number is reported (flag
+  ``low_reweighting_ess``), because an importance estimate from a handful of
+  effective draws is not a prior-robustness result. Without that refusal a
+  single surviving draw yields a confident-looking multi-nat shift.
 * **Widened prior** (support beyond the sampled region): only the analytic
   Occam relation is used, and only when the posterior is contained in the old
   prior (negligible posterior mass near both bounds). Widening a uniform (or
@@ -24,6 +30,16 @@ For an edge, the parameters that exist only in the child (added) are varied
 in the child's evidence and those that exist only in the parent (removed) in
 the parent's, so ``ln BF_{child/parent}`` changes by ``+Delta ln Z_child`` or
 ``-Delta ln Z_parent``.
+
+**Parameters whose null sits at a prior bound** (the mixture fractions
+``peak_fraction``, ``peak1_fraction``, ``peak2_fraction``, ``chi_fraction``,
+whose edges test ``f = 0``) are rescaled about the *bound that carries the
+null*, not about the prior's centre: halving ``U(0, 0.5)`` about its centre
+gives ``U(0.125, 0.375)``, which deletes the tested hypothesis from the prior,
+so the variant is not a width perturbation of the hypothesis at all. Anchored
+at the bound it gives ``U(0, 0.25)``, which is. The anchor is read off the
+edge's nesting embeddings (:func:`gwpop_search.analysis.sddr.classify_edge`)
+and reported per parameter.
 """
 
 from __future__ import annotations
@@ -61,15 +77,35 @@ def _as_prior_spec(prior) -> PriorSpec:
     return PriorSpec("normal", loc=params["loc"], scale=params["scale"])
 
 
-def rescaled_prior(prior, factor: float) -> PriorSpec:
-    """Width multiplied by ``factor`` about the centre (log-centre for log-uniform)."""
+def rescaled_prior(prior, factor: float, *, anchor: str | None = None) -> PriorSpec:
+    """Width multiplied by ``factor``.
+
+    ``anchor=None`` rescales about the centre (log-centre for a log-uniform
+    prior). ``anchor="low"``/``"high"`` holds that bound fixed and moves the
+    other, which is what a parameter whose tested null sits at a bound needs:
+    rescaling about the centre would move the null out of the prior and the
+    variant would no longer perturb the hypothesis under test. A normal prior
+    has no bounds, so it is always rescaled about its location.
+    """
     prior = _as_prior_spec(prior)
     factor = as_float("factor", factor, positive=True)
+    if anchor not in (None, "low", "high"):
+        raise ValueError("anchor must be None, 'low' or 'high'")
     if prior.family == "uniform":
-        centre, half = 0.5 * (prior.low + prior.high), 0.5 * (prior.high - prior.low)
+        width = prior.high - prior.low
+        if anchor == "low":
+            return PriorSpec("uniform", low=prior.low, high=prior.low + factor * width)
+        if anchor == "high":
+            return PriorSpec("uniform", low=prior.high - factor * width, high=prior.high)
+        centre, half = 0.5 * (prior.low + prior.high), 0.5 * width
         return PriorSpec("uniform", low=centre - factor * half, high=centre + factor * half)
     if prior.family == "log_uniform":
-        lc, lh = 0.5 * (math.log(prior.low) + math.log(prior.high)), 0.5 * math.log(prior.high / prior.low)
+        lo, hi = math.log(prior.low), math.log(prior.high)
+        if anchor == "low":
+            return PriorSpec("log_uniform", low=prior.low, high=math.exp(lo + factor * (hi - lo)))
+        if anchor == "high":
+            return PriorSpec("log_uniform", low=math.exp(hi - factor * (hi - lo)), high=prior.high)
+        lc, lh = 0.5 * (lo + hi), 0.5 * (hi - lo)
         return PriorSpec("log_uniform", low=math.exp(lc - factor * lh), high=math.exp(lc + factor * lh))
     return PriorSpec("normal", loc=prior.loc, scale=factor * prior.scale)
 
@@ -82,14 +118,32 @@ def _contained_support(new: PriorSpec, old: PriorSpec) -> bool:
     return old.low <= new.low and new.high <= old.high
 
 
+#: Reweighting ESS below which a narrowed-prior estimate is not reported.
+#: The self-normalized importance estimate has relative standard error of order
+#: ``1/sqrt(ESS)``, so 50 effective draws is already a ~14% error on ``E[pi'/pi]``
+#: and the shift enters ``ln BF`` directly. Below it the estimator is declining,
+#: not agreeing: with ``peak_fraction ~ U(0, 0.5)`` halved about its centre and a
+#: posterior piled up near 0, one surviving draw of 4096 (ESS 1.0) returns
+#: ``Delta ln Z = -7.6`` while neighbouring seeds return nothing at all.
+MIN_REWEIGHTING_ESS = 50.0
+
+
 def prior_reweighting(
     sample: WeightedPosterior,
     parameter: str,
     old_prior,
     new_prior,
+    *,
+    min_ess: float = MIN_REWEIGHTING_ESS,
 ) -> dict[str, object]:
-    """Exact ``ln Z' - ln Z`` for a prior change with ``supp pi' ⊆ supp pi``."""
+    """Exact ``ln Z' - ln Z`` for a prior change with ``supp pi' ⊆ supp pi``.
+
+    ``delta_log_evidence`` is ``None`` with ``flag="low_reweighting_ess"`` when
+    the reweighting ESS falls below ``min_ess`` (the raw value is kept as
+    ``delta_log_evidence_unreliable`` so the refusal can be inspected).
+    """
     old, new = _as_prior_spec(old_prior), _as_prior_spec(new_prior)
+    min_ess = as_float("min_ess", min_ess, nonnegative=True)
     if not _contained_support(new, old):
         raise AnalysisInputError(
             f"{parameter}: the new prior's support is not inside the sampled prior's; "
@@ -101,7 +155,9 @@ def prior_reweighting(
     terms = log_w + log_r
     total = float(logsumexp(terms))
     if not math.isfinite(total):
-        return {"parameter": parameter, "delta_log_evidence": None, "reweighting_ess": 0.0,
+        return {"parameter": parameter, "old_prior": old.to_dict(), "new_prior": new.to_dict(),
+                "delta_log_evidence": None, "reweighting_ess": 0.0, "min_reweighting_ess": min_ess,
+                "flag": "no_posterior_mass",
                 "reason": "no posterior mass inside the new prior's support"}
     wn = np.exp(terms - total)
     ess = float(1.0 / np.sum(wn * wn))
@@ -114,7 +170,7 @@ def prior_reweighting(
         if mask.any():
             wk = log_w[mask] - logsumexp(log_w[mask])
             per_run.append(float(logsumexp(wk + log_r[mask])))
-    return {
+    out = {
         "parameter": parameter,
         "old_prior": old.to_dict(),
         "new_prior": new.to_dict(),
@@ -123,8 +179,19 @@ def prior_reweighting(
         "per_run_delta_log_evidence": per_run,
         "repeat_std": float(np.std(per_run, ddof=1)) if len(per_run) > 1 else None,
         "reweighting_ess": ess,
+        "min_reweighting_ess": min_ess,
         "base_kish_ess": sample.kish_ess,
+        "flag": None,
     }
+    if ess < min_ess:
+        out["delta_log_evidence_unreliable"] = total
+        out["delta_log_evidence"] = None
+        out["flag"] = "low_reweighting_ess"
+        out["reason"] = (
+            f"reweighting ESS {ess:.3g} < {min_ess:g}: too few posterior draws inside the "
+            "narrowed prior's support to estimate E[pi'/pi]"
+        )
+    return out
 
 
 def posterior_edge_mass(
@@ -177,6 +244,28 @@ def occam_widening(
     }
 
 
+def null_anchors(parent: ModelSpec, child: ModelSpec) -> dict[str, str]:
+    """``{parameter: 'low' | 'high'}`` for edge nulls that sit at a prior bound.
+
+    Read off the edge's nesting embeddings. A parameter listed here must be
+    rescaled about that bound (see the module docstring): moving it would delete
+    the tested null from the prior.
+    """
+    from .sddr import classify_edge
+
+    try:
+        nesting = classify_edge(parent, child, "")
+    except (KeyError, AttributeError, ValueError):
+        # a pair the grammar cannot classify as an edge has no registered null,
+        # so there is no bound to anchor at; the centred rescaling stands
+        return {}
+    return {
+        emb.tested_parameter: emb.location
+        for emb in nesting.embeddings
+        if emb.location in {"lower", "upper"}
+    }
+
+
 def edge_prior_sensitivity(
     parent: ModelSpec,
     child: ModelSpec,
@@ -188,6 +277,7 @@ def edge_prior_sensitivity(
     edge_fraction: float = 0.05,
     max_edge_mass: float = 1e-3,
     parameters: Iterable[str] | None = None,
+    min_reweighting_ess: float = MIN_REWEIGHTING_ESS,
 ) -> dict[str, object]:
     """Width sensitivity of ``ln BF_{child/parent}`` for the edge-specific parameters."""
     factor = as_float("factor", factor, positive=True)
@@ -196,6 +286,8 @@ def edge_prior_sensitivity(
     added = sorted(set(child.priors) - set(parent.priors))
     removed = sorted(set(parent.priors) - set(child.priors))
     selected = None if parameters is None else set(parameters)
+    anchors = {"lower": "low", "upper": "high"}
+    bound_nulls = null_anchors(parent, child)
     rows = []
     for owner, names, spec, sample, sign in (
         ("child", added, child, child_sample, 1.0),
@@ -205,7 +297,11 @@ def edge_prior_sensitivity(
             if selected is not None and name not in selected:
                 continue
             prior = spec.priors[name]
-            narrow = prior_reweighting(sample, name, prior, rescaled_prior(prior, 1.0 / factor))
+            anchor = anchors.get(bound_nulls.get(name, ""))
+            narrow = prior_reweighting(
+                sample, name, prior, rescaled_prior(prior, 1.0 / factor, anchor=anchor),
+                min_ess=min_reweighting_ess,
+            )
             wide = occam_widening(
                 sample, name, prior, factor=factor, edge_fraction=edge_fraction,
                 max_edge_mass=max_edge_mass,
@@ -215,6 +311,8 @@ def edge_prior_sensitivity(
             row = {
                 "parameter": name,
                 "model": owner,
+                "null_at_prior_bound": bound_nulls.get(name),
+                "narrow_anchor": anchor,
                 "narrowed": narrow,
                 "widened": wide,
                 "delta_log_bayes_factor_narrowed": None if d_narrow is None else sign * d_narrow,
@@ -235,9 +333,18 @@ def edge_prior_sensitivity(
     variants = []
     if log_bayes_factor is not None:
         for row in rows:
-            for key in ("log_bayes_factor_narrowed", "log_bayes_factor_widened"):
-                variants.append({"parameter": row["parameter"], "variant": key.rsplit("_", 1)[1],
-                                 "log_bayes_factor": row.get(key)})
+            for key, side in (("log_bayes_factor_narrowed", "narrowed"),
+                              ("log_bayes_factor_widened", "widened")):
+                variants.append({
+                    "parameter": row["parameter"],
+                    "variant": side,
+                    "log_bayes_factor": row.get(key),
+                    "anchor": row["narrow_anchor"] if side == "narrowed" else None,
+                    # why a value is absent: low reweighting ESS / no posterior
+                    # mass (narrowed) or a posterior not contained (widened)
+                    "flag": row[side].get("flag"),
+                    "reweighting_ess": row["narrowed"].get("reweighting_ess") if side == "narrowed" else None,
+                })
     return json_ready(
         {
             "parent_hash": parent.model_hash,

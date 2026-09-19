@@ -727,26 +727,37 @@ def vw_factor(
     }
 
 
-#: Method-level systematic (nats) added to the SDDR/NS agreement tolerance, by
-#: the geometry of the null. The SDDR and the nested-sampling evidence are two
-#: different estimators of the same ``ln BF``, so their difference has a floor
-#: that neither error bar describes. Measured on the dynesty toys of
-#: validation/analysis_estimators/sddr_validation.json (static rslice, nlive 500,
-#: slices = 2 (3 + ndim), 2 repeats), as mean +- se of ``ln BF_NS - ln BF_SDDR``:
+#: Method-level systematic (nats) that MAY be added to the SDDR/NS agreement
+#: tolerance, by the geometry of the null. **Opt-in, never a default.**
+#:
+#: The SDDR and the nested-sampling evidence are two different estimators of the
+#: same ``ln BF``, so their difference plausibly has a floor that neither error
+#: bar describes. These numbers are the measured maxima, rounded up, of
+#: ``ln BF_NS - ln BF_SDDR`` over the dynesty toys of
+#: validation/analysis_estimators/sddr_validation.json (static rslice,
+#: **nlive 500**, slices = 2 (3 + ndim), 2 repeats):
 #:
 #:   interior null (Gaussian mean)      n=9  +0.035 +- 0.014, max |diff| 0.087
 #:   boundary null (mixture fraction)   n=6  -0.160 +- 0.021, max |diff| 0.243
 #:   boundary null + VW (shared prior)  n=3  -0.285 +- 0.061, max |diff| 0.377
 #:
-#: The offset appears only for the peak-mixture models, whose peak location is
-#: unidentified as the mixture fraction goes to zero; the boundary-density
-#: estimator is accurate to < 0.02 nats on such pile-ups
-#: (boundary_density_validation.json), so the residual is nested-sampling
-#: evidence bias on that geometry rather than SDDR bias. These are the measured
-#: maxima rounded up. They widen the agreement band only: ``difference`` is
-#: always reported, so a disagreement of any size stays visible. A cross-check is
-#: not a claim -- an edge whose ln BF sits near the 3-nat threshold should not
-#: rest on a route known to differ from the other by this much.
+#: They are therefore calibrated on the very disagreements the agreement test
+#: exists to detect, on n = 9/6/3 cases, and at nlive 500 -- below the F3
+#: production setting (1000) and well below F4 (2000). The stated hypothesis for
+#: the residual (nested-sampling ln Z bias on the peak-mixture geometry, whose
+#: peak location is unidentified as the mixture fraction goes to zero; the
+#: boundary-density estimator is accurate to < 0.02 nats on such pile-ups, with
+#: the opposite sign, per boundary_density_validation.json) predicts the offset
+#: shrinks at production nlive, so the floors are wider than production warrants.
+#:
+#: A tolerance fitted post hoc to the failures it must catch is not a validated
+#: systematic, so :func:`sddr_edge_check` uses the bare formula (8) unless a
+#: caller asks for these values by name (``method_systematic="measured"``), and
+#: the 0.40-nat VW band is in any case too wide to confirm an edge against the
+#: 3-nat claim threshold. Until they are re-measured on an independent set of
+#: cases at F3/F4 settings, the ``mass.family.powerlaw``, ``mass.family.pl_two_peak``
+#: and ``chieff.family.gaussian_mixture`` cross-checks are evidence-only support,
+#: not confirmation. The signed ``difference`` is always reported either way.
 SDDR_METHOD_SYSTEMATIC: dict[str, float] = {
     "interior": 0.10,
     "boundary": 0.25,
@@ -755,13 +766,29 @@ SDDR_METHOD_SYSTEMATIC: dict[str, float] = {
 
 
 def method_systematic_for(nesting: "EdgeNesting") -> float:
-    """Measured SDDR-vs-NS method systematic (nats) for this edge's null geometry."""
+    """The measured (post-hoc, nlive 500) method systematic for this null geometry.
+
+    See :data:`SDDR_METHOD_SYSTEMATIC` for why this is opt-in.
+    """
     if not nesting.embeddings:
         return 0.0
     at_bound = any(emb.location != "interior" for emb in nesting.embeddings)
     if not at_bound:
         return SDDR_METHOD_SYSTEMATIC["interior"]
     return SDDR_METHOD_SYSTEMATIC["boundary_vw" if nesting.vw_required else "boundary"]
+
+
+def _resolve_method_systematic(value, nesting: "EdgeNesting") -> tuple[float, str]:
+    """``(nats, source)`` for ``method_systematic``; ``None``/``0`` = formula (8)."""
+    if value is None:
+        return 0.0, "formula8"
+    if isinstance(value, str):
+        if value != "measured":
+            raise ValueError(
+                f"method_systematic must be a number or 'measured'; got {value!r}"
+            )
+        return float(method_systematic_for(nesting)), "measured"
+    return as_float("method_systematic", value, nonnegative=True), "supplied"
 
 
 @dataclass(frozen=True)
@@ -776,6 +803,7 @@ class SDDRCheck:
     tolerance: float | None
     details: Mapping[str, object]
     method_systematic: float = 0.0
+    method_systematic_source: str = "formula8"  # formula8 | measured | supplied
 
     @property
     def difference(self) -> float | None:
@@ -796,6 +824,7 @@ class SDDRCheck:
                 "sigma_ns": self.sigma_ns,
                 "difference": self.difference,
                 "method_systematic": self.method_systematic,
+                "method_systematic_source": self.method_systematic_source,
                 "tolerance": self.tolerance,
                 "details": dict(self.details),
             }
@@ -817,7 +846,7 @@ def sddr_edge_check(
     vw_primary_eps: float = 0.05,
     min_vw_near_ess: float = 20.0,
     agreement_sigmas: float = 2.0,
-    method_systematic: float | None = None,
+    method_systematic: float | str | None = None,
 ) -> SDDRCheck:
     """SDDR (x VW) estimate of ``ln BF_{child/parent}`` and its agreement with NS.
 
@@ -827,18 +856,21 @@ def sddr_edge_check(
         |ln BF_NS - ln BF_SDDR| <= agreement_sigmas * sqrt(sigma_ns^2 + sigma_SDDR^2)
                                    + method_systematic
 
-    which is formula (8) of the note plus a floor for the difference between the
-    two estimators themselves. ``method_systematic=None`` takes the measured
-    value for this edge's null geometry from :data:`SDDR_METHOD_SYSTEMATIC`;
-    pass ``0.0`` for the bare formula (8). The signed ``difference`` is always
-    reported, so widening the band never hides a disagreement.
+    which is formula (8) of the note, optionally widened by a floor for the
+    difference between the two estimators themselves. ``method_systematic``
+    defaults to the bare formula (8) (``None`` or ``0.0``); pass a number for an
+    externally justified floor, or the string ``"measured"`` for the per-geometry
+    values of :data:`SDDR_METHOD_SYSTEMATIC` -- which were fitted post hoc to the
+    disagreements this test exists to detect, on n = 9/6/3 toy cases at nlive
+    500, and are NOT a validated systematic. The value used and where it came
+    from are reported as ``method_systematic``/``method_systematic_source``, and
+    the signed ``difference`` is always reported, so widening the band never
+    hides a disagreement.
     """
-    if method_systematic is None:
-        method_systematic = method_systematic_for(nesting)
-    method_systematic = as_float("method_systematic", method_systematic, nonnegative=True)
+    method_systematic, ms_source = _resolve_method_systematic(method_systematic, nesting)
     if not nesting.sddr_eligible:
         return SDDRCheck(nesting.mutation_id, nesting.classification, "not_applicable", None, None,
-                         log_bf_ns, sigma_ns, None, {"reason": nesting.reason}, 0.0)
+                         log_bf_ns, sigma_ns, None, {"reason": nesting.reason}, 0.0, "formula8")
     sign = 1.0 if nesting.larger_model == "child" else -1.0
     embeddings = nesting.embeddings if nesting.symmetric_embeddings else nesting.embeddings[:1]
     densities = []
@@ -885,7 +917,7 @@ def sddr_edge_check(
             return SDDRCheck(nesting.mutation_id, nesting.classification, "not_estimable", None, None,
                              log_bf_ns, sigma_ns, None,
                              {**details, "reason": "VW factor needs supp pi_S within supp pi_L"},
-                             method_systematic)
+                             method_systematic, ms_source)
         vw_rows = []
         for eps in vw_eps:
             parts = [vw_factor(larger_sample, emb, smaller_priors, larger_priors, eps=float(eps)) for emb in embeddings]
@@ -900,7 +932,7 @@ def sddr_edge_check(
             return SDDRCheck(nesting.mutation_id, nesting.classification, "not_estimable", None, None,
                              log_bf_ns, sigma_ns, None,
                              {**details, "reason": "too few posterior samples near the null for VW"},
-                             method_systematic)
+                             method_systematic, ms_source)
         log_vw = float(primary["log_vw"])
         details["log_vw_primary"] = log_vw
     if log_density is None:
@@ -914,16 +946,16 @@ def sddr_edge_check(
             margin = agreement_sigmas * (sigma_ns or 0.0)
             status = "bound_consistent" if ns_larger + margin >= bound_larger else "bound_violated"
         return SDDRCheck(nesting.mutation_id, nesting.classification, status, None, None,
-                         log_bf_ns, sigma_ns, None, details, method_systematic)
+                         log_bf_ns, sigma_ns, None, details, method_systematic, ms_source)
     log_bf_larger = log_prior - log_density - log_vw
     log_bf_child = sign * log_bf_larger
     if log_bf_ns is None:
         return SDDRCheck(nesting.mutation_id, nesting.classification, "computed", log_bf_child,
-                         sigma_density, None, None, None, details, method_systematic)
+                         sigma_density, None, None, None, details, method_systematic, ms_source)
     sig_ns = as_float("sigma_ns", sigma_ns if sigma_ns is not None else 0.0, nonnegative=True)
     tolerance = (
         agreement_sigmas * math.sqrt(sig_ns**2 + (sigma_density or 0.0) ** 2) + method_systematic
     )
     status = "agree" if abs(log_bf_ns - log_bf_child) <= tolerance else "disagree"
     return SDDRCheck(nesting.mutation_id, nesting.classification, status, log_bf_child,
-                     sigma_density, log_bf_ns, sig_ns, tolerance, details, method_systematic)
+                     sigma_density, log_bf_ns, sig_ns, tolerance, details, method_systematic, ms_source)

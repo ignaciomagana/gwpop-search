@@ -32,16 +32,30 @@ Formulas (MODEL_COMPARISON_MATH.md Sec. 9.1):
   ``pass``/``fail``/``missing``/``not_applicable``/``incomplete`` and a claim
   requires every applicable criterion to pass:
 
-  1. numerics: both models pass their production gates, G-MC1..3 per model
-     and G-MC4/5 for the edge;
+  1. numerics: both models pass their production gates, G-MC1..3 per model and
+     G-MC4/5 for the edge (G-MC4 gates the same ``sigma_MC`` the budget uses,
+     :func:`_budget_sigma_mc`), and every model was scored at one fidelity rung
+     (D4's calibrated statistic must not mix F3 and F4 evidences);
   2. strength: ``ln BF - 2 sigma >= 3`` and model-averaged ``ln BF_S >= 3``;
   3. prior robustness: every prior-width variant keeps ``ln BF >= 1`` with an
      unchanged sign, and ``P(S|D) >= 0.75`` for every model-prior penalty;
-  4. SDDR agreement where eligible;
+  4. SDDR agreement where eligible. An SDDR-eligible edge whose cross-check
+     could not be computed (``not_estimable``: the VW support condition fails,
+     too few draws near the null, no estimable density and no NS bound) is
+     ``missing``, not ``not_applicable``: it has no independent confirmation.
+     Only an ``evidence_only`` edge is genuinely not applicable;
   5. search-level null calibration ``p = (b+1)/(m+1) <= alpha`` (pre-registered
      ``alpha = 0.01``) for every null truth; with ``1/(m+1) > alpha`` the
-     calibration is resolution-limited and cannot pass;
+     calibration is resolution-limited and cannot pass. The calibration must
+     also describe *this* report: its statistic has to be one the report
+     computes and its ``observed`` has to reproduce the report's own value
+     (``null_observed_sigmas``/``null_observed_atol``), and it cannot pass while
+     some effective model has no evidence, because the statistic is then a
+     maximum over a subset of the graph the nulls were calibrated on;
   6. event-drop, leave-one-out and nearby-baseline results do not reverse the sign.
+
+Every criterion distinguishes ``fail`` (evaluated, the data did not meet it)
+from ``missing``/``incomplete`` (not evaluated). Both block a claim.
 """
 
 from __future__ import annotations
@@ -82,7 +96,11 @@ class EvidenceSummary:
 
     ``gates_passed`` is the model's production numerical-gate status (``None``
     when unknown). ``information``/``nlive`` enable the
-    ``kappa_hat sqrt(H/nlive)`` term of formula (6).
+    ``kappa_hat sqrt(H/nlive)`` term of formula (6). ``rung`` names the dynesty
+    trajectory configuration the repeats were run at (``None`` when unknown);
+    :func:`build_model_comparison` refuses to call a report homogeneous when the
+    models carry more than one, because D4's calibrated statistic must come from
+    a single procedure.
     """
 
     model_hash: str
@@ -93,6 +111,7 @@ class EvidenceSummary:
     information: float | None = None
     nlive: int | None = None
     gates_passed: bool | None = None
+    rung: str | None = None
 
     def __post_init__(self) -> None:
         as_float("log_evidence", self.log_evidence)
@@ -154,6 +173,7 @@ class EvidenceSummary:
             "information": self.information,
             "nlive": self.nlive,
             "gates_passed": self.gates_passed,
+            "rung": self.rung,
             "n_repeats": self.n_repeats,
             "repeat_std": self.repeat_std,
         }
@@ -176,18 +196,22 @@ class EvidenceSummary:
             information=None if payload.get("information") is None else float(payload["information"]),
             nlive=None if payload.get("nlive") is None else int(payload["nlive"]),
             gates_passed=None if payload.get("gates_passed") is None else bool(payload["gates_passed"]),
+            rung=None if payload.get("rung") is None else str(payload["rung"]),
         )
 
     @classmethod
     def from_dynesty_results(
         cls, model_hash: str, results: Sequence, *, gates_passed: bool | None = None
     ) -> "EvidenceSummary":
+        from ._common import trajectory_rung
+
         results = tuple(results)
         if not results:
             raise ValueError("no dynesty results")
         estimates = tuple(float(r.log_evidence) for r in results)
         errors = tuple(float(r.log_evidence_error) for r in results)
         nlives = {int(r.config.nlive) for r in results}
+        rungs = {trajectory_rung(r.config) for r in results}
         repeat = float(np.std(estimates, ddof=1)) if len(estimates) > 1 else 0.0
         return cls(
             model_hash=str(model_hash),
@@ -198,6 +222,7 @@ class EvidenceSummary:
             information=float(np.mean([r.information for r in results])),
             nlive=nlives.pop() if len(nlives) == 1 else None,
             gates_passed=gates_passed,
+            rung=rungs.pop() if len(rungs) == 1 else None,
         )
 
 
@@ -219,6 +244,8 @@ def merge_alias_evidence(items: Sequence[EvidenceSummary], canonical: str) -> tu
                 consistent = False
     conservative = [item.conservative_error for item in items if item.conservative_error is not None]
     gates = [item.gates_passed for item in items]
+    # an unrecorded rung is unknown, not a second rung
+    rungs = {item.rung for item in items if item.rung is not None}
     merged = EvidenceSummary(
         model_hash=canonical,
         log_evidence=float(np.mean(estimates)),
@@ -228,6 +255,7 @@ def merge_alias_evidence(items: Sequence[EvidenceSummary], canonical: str) -> tu
         information=items[0].information,
         nlive=items[0].nlive if len({item.nlive for item in items}) == 1 else None,
         gates_passed=None if any(g is None for g in gates) else all(gates),
+        rung=rungs.pop() if len(rungs) == 1 else (None if not rungs else "mixed"),
     )
     return merged, {
         "merged": [item.model_hash for item in items],
@@ -295,6 +323,12 @@ class ClaimCriteria:
     gmc_max_c_pp: float = 1.0
     gmc_max_edge_sigma: float = 0.3
     gmc_max_edge_bias: float = 0.3
+    #: a supplied null calibration's ``observed`` statistic must reproduce the
+    #: report's own within ``null_observed_sigmas`` error bars of the edge that
+    #: attains it, plus ``null_observed_atol`` nats (D4 runs the identical F3
+    #: procedure, so the two are the same number up to that noise)
+    null_observed_sigmas: float = 3.0
+    null_observed_atol: float = 0.05
 
     def __post_init__(self) -> None:
         for name in self.__dataclass_fields__:
@@ -363,6 +397,45 @@ def _budget_sigma_mc(mc: Mapping[str, object]) -> float:
     if best < 0.0 and plug_in is not None:
         best = max(best, float(plug_in))
     return math.sqrt(max(best, 0.0))
+
+
+#: search statistic -> the edge quantity it maximizes over
+_STATISTIC_EDGE_KEY = {
+    "max_edge_log_bayes_factor": "log_bayes_factor",
+    "max_edge_log_posterior_odds": "log_posterior_odds",
+}
+
+
+def _canonicalize_edge_map(mapping, canonical: Mapping[str, str]):
+    """Re-key a ``(parent_hash, child_hash)`` map onto canonical model hashes.
+
+    Both spellings are kept so a caller that already supplied canonical keys is
+    unaffected; a graph-hash key that maps onto an alias head becomes reachable.
+    """
+    if mapping is None:
+        return None
+    out = dict(mapping)
+    for (p, c), value in mapping.items():
+        key = (canonical.get(p, p), canonical.get(c, c))
+        out.setdefault(key, value)
+    return out
+
+
+def _null_observed_tolerance(statistic: str, edges: Sequence[Mapping[str, object]], criteria: ClaimCriteria) -> float:
+    """How far a null campaign's ``observed`` may sit from the report's own value.
+
+    D4 computes the calibrated statistic from the identical F3 procedure, so the
+    two numbers differ only by the evidence noise of the edge that attains the
+    maximum: ``null_observed_sigmas * sigma_total`` of that edge plus an absolute
+    floor. Statistics with no edge quantity (e.g. ``T3_any_structure``) get the
+    floor alone.
+    """
+    key = _STATISTIC_EDGE_KEY.get(statistic)
+    sigma = 0.0
+    if key is not None and edges:
+        best = max(edges, key=lambda e: float(e[key]))
+        sigma = float(best.get("sigma_total") or 0.0)
+    return criteria.null_observed_sigmas * sigma + criteria.null_observed_atol
 
 
 def kass_raftery(log_bf: float) -> str:
@@ -484,6 +557,19 @@ def build_model_comparison(
                     resolved[head] = mc_weights[member]
                     break
         mc_weights = resolved
+    # The per-edge inputs are keyed by the hashes of the graph nodes they were
+    # computed on; the claim evaluation works on canonical (alias-merged)
+    # endpoints, so the keys are canonicalized here the same way ``mc_weights``
+    # are. Without this, every edge of an aliased pair reports "missing"/"fail"
+    # for reasons unrelated to the data (the depth-1 production graph has no
+    # aliases; the depth-2 graph has 8 groups covering 22 of its 102 nodes).
+    prior_sensitivity = _canonicalize_edge_map(prior_sensitivity, canonical)
+    stress = _canonicalize_edge_map(stress, canonical)
+
+    # -- fidelity rungs -----------------------------------------------------
+    rungs = {h: merged[h].rung for h in merged}
+    distinct_rungs = sorted({r for r in rungs.values() if r is not None})
+    rung_homogeneous = len(distinct_rungs) <= 1
 
     # -- model priors and point probabilities -------------------------------
     log_prior_all = normalized_log_prior([specs[h] for h in canon_models], root, model_prior)
@@ -659,6 +745,11 @@ def build_model_comparison(
                 nearby=nearby,
                 loo=loo,
                 criteria=crit,
+                search_statistics=search,
+                evaluated_edges=evaluated,
+                evidence_complete=complete,
+                rung_homogeneous=rung_homogeneous,
+                rungs=rungs,
             )
         )
 
@@ -676,6 +767,14 @@ def build_model_comparison(
             "n_effective_models": len(canon_models),
             "n_with_evidence": len(merged),
             "complete": complete,
+            "rungs": {h: rungs[h] for h in sorted(rungs)},
+            "distinct_rungs": distinct_rungs,
+            "rung_homogeneous": rung_homogeneous,
+            "rung_note": None if rung_homogeneous else (
+                "the models were scored at more than one dynesty trajectory configuration; "
+                "D4 computes the calibrated statistic from a single rung (F3), so ln BF, the "
+                "error budget and the search statistic must not mix rungs"
+            ),
             "missing": [h for h in canon_models if h not in merged],
             "note": None if complete else (
                 "posterior model probabilities and structural masses are undefined over the "
@@ -697,6 +796,8 @@ def build_model_comparison(
 def _evaluate_claim(
     row, *, merged, mc_weights, structural, variants, sddr, prior_sensitivity,
     null_calibrations, stress, nearby, loo, criteria: ClaimCriteria,
+    search_statistics=None, evaluated_edges=(), evidence_complete=True,
+    rung_homogeneous=True, rungs=None,
 ):
     p, c = row["parent_hash"], row["child_hash"]
     atom = row["atom"]
@@ -724,9 +825,15 @@ def _evaluate_claim(
                 "G-MC3": w.c_pp() <= criteria.gmc_max_c_pp,
             }
         mc = row.get("mc") or {}
+        # G-MC4 gates the same sigma_MC the error budget uses: when the unbiased
+        # U-statistic lands below zero, EdgeMCError.sigma reports 0 and gating on
+        # it would pass on a value known to be wrong, while sigma_total carries
+        # the (non-negative) plug-in. See _budget_sigma_mc.
+        sigma_mc = None if not mc else _budget_sigma_mc(mc)
         edge_ok = {
-            "G-MC4_sigma": mc.get("sigma"),
-            "G-MC4": mc.get("sigma") is not None and mc["sigma"] <= criteria.gmc_max_edge_sigma,
+            "G-MC4_sigma": sigma_mc,
+            "G-MC4_sigma_u_statistic": mc.get("sigma"),
+            "G-MC4": sigma_mc is not None and sigma_mc <= criteria.gmc_max_edge_sigma,
             "G-MC5_bias": mc.get("bias"),
             "G-MC5": mc.get("bias") is not None and abs(mc["bias"]) <= criteria.gmc_max_edge_bias,
         }
@@ -738,6 +845,17 @@ def _evaluate_claim(
     elif status != "fail":
         status = "missing" if status == "pass" else status
         detail["gmc"] = "Monte-Carlo weights not supplied"
+    # D4 computes the calibrated statistic from one fidelity rung; mixing rungs
+    # across models makes ln BF, the error budget and the search statistic a
+    # mixture of two procedures, so the edge is not a valid numerical comparison.
+    detail["fidelity_rungs"] = None if rungs is None else {"parent": rungs.get(p), "child": rungs.get(c)}
+    detail["rung_homogeneous"] = bool(rung_homogeneous)
+    if not rung_homogeneous:
+        detail["rung_note"] = (
+            "the evidences of this graph come from more than one dynesty trajectory "
+            "configuration (fidelity rung); ln BF and the search statistic mix procedures"
+        )
+        status = "fail"
     out["numerics"] = _criterion(status, **detail)
 
     # 2. strength
@@ -764,6 +882,12 @@ def _evaluate_claim(
     out["strength"] = _criterion(s, **strength)
 
     # 3. prior robustness
+    #
+    # The two sub-checks are kept apart: an absent input is "missing" (the
+    # criterion was not evaluated) and a present value that violates a threshold
+    # is "fail" (it was evaluated and the data did not meet it). Both block a
+    # claim through :func:`_combine`, but reporting a missing input as a
+    # scientific failure misdescribes the report.
     detail = {}
     status = "pass"
     sens = None if prior_sensitivity is None else prior_sensitivity.get((p, c))
@@ -776,17 +900,29 @@ def _evaluate_claim(
         if not values:
             status = "missing"
         elif any(v is None for v in values):
-            status = "incomplete"  # e.g. widened prior with a non-contained posterior
+            # a widened prior whose posterior is not contained, or a narrowing
+            # whose reweighting ESS was too small to trust: not evaluated
+            status = "incomplete"
         if any(v is not None and (v < criteria.robustness_min_log_bf or np.sign(v) != np.sign(lnbf)) for v in values):
             status = "fail"
     masses = []
+    missing_mass = False
     for variant in variants:
         m = variant["atoms"].get(atom, {}).get("posterior_mass")
         masses.append({"penalty_per_axis": variant["penalty_per_axis"], "posterior_mass": m})
-        if m is None or m < criteria.robustness_min_posterior_mass:
+        if m is None:
+            # the atom carries no structural mass in this variant (e.g. a
+            # ``not:`` removal label, which structural_masses never keys): the
+            # check could not be made, it did not fail
+            missing_mass = True
+        elif m < criteria.robustness_min_posterior_mass:
             status = "fail"
     if not variants:
         status = "missing" if status == "pass" else status
+    elif missing_mass:
+        detail["model_prior_variants_note"] = f"atom {atom!r} carries no structural mass in the variants"
+        if status == "pass":
+            status = "missing"
     detail["model_prior_variants"] = masses
     out["prior_robustness"] = _criterion(status, **detail)
 
@@ -801,24 +937,89 @@ def _evaluate_claim(
         out["sddr"] = _criterion("missing", reason="no SDDR cross-check supplied")
     else:
         st = check.get("status")
+        # ``not_estimable`` is a *method* failure of an SDDR-eligible edge (the
+        # VW factor's support condition fails, too few posterior draws near the
+        # null, or the density is not estimable with no NS bound to compare) --
+        # not "this edge has no SDDR route". Scoring it ``not_applicable`` would
+        # let an eligible edge be claimed with no cross-check at all, which
+        # ``mass.family.pl_two_peak`` (vw_required, vw_first_form_valid false)
+        # hits deterministically on the production graph. Only an edge the
+        # grammar classifies ``evidence_only`` is genuinely not applicable.
+        eligible = check.get("classification") in {"exact", "approximate"}
         mapping = {"agree": "pass", "bound_consistent": "pass", "disagree": "fail",
-                   "bound_violated": "fail", "not_applicable": "not_applicable",
-                   "not_estimable": "not_applicable", "computed": "incomplete"}
-        out["sddr"] = _criterion(mapping.get(st, "missing"), check_status=st,
-                                 classification=check.get("classification"))
+                   "bound_violated": "fail", "computed": "incomplete"}
+        if st in {"not_applicable", "not_estimable"}:
+            sddr_status = "missing" if eligible else "not_applicable"
+        else:
+            sddr_status = mapping.get(st, "missing")
+        sddr_detail: dict[str, object] = {
+            "check_status": st,
+            "classification": check.get("classification"),
+        }
+        reason = check.get("reason") or (check.get("details") or {}).get("reason")
+        if reason is not None:
+            sddr_detail["reason"] = reason
+        if sddr_status == "missing" and st in {"not_applicable", "not_estimable"}:
+            sddr_detail["note"] = (
+                "SDDR-eligible edge whose cross-check could not be computed: the edge has no "
+                "independent confirmation and rests on the evidence route alone"
+            )
+        if "method_systematic" in check:
+            # how wide the agreement band was, and where that width came from:
+            # "formula8" (the bare test), "supplied" or "measured" (the post-hoc
+            # floor of SDDR_METHOD_SYSTEMATIC, which is not a validated systematic)
+            sddr_detail["method_systematic"] = check.get("method_systematic")
+            sddr_detail["method_systematic_source"] = check.get("method_systematic_source")
+        for key in ("difference", "tolerance", "log_bf_child_over_parent_sddr",
+                    "log_bf_child_over_parent_ns"):
+            if key in check:
+                sddr_detail[key] = check.get(key)
+        out["sddr"] = _criterion(sddr_status, **sddr_detail)
 
     # 5. search-level null calibration
+    #
+    # D4 computes the calibrated statistic from the identical F3 procedure, so a
+    # supplied calibration must describe *this* report: its statistic has to be
+    # one the report computes and its observed value has to agree with the
+    # report's own. Otherwise a stale campaign, one calibrated for a different
+    # statistic, or one run on a different graph satisfies the criterion in
+    # silence.
     if not null_calibrations:
         out["null_calibration"] = _criterion("missing", reason="no null replays supplied")
     else:
         rows, status = [], "pass"
+        stats = dict(search_statistics or {})
         for null in null_calibrations:
             limited = null.resolution > criteria.alpha
             ok = null.p_value <= criteria.alpha
-            rows.append({**null.to_dict(), "resolution_limited": limited, "at_resolution_floor": null.exceedances == 0, "passed": ok and not limited})
-            if limited or not ok:
+            computed = stats.get(null.statistic)
+            tol = None if computed is None else _null_observed_tolerance(
+                null.statistic, evaluated_edges, criteria
+            )
+            matches = None if computed is None else bool(abs(null.observed - float(computed)) <= tol)
+            rows.append({
+                **null.to_dict(),
+                "resolution_limited": limited,
+                "at_resolution_floor": null.exceedances == 0,
+                "report_statistic": computed,
+                "observed_tolerance": tol,
+                "matches_report_statistic": matches,
+                "passed": bool(ok and not limited and matches),
+            })
+            if limited or not ok or matches is False:
                 status = "fail"
-        out["null_calibration"] = _criterion(status, alpha=criteria.alpha, nulls=rows)
+            elif matches is None and status == "pass":
+                # the report does not compute this statistic, so the calibration
+                # cannot be tied to it
+                status = "missing"
+        if status == "pass" and not evidence_complete:
+            # the observed statistic is a max over the subset of edges that have
+            # evidence, not over the graph the nulls were calibrated on
+            status = "incomplete"
+        out["null_calibration"] = _criterion(
+            status, alpha=criteria.alpha, nulls=rows,
+            evidence_coverage_complete=bool(evidence_complete),
+        )
 
     # 6. stress / LOO / nearby
     detail, status = {}, "pass"
@@ -826,8 +1027,11 @@ def _evaluate_claim(
     near = None if nearby is None else nearby.get(row["mutation_id"])
     loo_edge = None
     if loo is not None:
+        # a PSIS-LOO report keys its edges by the graph's hashes, like the
+        # prior-sensitivity and stress inputs; accept either spelling
+        keys = {(p, c), (row["graph_parent_hash"], row["graph_child_hash"])}
         for e in loo.get("edges", []):
-            if e.get("parent_hash") == p and e.get("child_hash") == c:
+            if (e.get("parent_hash"), e.get("child_hash")) in keys:
                 loo_edge = e
     if stressed is None and near is None and loo_edge is None:
         status = "missing"
@@ -911,6 +1115,10 @@ def render_markdown(report: Mapping[str, object], *, labels: Mapping[str, str] |
         f"alias groups: {len(dedup['alias_groups'])})",
         f"- Evidence coverage: {cov['n_with_evidence']}/{cov['n_effective_models']}"
         + ("" if cov["complete"] else " (incomplete: model probabilities undefined)"),
+        "- Fidelity rung: "
+        + (f"`{cov['distinct_rungs'][0]}`" if cov.get("distinct_rungs") else "not recorded")
+        + ("" if cov.get("rung_homogeneous", True) else
+           f" — **MIXED across models**: {cov['distinct_rungs']}"),
         f"- NS error mode: `{report['config']['ns_error_mode']}`",
         "",
         "## Models",
@@ -977,10 +1185,24 @@ def render_markdown(report: Mapping[str, object], *, labels: Mapping[str, str] |
         f"- max edge ln posterior odds: {_fmt(search.get('max_edge_log_posterior_odds'))}",
         f"- T3 (any structure vs root, prior-odds corrected): {_fmt(search.get('T3_any_structure'))}",
     ]
+    # whether each supplied calibration describes this report (criterion 5)
+    checked = {}
+    for claim in report["claims"]:
+        for entry in (claim["criteria"]["null_calibration"].get("nulls") or []):
+            checked[(entry["label"], entry["statistic"])] = entry
     for null in report.get("null_calibrations") or []:
+        entry = checked.get((null["label"], null["statistic"]), {})
+        matches = entry.get("matches_report_statistic")
+        if matches is None:
+            note = " — statistic not computed by this report"
+        elif matches:
+            note = ""
+        else:
+            note = (f" — **observed {_fmt(null['observed'])} does not match this report's "
+                    f"{_fmt(entry.get('report_statistic'))}**")
         lines.append(
             f"- null `{null['label']}` ({null['statistic']}): p = {null['p_value']:.4g} "
-            f"({null['exceedances']}/{null['replays']}; resolution {null['resolution']:.4g})"
+            f"({null['exceedances']}/{null['replays']}; resolution {null['resolution']:.4g}){note}"
         )
     return "\n".join(lines) + "\n"
 

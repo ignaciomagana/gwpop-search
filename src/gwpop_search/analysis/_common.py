@@ -523,17 +523,49 @@ def iter_result_paths(paths: Iterable[str | Path]) -> list[Path]:
     return unique
 
 
+#: ``DynestyConfig`` fields that do not define the fidelity rung: the proposal
+#: may differ between repeats; the rung is nlive / dlogz / bound / the caps.
+_NON_RUNG_FIELDS = ("sample", "slices", "walks", "batch_size")
+
+
+def trajectory_configuration(config) -> dict:
+    """``DynestyConfig.identity_dict()`` without the proposal fields (the rung)."""
+    payload = dict(config.identity_dict())
+    for name in _NON_RUNG_FIELDS:
+        payload.pop(name, None)
+    return payload
+
+
+def rung_name(payload: Mapping[str, object]) -> str:
+    """A short, stable name for a trajectory configuration (see :func:`trajectory_rung`)."""
+    return ",".join(f"{key}={payload[key]}" for key in sorted(payload))
+
+
+def trajectory_rung(config) -> str:
+    """A short, stable name for a dynesty run's fidelity rung.
+
+    Two runs share a rung when this string matches: same live points, stopping
+    criterion, bound and iteration/call caps. It names exactly what F3 and F4
+    differ in (D3), so a report can state which rung its evidences came from and
+    refuse to mix them.
+    """
+    return rung_name(trajectory_configuration(config))
+
+
 def discover_dynesty_results(
     paths: Iterable[str | Path],
     *,
     model_hashes: Iterable[str] | None = None,
+    allow_mixed_rungs: bool = False,
 ) -> dict[str, list]:
     """Load saved dynesty results and group them by model hash.
 
-    The model hash is read from each result's likelihood identity. All
-    repeats of one model must share one trajectory configuration apart from
-    the seed (``DynestyConfig.identity_dict()``); mixing rungs (e.g. F3 and F4
-    runs of the same model) is refused so the caller must choose explicitly.
+    The model hash is read from each result's likelihood identity. All repeats
+    of one model must share one trajectory configuration apart from the seed and
+    the proposal (:func:`trajectory_configuration`), **and so must the models**:
+    mixing rungs (F3 runs of some models with F4 runs of others) makes ``ln BF``,
+    the error budget and the D4 search statistic a mixture of two procedures, so
+    it is refused unless ``allow_mixed_rungs`` says otherwise.
     """
     from gwpop_search.inference.dynesty_backend import load_dynesty_result
 
@@ -547,10 +579,7 @@ def discover_dynesty_results(
             raise AnalysisInputError(f"{path} records no model hash in its likelihood identity")
         if wanted is not None and model_hash not in wanted:
             continue
-        config = result.config.identity_dict()
-        # heterogeneous-sampler repeats are allowed; the rung is defined by the rest
-        for name in ("sample", "slices", "walks", "batch_size"):
-            config.pop(name, None)
+        config = trajectory_configuration(result.config)
         if model_hash in configs and configs[model_hash] != config:
             raise AnalysisInputError(
                 f"results for model {model_hash[:16]} use different dynesty configurations "
@@ -562,6 +591,17 @@ def discover_dynesty_results(
         missing = sorted(wanted - set(grouped))
         if missing:
             raise FileNotFoundError(f"no dynesty results found for model hash(es) {missing}")
+    rungs = {h: rung_name(configs[h]) for h in grouped}
+    if not allow_mixed_rungs and len(set(rungs.values())) > 1:
+        by_rung: dict[str, list[str]] = {}
+        for model_hash, rung in sorted(rungs.items()):
+            by_rung.setdefault(rung, []).append(model_hash[:16])
+        listing = "; ".join(f"[{rung}] {models}" for rung, models in sorted(by_rung.items()))
+        raise AnalysisInputError(
+            "the supplied results mix dynesty trajectory configurations across models "
+            f"({listing}); ln BF, the error budget and the D4 search statistic must come from "
+            "one fidelity rung -- pass the runs of one rung, or allow_mixed_rungs=True"
+        )
     for model_hash, items in grouped.items():
         seeds = [item.seed for item in items]
         if len(set(seeds)) != len(seeds):

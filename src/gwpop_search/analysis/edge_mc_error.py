@@ -325,6 +325,17 @@ def compute_model_mc_weights(
         )
     if catalog is None:
         catalog = pad_catalog(posterior, selection, population_model, hbi_config=hbi_config)
+    elif bool(catalog.raw_selection_use_observing_time) != bool(hbi_config.raw_selection_use_observing_time):
+        # the identity check above cannot catch this: the mismatch is in the
+        # supplied catalog, whose sel_log_factor carries (or omits) the
+        # per-campaign log(T_k / N_k) that the selection weights are built from
+        raise AnalysisInputError(
+            f"MC weights of {label or 'model'}: the supplied catalog was padded with "
+            f"raw_selection_use_observing_time={catalog.raw_selection_use_observing_time} but the "
+            f"sampled likelihood used {hbi_config.raw_selection_use_observing_time}; the "
+            "self-normalized selection weights, C_PP and sigma_A^2 would come from a "
+            "different estimator than the one that was sampled"
+        )
     evaluator = CatalogWeightEvaluator(
         catalog, population_model, sample.names, batch_size=batch_size, backend=backend
     )
@@ -630,6 +641,13 @@ def bootstrap_edge_mc_error(
     cat_a, cat_b = catalogs
     if (cat_a.n_max, cat_a.m_pad) != (cat_b.n_max, cat_b.m_pad):
         raise AnalysisInputError("the two models' catalog layouts differ")
+    for cat, label in ((cat_a, labels[0]), (cat_b, labels[1])):
+        if bool(cat.raw_selection_use_observing_time) != bool(hbi_config.raw_selection_use_observing_time):
+            raise AnalysisInputError(
+                f"bootstrap of {label}: the supplied catalog was padded with "
+                f"raw_selection_use_observing_time={cat.raw_selection_use_observing_time} but the "
+                f"sampled likelihood used {hbi_config.raw_selection_use_observing_time}"
+            )
     counts_e, counts_s = bootstrap_counts(cat_a, n_replicates, seed)
     shifts = []
     for sample, model, cat, label in (

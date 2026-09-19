@@ -136,3 +136,112 @@ def test_analysis_commands_run_end_to_end_on_saved_results(tiny_campaign):
     assert claim["status"] in {"not_claimed", "incomplete"}
     assert claim["criteria"]["null_calibration"]["status"] == "fail"  # p = 0.04 > 0.01
     assert "# Model comparison" in (root / "report.md").read_text()
+
+
+# ---------------------------------------------------------------------------
+# Review findings, at the CLI boundary
+# ---------------------------------------------------------------------------
+
+
+def test_edge_mc_error_pads_the_catalog_with_the_sampled_hbi_configuration(tiny_campaign, tmp_path, monkeypatch):
+    """The catalog must carry the run's HBI config, not the module default.
+
+    ``raw_selection_use_observing_time`` sets the per-campaign log(T_k / N_k) in
+    ``sel_log_factor``, so a catalog padded with ``HBIConfig()`` would build the
+    selection weights -- and therefore C_PP, sigma_A^2 and the edge sigma_MC --
+    from a different estimator than the one that was sampled. The likelihood
+    identity check cannot see it: the mismatch is in the catalog.
+    """
+    from gwpop_search.analysis import terms as terms_module
+    from gwpop_search.analysis._common import hbi_config_from_identity
+
+    root, pe_path, sel_path, graph_path, parent, child = tiny_campaign
+    seen = []
+    real = terms_module.pad_catalog
+
+    def recording(posterior, selection, model, *, hbi_config=None, **kwargs):
+        seen.append(hbi_config)
+        return real(posterior, selection, model, hbi_config=hbi_config, **kwargs)
+
+    monkeypatch.setattr(terms_module, "pad_catalog", recording)
+    _run_cli(["analyze-edge-mc-error", "--pe", str(pe_path), "--selection", str(sel_path),
+              "--graph", str(graph_path), "--results", str(root / "runs"), "--n-draws", "50",
+              "--output-dir", str(tmp_path / "mc")])
+    assert seen and all(cfg is not None for cfg in seen)
+
+    from gwpop_search.analysis._common import discover_dynesty_results
+
+    grouped = discover_dynesty_results([root / "runs"])
+    expected = {
+        hbi_config_from_identity(results[0].likelihood_identity).raw_selection_use_observing_time
+        for results in grouped.values()
+    }
+    assert {cfg.raw_selection_use_observing_time for cfg in seen} == expected
+    assert all(cfg.selection_chunk_size is None for cfg in seen)  # decision D5
+
+
+def test_results_that_mix_fidelity_rungs_across_models_are_refused(tiny_campaign, tmp_path):
+    """One rung per report: D4's statistic must not mix F3 and F4 evidences."""
+    from gwpop_search.analysis._common import (
+        AnalysisInputError,
+        discover_dynesty_results,
+        trajectory_rung,
+    )
+
+    root, pe_path, sel_path, graph_path, parent, child = tiny_campaign
+    from gwpop_search.data import PosteriorCatalog, SelectionCatalog
+
+    posterior = PosteriorCatalog.from_hdf5(pe_path)
+    selection = SelectionCatalog.from_hdf5(sel_path)
+    other_rung = DynestyConfig(nlive=60, sample="rslice", batch_size=16, maxiter=120,
+                               num_posterior_samples=300)
+    mixed = tmp_path / "mixed"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        run_dynesty_population(
+            posterior, selection, compile_model_spec(child), prior_specs_from_model_spec(child),
+            seed=1, config=other_rung, hbi_config=HBIConfig(selection_chunk_size=None),
+            run_dir=mixed / child.model_hash / "repeat_001",
+        )
+    # one rung: fine
+    grouped = discover_dynesty_results([root / "runs"])
+    rungs = {trajectory_rung(r.config) for results in grouped.values() for r in results}
+    assert len(rungs) == 1
+
+    with pytest.raises(AnalysisInputError, match="mix dynesty trajectory configurations"):
+        discover_dynesty_results([root / "runs" / parent.model_hash, mixed])
+    # the caller can still say so explicitly
+    both = discover_dynesty_results([root / "runs" / parent.model_hash, mixed], allow_mixed_rungs=True)
+    assert set(both) == {parent.model_hash, child.model_hash}
+    assert len({trajectory_rung(r.config) for rs in both.values() for r in rs}) == 2
+
+
+def test_analyze_sddr_does_not_inherit_the_measured_method_systematic(tiny_campaign, tmp_path):
+    """A production run must ask for the post-hoc floor by name."""
+    root, pe_path, sel_path, graph_path, parent, child = tiny_campaign
+    common = ["--graph", str(graph_path), "--results", str(root / "runs")]
+
+    out = tmp_path / "sddr_default.json"
+    _run_cli(["analyze-sddr", *common, "--n-bootstrap", "10", "--output", str(out)])
+    row = json.loads(out.read_text())["edges"][0]
+    assert row["method_systematic"] == 0.0
+    assert row["method_systematic_source"] == "formula8"
+
+    out = tmp_path / "sddr_measured.json"
+    _run_cli(["analyze-sddr", *common, "--n-bootstrap", "10", "--method-systematic", "measured",
+              "--output", str(out)])
+    measured = json.loads(out.read_text())["edges"][0]
+    assert measured["method_systematic"] == pytest.approx(0.10)  # interior null
+    assert measured["method_systematic_source"] == "measured"
+    if row["tolerance"] is not None:
+        assert measured["tolerance"] == pytest.approx(row["tolerance"] + 0.10)
+
+    parser = build_parser()
+    args = parser.parse_args(["analyze-sddr", "--graph", "g", "--results", "r", "--output", "o"])
+    assert args.method_systematic is None  # resolved to the bare formula (8)
+    args = parser.parse_args(["analyze-sddr", "--graph", "g", "--results", "r", "--output", "o",
+                              "--method-systematic", "measured"])
+    assert args.method_systematic == "measured"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["analyze-sddr", "--graph", "g", "--results", "r", "--output", "o",
+                           "--method-systematic", "post-hoc"])

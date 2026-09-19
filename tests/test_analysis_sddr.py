@@ -154,15 +154,16 @@ def test_boundary_estimators_bias_ranking(truth, sampler, zero_gradient):
         assert abs(bias["linear"]) < abs(bias["reflection"]), bias
 
 
-def test_method_systematic_widens_the_band_by_null_geometry_and_keeps_the_difference():
-    """The SDDR/NS band carries a measured floor; the signed difference stays visible.
+def test_method_systematic_is_opt_in_and_the_default_is_the_bare_formula_8():
+    """The measured floor must be asked for by name, never inherited by default.
 
-    Measured on the dynesty toys (validation/analysis_estimators/sddr_validation.json):
-    interior nulls agree to +0.035 +- 0.014 nats, but boundary nulls sit at
-    -0.160 +- 0.021 and boundary+VW at -0.285 +- 0.061, because nested sampling
-    biases ln Z on the peak-mixture geometry whose peak location is unidentified
-    at the null. That offset is a property of the two estimators, not of either
-    error bar, so it belongs in the tolerance rather than in a failed cross-check.
+    SDDR_METHOD_SYSTEMATIC (0.10/0.25/0.40) is the measured maximum of
+    validation/analysis_estimators/sddr_validation.json -- the same 18 cases the
+    agreement test judges, n = 9/6/3, at nlive 500 (below F3's 1000 and well
+    below F4's 2000). A tolerance fitted to the disagreements it exists to
+    detect is not a validated systematic, so a production ``analyze-sddr`` run
+    must not inherit it: the default is formula (8) alone and any opt-in is
+    recorded in ``method_systematic_source``.
     """
     interior = EdgeNesting("s", "l", "m", "exact", "child", (NullEmbedding("mu", 0.0, "interior"),))
     at_bound = EdgeNesting("s", "l", "m", "exact", "child", (NullEmbedding("f", 0.0, "lower"),))
@@ -185,10 +186,23 @@ def test_method_systematic_widens_the_band_by_null_geometry_and_keeps_the_differ
     priors = {"mu": PriorSpec("uniform", low=-2.0, high=2.0)}
     bare = sddr_edge_check(interior, sample, priors, {}, log_bf_ns=0.0, sigma_ns=0.02,
                            n_bootstrap=40, method_systematic=0.0)
-    wide = sddr_edge_check(interior, sample, priors, {}, log_bf_ns=0.0, sigma_ns=0.02, n_bootstrap=40)
-    assert wide.tolerance == pytest.approx(bare.tolerance + SDDR_METHOD_SYSTEMATIC["interior"])
-    assert wide.method_systematic == SDDR_METHOD_SYSTEMATIC["interior"]
+    default = sddr_edge_check(interior, sample, priors, {}, log_bf_ns=0.0, sigma_ns=0.02, n_bootstrap=40)
+    wide = sddr_edge_check(interior, sample, priors, {}, log_bf_ns=0.0, sigma_ns=0.02,
+                           n_bootstrap=40, method_systematic="measured")
+    # the default (and an explicit None) is the bare formula (8)
+    assert default.method_systematic == 0.0
+    assert default.method_systematic_source == "formula8"
+    assert default.tolerance == pytest.approx(bare.tolerance)
     assert bare.method_systematic == 0.0
+    assert bare.method_systematic_source == "supplied"
+    # the measured floor appears only when it is named
+    assert wide.method_systematic == SDDR_METHOD_SYSTEMATIC["interior"]
+    assert wide.method_systematic_source == "measured"
+    assert wide.tolerance == pytest.approx(bare.tolerance + SDDR_METHOD_SYSTEMATIC["interior"])
+    assert wide.to_dict()["method_systematic_source"] == "measured"
+    with pytest.raises(ValueError):
+        sddr_edge_check(interior, sample, priors, {}, log_bf_ns=0.0, sigma_ns=0.02,
+                        n_bootstrap=40, method_systematic="calibrated")
     # the floor only moves the verdict; the signed difference is identical and reported
     assert wide.difference == pytest.approx(bare.difference)
     assert wide.to_dict()["difference"] == pytest.approx(bare.difference)

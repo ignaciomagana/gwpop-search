@@ -122,3 +122,94 @@ def test_model_prior_variants_normalize_and_report_structural_masses():
     assert uniform.atoms[atom]["posterior_mass"] == pytest.approx(uniform.posterior[child])
     penalized = variants[2]
     assert penalized.prior[child] == pytest.approx(0.25 / (1 + 14 * 0.25))
+
+
+# ---------------------------------------------------------------------------
+# Review findings: a narrowed prior must not hand a claim an unchecked number
+# ---------------------------------------------------------------------------
+
+
+def test_narrowed_reweighting_refuses_below_a_declared_ess():
+    """A shift from a handful of effective draws is not a prior-robustness result.
+
+    With ``peak_fraction ~ U(0, 0.5)`` halved about its centre (the old
+    behaviour) and a posterior piled up near 0, a single surviving draw of 4096
+    returns a confident-looking multi-nat shift, and neighbouring seeds return
+    nothing at all. Criterion 3 then fails an edge on it.
+    """
+    old = PriorSpec("uniform", low=0.0, high=0.5)
+    new = rescaled_prior(old, 0.5)  # U(0.125, 0.375): the centre-anchored variant
+    assert (new.low, new.high) == pytest.approx((0.125, 0.375))
+    rng = np.random.default_rng(2)
+    values = np.clip(rng.lognormal(mean=math.log(0.038), sigma=0.35, size=4096), 1e-9, 0.5)
+    sample = posterior_from_equal_weight_draws(("peak_fraction",), values[:, None])
+
+    refused = prior_reweighting(sample, "peak_fraction", old, new)
+    assert refused["reweighting_ess"] < 50.0
+    assert refused["delta_log_evidence"] is None
+    assert refused["flag"] == "low_reweighting_ess"
+    # the raw value is kept so the refusal can be inspected, and it is large
+    assert abs(refused["delta_log_evidence_unreliable"]) > 3.0
+
+    # the same call with the threshold lowered reports the (untrustworthy) number
+    allowed = prior_reweighting(sample, "peak_fraction", old, new, min_ess=0.0)
+    assert allowed["delta_log_evidence"] == pytest.approx(refused["delta_log_evidence_unreliable"])
+    assert allowed["flag"] is None
+
+    # a well-supported narrowing is unaffected
+    good = _truncated_normal_posterior(0.3, 0.2, -2.0, 2.0, 20000, seed=1)
+    out = prior_reweighting(good, "x", PriorSpec("uniform", low=-2.0, high=2.0),
+                            PriorSpec("uniform", low=-1.0, high=1.0))
+    assert out["flag"] is None and out["delta_log_evidence"] is not None
+    assert out["reweighting_ess"] >= 50.0
+
+
+def test_a_null_at_a_prior_bound_is_narrowed_about_that_bound():
+    """Halving a mixture-fraction prior about its centre deletes the tested null."""
+    from gwpop_search.analysis.prior_sensitivity import null_anchors
+
+    prior = PriorSpec("uniform", low=0.0, high=0.5)
+    anchored = rescaled_prior(prior, 0.5, anchor="low")
+    assert (anchored.low, anchored.high) == pytest.approx((0.0, 0.25))
+    upper = rescaled_prior(prior, 0.5, anchor="high")
+    assert (upper.low, upper.high) == pytest.approx((0.25, 0.5))
+    lu = rescaled_prior(PriorSpec("log_uniform", low=0.03, high=0.5), 0.5, anchor="low")
+    assert lu.low == pytest.approx(0.03)
+    assert math.log(lu.high / lu.low) == pytest.approx(0.5 * math.log(0.5 / 0.03))
+    with pytest.raises(ValueError, match="anchor"):
+        rescaled_prior(prior, 0.5, anchor="centre")
+
+    parent = baseline_model_spec("gwtc5-v1")
+    removed = apply_mutation(parent, MUT["mass.family.powerlaw"])
+    # the edge's null is peak_fraction = 0, at the prior's lower bound
+    assert null_anchors(parent, removed) == {"peak_fraction": "lower"}
+
+    peak = _fake_posterior(parent, {"peak_fraction": (0.02, 0.02), "peak_mu": (34.0, 2.0)}, seed=4)
+    out = edge_prior_sensitivity(parent, removed, peak, _fake_posterior(removed, {}, seed=5),
+                                 log_bayes_factor=-3.0)
+    rows = {r["parameter"]: r for r in out["parameters"]}
+    fraction = rows["peak_fraction"]
+    assert fraction["null_at_prior_bound"] == "lower" and fraction["narrow_anchor"] == "low"
+    narrowed = fraction["narrowed"]["new_prior"]
+    # the null f = 0 is still in the narrowed prior, and the estimate is usable
+    assert narrowed["low"] == pytest.approx(0.0) and narrowed["high"] == pytest.approx(0.25)
+    assert fraction["narrowed"]["flag"] is None
+    assert fraction["delta_log_bayes_factor_narrowed"] is not None
+    # a parameter with no null at a bound keeps the centred rescaling
+    assert rows["peak_mu"]["narrow_anchor"] is None
+    centre = parent.priors["peak_mu"].parameters
+    wide = rows["peak_mu"]["narrowed"]["new_prior"]
+    assert wide["low"] + wide["high"] == pytest.approx(centre["low"] + centre["high"])
+
+
+def test_low_ess_variants_are_reported_as_absent_not_as_a_number():
+    """``edge_prior_sensitivity`` passes the refusal through to the variants."""
+    parent = baseline_model_spec("gwtc5-v1")
+    removed = apply_mutation(parent, MUT["mass.family.powerlaw"])
+    peak = _fake_posterior(parent, {"peak_fraction": (0.02, 0.02)}, seed=6)
+    out = edge_prior_sensitivity(parent, removed, peak, _fake_posterior(removed, {}, seed=7),
+                                 log_bayes_factor=-3.0, min_reweighting_ess=1e9)
+    narrowed = [v for v in out["variants"] if v["variant"] == "narrowed"]
+    assert narrowed and all(v["log_bayes_factor"] is None for v in narrowed)
+    assert all(v["flag"] == "low_reweighting_ess" for v in narrowed)
+    assert all(v["reweighting_ess"] is not None for v in narrowed)

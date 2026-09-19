@@ -372,3 +372,52 @@ def test_bootstrap_likelihoods_match_numpy_and_do_not_depend_on_chunking():
     np.testing.assert_allclose(ones, loglike(POINTS), rtol=0, atol=1e-11)
     with pytest.raises(ValueError, match="multiplicities"):
         fast.bootstrap(POINTS, counts_e + 0.5, counts_s)
+
+
+# ---------------------------------------------------------------------------
+# Review finding: the catalog must be padded with the sampled HBI configuration
+# ---------------------------------------------------------------------------
+
+
+def test_selection_weights_depend_on_the_hbi_configuration_of_the_catalog():
+    """A catalog padded with the wrong HBI config silently changes sigma_MC.
+
+    ``raw_selection_use_observing_time`` sets the per-campaign log(T_k / N_k)
+    in ``sel_log_factor``, hence the self-normalized selection weights that
+    C_PP, E[sigma_A^2] and the edge sigma_MC are built from. The likelihood
+    identity check cannot see the mismatch, because it is in the catalog and
+    not in the config used for the identity.
+    """
+    pe, sel = make_toy_posterior_catalog(), make_toy_selection_catalog()
+    model = ToyDensity()
+    with_time = HBIConfig(selection_chunk_size=None, raw_selection_use_observing_time=True)
+    without = HBIConfig(selection_chunk_size=None, raw_selection_use_observing_time=False)
+    cat_time = pad_catalog(pe, sel, model, hbi_config=with_time)
+    cat_plain = pad_catalog(pe, sel, model, hbi_config=without)
+    assert cat_time.raw_selection_use_observing_time is True
+    assert cat_plain.raw_selection_use_observing_time is False
+    assert not np.allclose(cat_time.sel_log_factor, cat_plain.sel_log_factor)
+
+    rng = np.random.default_rng(3)
+    X = np.column_stack([rng.uniform(-1, 1, 6), rng.uniform(-1, 1, 6), rng.uniform(60, 100, 6)])
+    W = rng.dirichlet(np.ones(6))
+    ident = identity_for(pe, sel, model, NAMES, without)
+    sample = WeightedPosterior(NAMES, X, W, np.zeros(6, int), 1, "test", ident)
+
+    right = compute_model_mc_weights(sample, pe, sel, model, label="m", catalog=cat_plain)
+    # the quantities the edge error budget is built from move materially
+    derived = compute_model_mc_weights(sample, pe, sel, model, label="m")
+    assert derived.c_pp() == pytest.approx(right.c_pp())
+    assert derived.min_selection_ess == pytest.approx(right.min_selection_ess)
+
+    # the wrong catalog is refused rather than silently producing other numbers
+    with pytest.raises(AnalysisInputError, match="raw_selection_use_observing_time"):
+        compute_model_mc_weights(sample, pe, sel, model, label="m", catalog=cat_time)
+    with pytest.raises(AnalysisInputError, match="raw_selection_use_observing_time"):
+        bootstrap_edge_mc_error(sample, sample, pe, sel, model, model, n_replicates=2,
+                                min_ess=1.0, catalogs=(cat_time, cat_time))
+
+    # and they really would have been different numbers
+    wrong = compute_model_mc_weights(sample, pe, sel, model, label="m", catalog=cat_time,
+                                     hbi_config=with_time, verify_identity=False)
+    assert wrong.c_pp() != pytest.approx(right.c_pp(), rel=1e-3)

@@ -31,6 +31,8 @@ _EXPORTS = {
     "AnalysisInputError": "._common",
     "WeightedPosterior": "._common",
     "discover_dynesty_results": "._common",
+    "trajectory_configuration": "._common",
+    "trajectory_rung": "._common",
     "pool_dynesty_results": "._common",
     "require_same_data": "._common",
     # terms
@@ -50,7 +52,9 @@ _EXPORTS = {
     "mc_covariance_matrix": ".edge_mc_error",
     "save_model_mc_weights": ".edge_mc_error",
     # prior sensitivity
+    "MIN_REWEIGHTING_ESS": ".prior_sensitivity",
     "edge_prior_sensitivity": ".prior_sensitivity",
+    "null_anchors": ".prior_sensitivity",
     "model_prior_variants": ".prior_sensitivity",
     "occam_widening": ".prior_sensitivity",
     "prior_reweighting": ".prior_sensitivity",

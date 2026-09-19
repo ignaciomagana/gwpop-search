@@ -43,6 +43,19 @@ def _float_list(text: str) -> list[float]:
     return out
 
 
+def _method_systematic(text: str):
+    """``--method-systematic``: a number of nats, or the literal ``measured``."""
+    value = str(text).strip()
+    if value == "measured":
+        return value
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"expected a number of nats or 'measured'; got {text!r}"
+        ) from exc
+
+
 def _add_data_arguments(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("data (a production freeze or canonical HDF5 files)")
     group.add_argument("--manifest", help="frozen dataset manifest (production)")
@@ -63,6 +76,13 @@ def _add_results_arguments(parser: argparse.ArgumentParser, *, required: bool = 
         "--model-hash",
         action="append",
         help="restrict to these model hashes (default: every model with results)",
+    )
+    parser.add_argument(
+        "--allow-mixed-rungs",
+        action="store_true",
+        help="accept results scored at more than one dynesty trajectory configuration "
+        "(F3 and F4). Off by default: D4's calibrated statistic, ln BF and the error "
+        "budget must come from one fidelity rung.",
     )
 
 
@@ -87,7 +107,10 @@ def _load_graph_and_results(args):
     from ._common import discover_dynesty_results
 
     graph = load_model_graph(Path(args.graph))
-    grouped = discover_dynesty_results(args.results or [], model_hashes=args.model_hash)
+    grouped = discover_dynesty_results(
+        args.results or [], model_hashes=args.model_hash,
+        allow_mixed_rungs=bool(getattr(args, "allow_mixed_rungs", False)),
+    )
     unknown = sorted(set(grouped) - set(graph.by_hash))
     if unknown:
         raise ValueError(f"results for model hashes that are not graph nodes: {unknown}")
@@ -145,6 +168,7 @@ def _analyze_edge_mc_error(args) -> None:
         mc_covariance_matrix,
         save_model_mc_weights,
     )
+    from ._common import hbi_config_from_identity
     from .terms import pad_catalog
 
     posterior, selection = _load_data(args)
@@ -157,7 +181,14 @@ def _analyze_edge_mc_error(args) -> None:
         samples[model_hash] = pool_dynesty_results(
             results, n_draws=None if args.all_points else args.n_draws, seed=args.seed
         )
-        catalogs[model_hash] = pad_catalog(posterior, selection, models[model_hash])
+        # the catalog must be laid out with the HBI configuration the run was
+        # sampled under: raw_selection_use_observing_time changes the per-campaign
+        # log(T_k / N_k) factors, hence the self-normalized selection weights that
+        # C_PP, sigma_A^2 and the edge sigma_MC are built from
+        catalogs[model_hash] = pad_catalog(
+            posterior, selection, models[model_hash],
+            hbi_config=hbi_config_from_identity(samples[model_hash].likelihood_identity),
+        )
         weights[model_hash] = compute_model_mc_weights(
             samples[model_hash], posterior, selection, models[model_hash], label=model_hash,
             batch_size=args.batch_size, catalog=catalogs[model_hash],
@@ -205,9 +236,15 @@ def _analyze_edge_mc_error(args) -> None:
 def _analyze_prior_sensitivity(args) -> None:
     from ._common import pool_dynesty_results
     from .model_comparison import evidence_summaries_from_results
-    from .prior_sensitivity import edge_prior_sensitivity, model_prior_variants, prior_sensitivity_report
+    from .prior_sensitivity import (
+        MIN_REWEIGHTING_ESS,
+        edge_prior_sensitivity,
+        model_prior_variants,
+        prior_sensitivity_report,
+    )
     from .structure import find_alias_groups
 
+    min_ess = MIN_REWEIGHTING_ESS if args.min_reweighting_ess is None else float(args.min_reweighting_ess)
     graph, grouped = _load_graph_and_results(args)
     evidences = evidence_summaries_from_results(grouped)
     pooled = {h: pool_dynesty_results(r) for h, r in grouped.items()}
@@ -218,6 +255,7 @@ def _analyze_prior_sensitivity(args) -> None:
             graph.by_hash[edge.parent_hash], graph.by_hash[edge.child_hash],
             pooled[edge.parent_hash], pooled[edge.child_hash], log_bayes_factor=lnbf, factor=args.factor,
             edge_fraction=args.edge_fraction, max_edge_mass=args.max_edge_mass,
+            min_reweighting_ess=min_ess,
         )
         row["mutation_id"] = edge.mutation_id
         edges.append(row)
@@ -325,7 +363,10 @@ def _analyze_model_comparison(args) -> None:
     else:
         if not args.results:
             raise ValueError("evidence required: --results or --evidence")
-        grouped = discover_dynesty_results(args.results, model_hashes=args.model_hash)
+        grouped = discover_dynesty_results(
+            args.results, model_hashes=args.model_hash,
+            allow_mixed_rungs=bool(args.allow_mixed_rungs),
+        )
         evidences = evidence_summaries_from_results(grouped, gates=gates)
     mc_weights = None
     if args.mc_dir:
@@ -463,6 +504,11 @@ def register_analysis_subcommands(subparsers) -> None:
     prior.add_argument("--factor", type=float, default=2.0)
     prior.add_argument("--edge-fraction", type=float, default=0.05)
     prior.add_argument("--max-edge-mass", type=float, default=1e-3)
+    prior.add_argument(
+        "--min-reweighting-ess", type=float, default=None,
+        help="reweighting ESS below which a narrowed-prior shift is not reported "
+        "(default: prior_sensitivity.MIN_REWEIGHTING_ESS = 50)",
+    )
     prior.add_argument("--lambdas", default="0,ln2,ln4")
     prior.add_argument("--output", required=True)
     prior.set_defaults(func=_analyze_prior_sensitivity)
@@ -474,11 +520,14 @@ def register_analysis_subcommands(subparsers) -> None:
     sddr.add_argument("--seed", type=int, default=0)
     sddr.add_argument(
         "--method-systematic",
-        type=float,
+        type=_method_systematic,
         default=None,
-        help="nats added to the SDDR/NS agreement band, overriding the measured per-geometry "
-        "default (SDDR_METHOD_SYSTEMATIC: 0.10 interior, 0.25 boundary, 0.40 boundary+VW). "
-        "Pass 0 for the bare formula (8); the signed difference is reported either way.",
+        help="nats added to the SDDR/NS agreement band. The default 0 is the bare formula (8). "
+        "Pass a number for an externally justified floor, or 'measured' for the per-geometry "
+        "values of SDDR_METHOD_SYSTEMATIC (0.10 interior, 0.25 boundary, 0.40 boundary+VW) -- "
+        "which were fitted post hoc to the disagreements this test exists to detect, on 9/6/3 "
+        "toy cases at nlive 500, and are not a validated systematic. The signed difference and "
+        "the value used are reported either way.",
     )
     sddr.add_argument("--output", required=True)
     sddr.set_defaults(func=_analyze_sddr)

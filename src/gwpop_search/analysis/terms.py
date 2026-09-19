@@ -196,6 +196,11 @@ class PaddedCatalog:
     for padding). ``campaign_n_draw[k]`` is the campaign's ``n_draw`` when
     known and otherwise its number of retained rows, which is the convention
     of :func:`gwpop_search.hbi.common.importance_diagnostics`.
+
+    ``raw_selection_use_observing_time`` records the HBI-configuration field
+    that shaped ``sel_log_factor`` (the per-campaign ``log(T_k / N_k)``), so a
+    consumer can refuse a catalog padded under a different convention from the
+    likelihood it is analysing.
     """
 
     fields: tuple[str, ...]
@@ -214,6 +219,7 @@ class PaddedCatalog:
     campaign_n_draw: np.ndarray
     n_selected: int
     selection_rows_per_campaign: tuple[np.ndarray, ...]
+    raw_selection_use_observing_time: bool = True
 
     @property
     def n_events(self) -> int:
@@ -339,6 +345,7 @@ def pad_catalog(
         campaign_n_draw=np.asarray(n_draw, dtype=np.float64),
         n_selected=n,
         selection_rows_per_campaign=tuple(rows_per_campaign),
+        raw_selection_use_observing_time=bool(cfg.raw_selection_use_observing_time),
     )
 
 
