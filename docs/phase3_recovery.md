@@ -168,12 +168,15 @@ case.
 
 Injection strengths. With 48 events the atoms are only moderately detectable:
 the conditional profile likelihood of the slope (other hyperparameters at the
-truth, the partner intercept profiled) on nine v2 catalogs per atom gave slope
-widths of about 0.18 (`chi_mu_q_slope`) and 0.07-0.09 (`beta_q_m1_slope`), and
-profile approximations of `ln BF` of 0.5-5.0 at 0.55 and 0.5-9.7 at
-0.25-0.3 (all positive). The marginal evidence is lower than the profile
-approximation, so (3) is a weak power check with a few-percent chance of a
-non-detection by noise, not a calibration.
+truth, the partner intercept profiled) on v2 catalogs drawn from the child model
+gave slope widths of about 0.18 (`chi_mu_q_slope`) and 0.04-0.09
+(`beta_q_m1_slope`, growing with the slope), and profile approximations of
+`ln BF` of 0.54-4.97 at `chi_mu_q_slope = 0.55` (9 catalogs) and 0.51-9.73 at
+`beta_q_m1_slope = 0.25` and 0.3 (6 and 9 catalogs), all positive
+(`gwpop-search-data/validation/phase3c_injection_strength_probe/`). The
+marginal evidence is lower than this conditional approximation, so (3) is a
+weak power check with a few-percent chance of a non-detection by noise, not a
+calibration.
 
 Layout: `<ROOT_3C>/evidence_check_plan.json`,
 `<ROOT_3C>/evidence_check_summary.json`,

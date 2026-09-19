@@ -47,12 +47,15 @@ Engineering pass rule (:class:`EvidenceCheckPassRule`)
 4. ``|ln BF - ln BF_SDDR| <= max(0.3, 2 sigma)`` in every null case.
 
 Injection strengths: the conditional profile likelihood of each slope (other
-hyperparameters at the truth, the partner intercept profiled) on nine
-48-event v2 catalogs per atom gave slope uncertainties of about 0.18
-(``chi_mu_q_slope``) and 0.07-0.09 (``beta_q_m1_slope``); at 0.55 and 0.25-0.3
-the profile approximation of ``ln BF`` was positive for every catalog
-(0.5-5.0 and 0.5-9.7). The marginal evidence is somewhat lower, so the
-injected cases are a weak, honest check of power, not of calibration.
+hyperparameters at the truth, the partner intercept profiled) on 48-event v2
+catalogs drawn from the child model gave slope widths of about 0.18
+(``chi_mu_q_slope``) and 0.04-0.09 (``beta_q_m1_slope``, growing with the
+slope). Its approximation of ``ln BF`` was positive in every probed catalog:
+0.54-4.97 at ``chi_mu_q_slope = 0.55`` (9 catalogs) and 0.51-9.73 at
+``beta_q_m1_slope = 0.25`` and 0.3 (6 and 9 catalogs)
+(gwpop-search-data/validation/phase3c_injection_strength_probe/). The marginal
+evidence is lower than this conditional approximation, so the injected cases
+are a weak check of power, not of calibration.
 """
 
 from __future__ import annotations
