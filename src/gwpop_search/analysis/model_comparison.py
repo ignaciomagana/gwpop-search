@@ -862,6 +862,14 @@ def _fmt(value, digits=3) -> str:
     return f"{v:.{digits}f}"
 
 
+def _fmt_p(value) -> str:
+    """Probabilities: three significant digits so that small masses stay visible."""
+    if value is None:
+        return "–"
+    v = float(value)
+    return f"{v:.3g}" if math.isfinite(v) else str(v)
+
+
 def render_markdown(report: Mapping[str, object], *, labels: Mapping[str, str] | None = None) -> str:
     """Markdown rendering of :func:`build_model_comparison` output."""
     labels = dict(labels or {})
@@ -882,7 +890,7 @@ def render_markdown(report: Mapping[str, object], *, labels: Mapping[str, str] |
         "",
         "## Models",
         "",
-        "| model | ln Z | σ_NS | p(M) prior | p(M|D) | p(M|D) 16–84% | E_P[V] | C_PP |",
+        "| model | ln Z | σ_NS | p(M) prior | p(M\\|D) | p(M\\|D) 16–84% | E_P[V] | C_PP |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for h, row in report["models"].items():
@@ -891,8 +899,8 @@ def render_markdown(report: Mapping[str, object], *, labels: Mapping[str, str] |
         mc = row.get("mc") or {}
         lines.append(
             f"| {name(h)} | {_fmt(ev.get('log_evidence'))} | {_fmt(row.get('ns_error'))} | "
-            f"{_fmt(math.exp(row['log_model_prior']))} | {_fmt(row.get('posterior_probability'))} | "
-            f"{_fmt(prop.get('q16'))}–{_fmt(prop.get('q84'))} | {_fmt(mc.get('expected_variance'))} | "
+            f"{_fmt_p(math.exp(row['log_model_prior']))} | {_fmt_p(row.get('posterior_probability'))} | "
+            f"{_fmt_p(prop.get('q16'))}–{_fmt_p(prop.get('q84'))} | {_fmt(mc.get('expected_variance'))} | "
             f"{_fmt(mc.get('c_pp'))} |"
         )
     lines += [
@@ -917,14 +925,14 @@ def render_markdown(report: Mapping[str, object], *, labels: Mapping[str, str] |
             "",
             "## Structural atoms",
             "",
-            "| atom | P(S) | P(S|D) | P(S|D) 16–84% | ln BF_S |",
+            "| atom | P(S) | P(S\\|D) | P(S\\|D) 16–84% | ln BF_S |",
             "|---|---|---|---|---|",
         ]
         for label, row in structural["atoms"].items():
             prop = row.get("posterior_mass_propagated") or {}
             lines.append(
-                f"| {label} | {_fmt(row['prior_mass'])} | {_fmt(row['posterior_mass'])} | "
-                f"{_fmt(prop.get('q16'))}–{_fmt(prop.get('q84'))} | {_fmt(row.get('log_bayes_factor'))} |"
+                f"| {label} | {_fmt_p(row['prior_mass'])} | {_fmt_p(row['posterior_mass'])} | "
+                f"{_fmt_p(prop.get('q16'))}–{_fmt_p(prop.get('q84'))} | {_fmt(row.get('log_bayes_factor'))} |"
             )
     lines += ["", "## Claims", "", "| mutation | status | numerics | strength | prior | SDDR | null | stress |",
               "|---|---|---|---|---|---|---|---|"]
