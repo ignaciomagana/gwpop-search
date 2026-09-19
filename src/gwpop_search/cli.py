@@ -130,6 +130,213 @@ def _assess_synthetic_campaign(args: argparse.Namespace) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase-3 v2 (dynesty) recovery campaign and Phase-3c evidence check
+# ---------------------------------------------------------------------------
+
+
+def _ns_survey_config(args: argparse.Namespace):
+    from .inference.synthetic import SyntheticSurveyConfig
+
+    return SyntheticSurveyConfig(
+        n_events=args.n_events,
+        posterior_samples_per_event=args.pe_samples,
+        n_injections=args.n_injections,
+        injection_draw=args.injection_draw,
+        observation_model=args.observation_model,
+    )
+
+
+def _ns_dynesty_config(args: argparse.Namespace, *, slices: int | None):
+    from .inference.dynesty_backend import DynestyConfig
+
+    return DynestyConfig(
+        nlive=args.nlive,
+        bound=args.bound,
+        sample=args.sample,
+        slices=slices,
+        dlogz=args.dlogz,
+        batch_size=args.batch_size,
+        maxiter=args.maxiter,
+        maxcall=args.maxcall,
+        checkpoint_every=args.checkpoint_every,
+        num_posterior_samples=args.num_posterior_samples,
+    )
+
+
+def _add_ns_arguments(parser: argparse.ArgumentParser) -> None:
+    """Survey-v2 and dynesty options; defaults are the Phase-3 v2 plan."""
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--root-seed", type=int, default=20260917)
+    parser.add_argument("--n-events", type=int, default=48)
+    parser.add_argument("--pe-samples", type=int, default=1024)
+    parser.add_argument("--n-injections", type=int, default=100_000)
+    parser.add_argument(
+        "--injection-draw",
+        choices=("uniform_detector_box", "population_proxy"),
+        default="population_proxy",
+    )
+    parser.add_argument(
+        "--observation-model",
+        choices=("truth_centered", "noisy_observation"),
+        default="noisy_observation",
+    )
+    parser.add_argument("--nlive", type=int, default=1000)
+    parser.add_argument(
+        "--bound", choices=("none", "single", "multi", "balls", "cubes"), default="multi"
+    )
+    parser.add_argument(
+        "--sample", choices=("unif", "rwalk", "slice", "rslice"), default="rslice"
+    )
+    parser.add_argument(
+        "--slices",
+        type=int,
+        default=None,
+        help="slice-sampler slices (default: 2*(3+ndim) of each model)",
+    )
+    parser.add_argument("--dlogz", type=float, default=0.1)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="dynesty queue size and fixed device batch",
+    )
+    parser.add_argument("--maxiter", type=int, default=None)
+    parser.add_argument("--maxcall", type=int, default=None)
+    parser.add_argument("--num-posterior-samples", type=int, default=4000)
+    parser.add_argument(
+        "--checkpoint-every",
+        type=float,
+        default=300.0,
+        help="seconds between dynesty checkpoints (I/O only; not part of the plan)",
+    )
+    parser.add_argument("--importance-draws", type=int, default=512)
+    parser.add_argument("--rhat-draws-per-run", type=int, default=2000)
+
+
+def _run_synthetic_campaign_ns(args: argparse.Namespace) -> None:
+    from .inference.phase3_ns import (
+        NSRecoveryAcceptanceCriteria,
+        phase3_hbi_config,
+        run_ns_recovery_campaign,
+        slices_for_ndim,
+    )
+    from .inference.priors import BASELINE_SYNTHETIC_PRIORS
+
+    slices = args.slices
+    if slices is None and args.sample in ("slice", "rslice"):
+        slices = slices_for_ndim(len(BASELINE_SYNTHETIC_PRIORS))
+    summary = run_ns_recovery_campaign(
+        Path(args.root),
+        n_runs=args.n_runs,
+        root_seed=args.root_seed,
+        repeats=args.repeats,
+        survey_config=_ns_survey_config(args),
+        dynesty_config=_ns_dynesty_config(args, slices=slices),
+        hbi_config=phase3_hbi_config(),
+        criteria=NSRecoveryAcceptanceCriteria(
+            min_runs=args.min_runs, min_repeats=args.min_repeats
+        ),
+        importance_draws=args.importance_draws,
+        rhat_draws_per_run=args.rhat_draws_per_run,
+    )
+    print(
+        "dynesty synthetic campaign complete: "
+        f"runs={summary['n_runs']} "
+        f"numerical_pass={summary['n_numerical_pass']} "
+        f"gate={summary['phase3_numerical_gate_passed']}"
+    )
+
+
+def _assess_synthetic_campaign_ns(args: argparse.Namespace) -> None:
+    from dataclasses import replace
+
+    from .inference.phase3_ns import (
+        CAMPAIGN_PLAN_NAME,
+        NSRecoveryAcceptanceCriteria,
+        assess_ns_recovery_campaign,
+    )
+
+    root = Path(args.root)
+    criteria = None
+    if args.min_runs is not None or args.min_repeats is not None:
+        plan_path = root / CAMPAIGN_PLAN_NAME
+        criteria = (
+            NSRecoveryAcceptanceCriteria.from_dict(json.loads(plan_path.read_text())["criteria"])
+            if plan_path.exists()
+            else NSRecoveryAcceptanceCriteria()
+        )
+        overrides = {}
+        if args.min_runs is not None:
+            overrides["min_runs"] = args.min_runs
+        if args.min_repeats is not None:
+            overrides["min_repeats"] = args.min_repeats
+        criteria = replace(criteria, **overrides)
+    summary = assess_ns_recovery_campaign(root, criteria=criteria)
+    print(
+        "dynesty synthetic campaign assessment: "
+        f"runs={summary['n_runs']} "
+        f"numerical_pass={summary['n_numerical_pass']} "
+        f"gate={summary['phase3_numerical_gate_passed']}"
+    )
+
+
+def _fingerprint_ns_run(args: argparse.Namespace) -> None:
+    from .inference.phase3_ns import compare_ns_fingerprints, ns_fingerprint_report
+
+    report = ns_fingerprint_report(Path(args.run_dir))
+    comparison = None
+    if args.compare_to:
+        before = json.loads(Path(args.compare_to).read_text())
+        comparison = compare_ns_fingerprints(
+            before.get("fingerprints", before), report["fingerprints"]
+        )
+        report["comparison"] = comparison
+    text = json.dumps(report, sort_keys=True, indent=2)
+    if args.output:
+        Path(args.output).write_text(text + "\n")
+    print(text)
+    if comparison is not None and not comparison["passed"]:
+        raise SystemExit(1)
+
+
+def _run_synthetic_evidence_check(args: argparse.Namespace) -> None:
+    from .inference.phase3_evidence import (
+        SLICES_RULE_FIXED,
+        SLICES_RULE_PER_MODEL,
+        default_injection_strengths,
+        run_evidence_check,
+    )
+    from .inference.phase3_ns import phase3_hbi_config
+
+    strengths = default_injection_strengths()
+    if args.chi_mu_q_slope is not None:
+        strengths["chieff.mean.linear_q"] = args.chi_mu_q_slope
+    if args.beta_q_m1_slope is not None:
+        strengths["pairing.beta.linear_m1"] = args.beta_q_m1_slope
+    summary = run_evidence_check(
+        Path(args.root),
+        n_catalogs=args.n_catalogs,
+        root_seed=args.root_seed,
+        repeats=args.repeats,
+        survey_config=_ns_survey_config(args),
+        dynesty_config=_ns_dynesty_config(args, slices=args.slices),
+        slices_rule=SLICES_RULE_PER_MODEL if args.slices is None else SLICES_RULE_FIXED,
+        hbi_config=phase3_hbi_config(),
+        injection_strengths=strengths,
+        importance_draws=args.importance_draws,
+        rhat_draws_per_run=args.rhat_draws_per_run,
+        sddr_bootstrap=args.sddr_bootstrap,
+    )
+    for case in [*summary["null_cases"], *summary["injected_cases"]]:
+        print(
+            f"{case['kind']:8s} {case['catalog']:34s} {case['atom']:24s} "
+            f"lnBF={case['ln_bf']:+.3f} sigma={case['ln_bf_sigma']} "
+            f"sddr={case['sddr']['ln_bf']}"
+        )
+    print(f"evidence check passed={summary['evidence_check_passed']}")
+
+
 def _add_stress_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--stop-fidelity",
@@ -1275,6 +1482,73 @@ def build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--root", required=True)
     assess.add_argument("--min-runs", type=int, default=4)
     assess.set_defaults(func=_assess_synthetic_campaign)
+
+    # -- Phase-3 v2 on dynesty (NS recovery campaign, fingerprints, 3c evidence check) --
+    campaign_ns = subparsers.add_parser(
+        "synthetic-campaign-ns",
+        help="run/resume the Phase-3 v2 multi-catalog recovery campaign on dynesty",
+    )
+    _add_ns_arguments(campaign_ns)
+    campaign_ns.add_argument("--n-runs", type=int, default=4, help="number of catalogs")
+    campaign_ns.add_argument(
+        "--repeats", type=int, default=4, help="independent dynesty runs per catalog"
+    )
+    campaign_ns.add_argument("--min-runs", type=int, default=4)
+    campaign_ns.add_argument("--min-repeats", type=int, default=4)
+    campaign_ns.set_defaults(func=_run_synthetic_campaign_ns)
+
+    assess_ns = subparsers.add_parser(
+        "assess-synthetic-campaign-ns",
+        help="assess a Phase-3 v2 dynesty campaign without launching inference",
+    )
+    assess_ns.add_argument("--root", required=True)
+    assess_ns.add_argument(
+        "--min-runs", type=int, default=None, help="override the plan's min_runs"
+    )
+    assess_ns.add_argument(
+        "--min-repeats", type=int, default=None, help="override the plan's min_repeats"
+    )
+    assess_ns.set_defaults(func=_assess_synthetic_campaign_ns)
+
+    fingerprint_ns = subparsers.add_parser(
+        "fingerprint-ns-run",
+        help="hash completed dynesty run artifacts (manifest, result) for resume review",
+    )
+    fingerprint_ns.add_argument(
+        "--run-dir", required=True, help="a dynesty run directory or any directory above them"
+    )
+    fingerprint_ns.add_argument("--output", default=None, help="also write the JSON here")
+    fingerprint_ns.add_argument(
+        "--compare-to",
+        default=None,
+        help="earlier fingerprint JSON; exit 1 if any earlier file changed or disappeared",
+    )
+    fingerprint_ns.set_defaults(func=_fingerprint_ns_run)
+
+    evidence_check = subparsers.add_parser(
+        "synthetic-evidence-check",
+        help="Phase-3c Bayes-factor sanity mini-campaign (nested atoms, SDDR cross-check)",
+    )
+    _add_ns_arguments(evidence_check)
+    evidence_check.add_argument("--n-catalogs", type=int, default=4)
+    evidence_check.add_argument(
+        "--repeats", type=int, default=2, help="independent dynesty runs per model"
+    )
+    evidence_check.add_argument(
+        "--chi-mu-q-slope",
+        type=float,
+        default=None,
+        help="injected chieff.mean.linear_q slope (default 0.9 x prior upper bound = 0.54)",
+    )
+    evidence_check.add_argument(
+        "--beta-q-m1-slope",
+        type=float,
+        default=None,
+        help="injected pairing.beta.linear_m1 slope (default 0.9 x prior upper bound = 0.27)",
+    )
+    evidence_check.add_argument("--sddr-bootstrap", type=int, default=200)
+    evidence_check.set_defaults(func=_run_synthetic_evidence_check)
+    # -- end of the Phase-3 v2 dynesty block --
 
     inspect_graph = subparsers.add_parser(
         "inspect-model-graph",
