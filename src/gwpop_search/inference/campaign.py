@@ -269,7 +269,7 @@ def build_campaign_plan(
             {"data_seed": int(data_seed), "sampler_seed": int(sampler_seed)}
             for data_seed, sampler_seed in pairs
         ],
-        "survey_config": asdict(survey_config),
+        "survey_config": survey_config.to_dict(),
         "nuts_config": asdict(nuts_config),
         "selection_chunk_size": selection_chunk_size,
         "criteria": asdict(criteria),

@@ -17,6 +17,7 @@ def _survey_config(args: argparse.Namespace):
         n_events=args.n_events,
         posterior_samples_per_event=args.pe_samples,
         n_injections=args.n_injections,
+        injection_draw=args.injection_draw,
     )
 
 
@@ -122,6 +123,16 @@ def _add_common_recovery_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--n-events", type=int, default=48)
     parser.add_argument("--pe-samples", type=int, default=256)
     parser.add_argument("--n-injections", type=int, default=20_000)
+    parser.add_argument(
+        "--injection-draw",
+        choices=("uniform_detector_box", "population_proxy"),
+        default="uniform_detector_box",
+        help=(
+            "selection-injection distribution: the legacy uniform detector-frame "
+            "box, or draws from the baseline population at the default proxy "
+            "hyperparameters (draw density = model log density at the proxy)"
+        ),
+    )
     parser.add_argument("--num-warmup", type=int, default=1000)
     parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--num-chains", type=int, default=4)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from pathlib import Path
 
 from gwpop_search.grammar import ModelGraph, baseline_model_spec
@@ -116,7 +115,7 @@ def run_baseline_null_search_replay(
         null_truth_hyperparameters = dict(dataset.truth_hyperparameters)
         null_data_metadata = {
             "mode": data_mode,
-            "survey_config": asdict(survey_config),
+            "survey_config": survey_config.to_dict(),
         }
         dataset_identity = f"baseline-null:{int(seed)}"
     elif data_mode == "frozen_selection_resample":
@@ -204,7 +203,7 @@ def run_baseline_null_search_replay(
             "evidence_completion": completion,
             "null_data_mode": data_mode,
             "null_data_metadata": null_data_metadata,
-            "survey_config": asdict(survey_config),
+            "survey_config": survey_config.to_dict(),
             "truth_hyperparameters": null_truth_hyperparameters,
         },
     )

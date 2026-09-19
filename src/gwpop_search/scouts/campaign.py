@@ -121,7 +121,7 @@ def build_structured_scout_campaign_plan(
         "n_runs": int(n_runs),
         "root_seed": int(root_seed),
         "injection": asdict(injection),
-        "survey_config": asdict(survey_config),
+        "survey_config": survey_config.to_dict(),
         "scout_config": scout_config.to_dict(),
         "base_model_hash": base_spec.model_hash,
         "base_model_spec": base_spec.to_dict(),

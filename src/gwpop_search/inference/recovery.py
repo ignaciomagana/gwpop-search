@@ -161,7 +161,7 @@ def run_synthetic_baseline_recovery(
         "format_version": "gwpop-search-phase3-recovery-1.0",
         "data_seed": int(data_seed),
         "sampler_seed": int(sampler_seed),
-        "survey_config": asdict(survey_cfg),
+        "survey_config": survey_cfg.to_dict(),
         "nuts_config": asdict(nuts_cfg),
         "hbi_config": {
             "selection_chunk_size": selection_chunk_size,

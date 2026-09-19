@@ -4,11 +4,36 @@ This is deliberately a simple validation survey, not an astrophysical detector
 simulation. It produces PE samples and a raw-draw selection campaign in the
 exact gwcat-v2 chi_eff density basis so the common HBI engine can be tested
 without release-specific data.
+
+Selection injections can be drawn in two ways (``SyntheticSurveyConfig.injection_draw``):
+
+``uniform_detector_box`` (default, unchanged legacy behavior)
+    Uniform in (m1_detector, q, luminosity_distance, chi_eff) over the detector
+    prior box, isotropic sky. Simple, but the population occupies a tiny corner
+    of the box, so the selection effective sample size is only ~1-2% of the
+    detected injections.
+
+``population_proxy``
+    Injections are drawn from the baseline population itself at fixed proxy
+    hyperparameters (``injection_draw_hyperparameters``) with
+    ``_draw_population``. The stored raw-draw density is exactly the population
+    model's own normalized detector-basis log density at the proxy point,
+    ``model(samples, proxy)``, including the source-to-detector Jacobian and the
+    1/(4 pi) sky factor. The proxy's support contains the support of every
+    population inside the Phase-3 hyperprior, so the raw-draw estimator
+    ``A = T/N_draw * sum_detected p_pop/p_draw`` stays unbiased for every trial
+    hyperparameter point while concentrating injections where detected systems
+    of plausible populations live.
+
+In both modes the detection rule is the same deterministic chirp-mass-scaled
+reach, the campaign stores the true total number of draws ``n_draw`` and only
+detected rows are retained.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import asdict, dataclass
 from typing import Mapping
 
 import numpy as np
@@ -17,10 +42,143 @@ from scipy.stats import truncnorm
 from ..data import Campaign, PosteriorCatalog, SelectionCatalog, SelectionMode, validate_pair
 from ..data.adapters import gwcat_v2_basis_for_spin
 from ..models import DEFAULT_BASELINE_HYPERPARAMETERS, GwcatChiEffBBHModel
+from .priors import BASELINE_SYNTHETIC_PRIORS, PriorSpec
+
+INJECTION_DRAW_UNIFORM_DETECTOR_BOX = "uniform_detector_box"
+INJECTION_DRAW_POPULATION_PROXY = "population_proxy"
+INJECTION_DRAWS = (
+    INJECTION_DRAW_UNIFORM_DETECTOR_BOX,
+    INJECTION_DRAW_POPULATION_PROXY,
+)
+
+# Default proxy population for ``injection_draw="population_proxy"``.
+#
+# Support (required for an unbiased raw-draw estimator at every trial point):
+# mmin=2 and mmax=120 are the Phase-3 hyperprior bounds (mmin U(2,10), mmax
+# U(60,120)), so [mmin_proxy, mmax_proxy] contains every population mass range
+# and the pairing support q >= max(q_floor, mmin_proxy/m1) contains every
+# population pairing support. Redshift (same model zmax), chi_eff ([-1, 1]) and
+# the isotropic sky have full support for any proxy value.
+#
+# Efficiency (a choice, not a correctness requirement): the selection integral
+# only needs injections where *detected* systems of plausible populations live.
+# Detection favours heavy, nearby, near-equal-mass binaries, so the proxy is a
+# detection-tilted version of the Phase-3 truth: a shallow mass power law
+# (alpha 1.25 vs 3), a larger 35 Msun peak (0.35 vs 0.10, same location and
+# width), pairing tilted toward q=1 (beta_q 2 vs 1; this also samples the
+# q -> 1 pile-up of target populations whose mmin exceeds 2, where p(q|m1)
+# diverges as m1 -> mmin) and a redshift density weighted to low z (kappa -1.5
+# vs 2). chi_eff does not affect detection; its proxy keeps the truth mean and
+# is wider (0.25 vs 0.20) so chi weights stay bounded over the whole chi_sigma
+# prior (efficiency factor >= 0.025 for chi_sigma up to 0.5 and 0.93 at the
+# truth). Selected by Monte-Carlo scans of the selection effective sample size
+# per draw at the truth, at the hyperprior median, over posterior-like clouds
+# and over random hyperprior draws; see docs/phase3_recovery.md.
+DEFAULT_POPULATION_PROXY_HYPERPARAMETERS: dict[str, float] = {
+    "alpha": 1.25,
+    "mmin": 2.0,
+    "mmax": 120.0,
+    "peak_fraction": 0.35,
+    "peak_mu": 35.0,
+    "peak_sigma": 4.0,
+    "beta_q": 2.0,
+    "kappa": -1.5,
+    "chi_mu": 0.05,
+    "chi_sigma": 0.25,
+}
+
+_SELECTION_FIELDS = (
+    "m1_detector",
+    "q",
+    "luminosity_distance",
+    "ra",
+    "dec",
+    "chi_eff",
+)
+
+
+def _prior_bounds(spec: PriorSpec) -> tuple[float, float] | None:
+    if spec.family in {"uniform", "log_uniform"}:
+        return float(spec.low), float(spec.high)
+    return None
+
+
+def population_proxy_support_violations(
+    proxy_hyperparameters: Mapping[str, float],
+    priors: Mapping[str, PriorSpec] = BASELINE_SYNTHETIC_PRIORS,
+) -> tuple[str, ...]:
+    """Reasons a baseline proxy draw fails to cover every population in ``priors``.
+
+    The baseline population support is m1_source in [mmin, mmax],
+    q in [max(q_floor, mmin/m1_source), 1], z in (0, zmax], chi_eff in [-1, 1]
+    and the full sky. Every proxy value other than mmin/mmax gives a strictly
+    positive density on that support, so coverage of all trial populations
+    reduces to ``mmin_proxy <= inf(prior mmin)`` and
+    ``mmax_proxy >= sup(prior mmax)``, which requires bounded priors on both.
+    An empty tuple means the proxy covers the hyperprior.
+    """
+    problems: list[str] = []
+    for name, side in (("mmin", "low"), ("mmax", "high")):
+        if name not in priors:
+            problems.append(f"prior has no {name!r} entry; support cannot be verified")
+            continue
+        bounds = _prior_bounds(priors[name])
+        if bounds is None:
+            problems.append(
+                f"prior on {name!r} is {priors[name].family!r} (unbounded); no fixed "
+                "proxy can cover its support"
+            )
+            continue
+        proxy_value = float(proxy_hyperparameters[name])
+        if side == "low" and proxy_value > bounds[0]:
+            problems.append(
+                f"proxy mmin={proxy_value} exceeds the smallest prior mmin={bounds[0]}"
+            )
+        if side == "high" and proxy_value < bounds[1]:
+            problems.append(
+                f"proxy mmax={proxy_value} is below the largest prior mmax={bounds[1]}"
+            )
+    return tuple(problems)
+
+
+def _validated_proxy_hyperparameters(values: Mapping[str, float]) -> dict[str, float]:
+    names = tuple(DEFAULT_BASELINE_HYPERPARAMETERS)
+    missing = sorted(set(names) - set(values))
+    unknown = sorted(set(values) - set(names))
+    if missing or unknown:
+        raise ValueError(
+            "injection_draw_hyperparameters must name exactly the baseline "
+            f"hyperparameters; missing={missing}, unknown={unknown}"
+        )
+    hp = {name: float(values[name]) for name in names}
+    bad = [name for name, value in hp.items() if not math.isfinite(value)]
+    if bad:
+        raise ValueError(f"injection_draw_hyperparameters must be finite; bad={bad}")
+    if not hp["mmax"] > hp["mmin"] > 0.0:
+        raise ValueError("proxy mass support requires 0 < mmin < mmax")
+    if not 0.0 <= hp["peak_fraction"] <= 1.0:
+        raise ValueError("proxy peak_fraction must lie in [0, 1]")
+    if not hp["mmin"] <= hp["peak_mu"] <= hp["mmax"]:
+        raise ValueError("proxy peak_mu must lie inside [mmin, mmax]")
+    if hp["peak_sigma"] <= 0.0 or hp["chi_sigma"] <= 0.0:
+        raise ValueError("proxy peak_sigma and chi_sigma must be positive")
+    if not -1.0 <= hp["chi_mu"] <= 1.0:
+        raise ValueError("proxy chi_mu must lie inside [-1, 1]")
+    return hp
 
 
 @dataclass(frozen=True)
 class SyntheticSurveyConfig:
+    """Closed Phase-3 survey settings.
+
+    ``injection_draw`` selects the selection-injection distribution (see the
+    module docstring). ``injection_draw_hyperparameters`` is only accepted for
+    ``population_proxy``; ``None`` there resolves to
+    ``DEFAULT_POPULATION_PROXY_HYPERPARAMETERS`` so the resolved proxy is always
+    recorded in manifests. A proxy must cover the Phase-3 hyperprior
+    (``population_proxy_support_violations``), otherwise it is rejected.
+    """
+
     n_events: int = 48
     posterior_samples_per_event: int = 256
     n_injections: int = 20_000
@@ -35,6 +193,8 @@ class SyntheticSurveyConfig:
     pe_chi_eff_sigma: float = 0.12
     population_batch_size: int = 2048
     redshift_sampling_grid: int = 8192
+    injection_draw: str = INJECTION_DRAW_UNIFORM_DETECTOR_BOX
+    injection_draw_hyperparameters: Mapping[str, float] | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -60,6 +220,49 @@ class SyntheticSurveyConfig:
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
+
+        draw = str(self.injection_draw)
+        if draw not in INJECTION_DRAWS:
+            raise ValueError(
+                f"injection_draw must be one of {INJECTION_DRAWS}; got {draw!r}"
+            )
+        object.__setattr__(self, "injection_draw", draw)
+        if draw == INJECTION_DRAW_UNIFORM_DETECTOR_BOX:
+            if self.injection_draw_hyperparameters is not None:
+                raise ValueError(
+                    "injection_draw_hyperparameters is only used by "
+                    f"injection_draw={INJECTION_DRAW_POPULATION_PROXY!r}"
+                )
+            return
+        proxy = _validated_proxy_hyperparameters(
+            DEFAULT_POPULATION_PROXY_HYPERPARAMETERS
+            if self.injection_draw_hyperparameters is None
+            else self.injection_draw_hyperparameters
+        )
+        violations = population_proxy_support_violations(proxy)
+        if violations:
+            raise ValueError(
+                "population_proxy injections must cover every Phase-3 hyperprior "
+                "population: " + "; ".join(violations)
+            )
+        object.__setattr__(self, "injection_draw_hyperparameters", proxy)
+
+    def to_dict(self) -> dict[str, object]:
+        """JSON manifest payload.
+
+        The default ``uniform_detector_box`` draw omits both injection-draw
+        fields, so manifests written before the option existed stay
+        byte-identical; ``population_proxy`` records the resolved proxy.
+        """
+        payload = asdict(self)
+        if self.injection_draw == INJECTION_DRAW_UNIFORM_DETECTOR_BOX:
+            payload.pop("injection_draw")
+            payload.pop("injection_draw_hyperparameters")
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> SyntheticSurveyConfig:
+        return cls(**dict(payload))
 
 
 @dataclass(frozen=True)
@@ -352,7 +555,90 @@ def _make_posterior_catalog(rng, truths, model, config, hp):
     )
 
 
+def population_proxy_log_draw_density(model, samples, proxy_hyperparameters):
+    """Exact log draw density of ``population_proxy`` injections.
+
+    ``model`` must be the population model whose ``_draw_population`` sampler
+    generated the injections (same cosmology, zmax and q_floor). The result is
+    that model's own normalized log density in the gwcat detector basis
+    (m1_detector, q, luminosity_distance, sky, chi_eff) at the proxy
+    hyperparameters, evaluated in 64-bit precision. Zero-support rows are
+    returned as -inf; callers decide whether that is an error.
+    """
+    try:
+        from jax import enable_x64
+    except ImportError:  # pragma: no cover - JAX releases before the config API
+        from jax.experimental import enable_x64
+
+    columns = {
+        name: np.asarray(samples[name], dtype=float) for name in _SELECTION_FIELDS
+    }
+    with enable_x64(True):
+        values = model(columns, dict(proxy_hyperparameters))
+        out = np.array(values, dtype=np.float64)
+    if out.shape != columns["m1_detector"].shape:
+        raise RuntimeError(
+            f"proxy draw density has shape {out.shape}; expected "
+            f"{columns['m1_detector'].shape}"
+        )
+    if np.isnan(out).any() or np.isposinf(out).any():
+        raise RuntimeError("proxy draw density contains NaN/+inf values")
+    return out
+
+
+def _make_population_proxy_selection_catalog(rng, model, config):
+    proxy = dict(config.injection_draw_hyperparameters)
+    n = int(config.n_injections)
+    draw = _draw_population(rng, n, proxy, model, config)
+    samples = {name: np.asarray(draw[name], dtype=float) for name in _SELECTION_FIELDS}
+    keep = detection_mask(samples, config)
+    if not np.any(keep):
+        raise RuntimeError("synthetic selection campaign produced no detections")
+
+    retained = {name: values[keep] for name, values in samples.items()}
+    log_draw = population_proxy_log_draw_density(model, retained, proxy)
+    outside = ~np.isfinite(log_draw)
+    if outside.any():
+        # A proxy draw outside the proxy's own support can only come from a
+        # floating-point round trip at an exact support edge. Never floor it.
+        raise RuntimeError(
+            f"{int(outside.sum())} population_proxy injection(s) have zero proxy "
+            "density after the detector-frame round trip; first retained rows="
+            f"{np.flatnonzero(outside)[:8].tolist()}"
+        )
+    n_detected = int(keep.sum())
+
+    return SelectionCatalog(
+        samples=retained,
+        log_draw_density=log_draw,
+        campaign_id=np.asarray(["SYNTH"] * n_detected),
+        campaigns=(
+            Campaign(
+                "SYNTH",
+                n_draw=n,
+                observing_time_yr=config.observing_time_yr,
+                metadata={
+                    "detection_rule": "chirp_mass_scaled_reach",
+                    "injection_draw": INJECTION_DRAW_POPULATION_PROXY,
+                },
+            ),
+        ),
+        basis=gwcat_v2_basis_for_spin("chieff"),
+        mode=SelectionMode.RAW_DRAW,
+        metadata={
+            "fixture": "phase3-synthetic-selection",
+            "n_detected": n_detected,
+            "injection_draw": INJECTION_DRAW_POPULATION_PROXY,
+            "injection_draw_hyperparameters": proxy,
+            "draw_density_model": model.to_config(),
+        },
+    )
+
+
 def _make_selection_catalog(rng, model, config, hp):
+    if config.injection_draw == INJECTION_DRAW_POPULATION_PROXY:
+        return _make_population_proxy_selection_catalog(rng, model, config)
+
     bounds = _detector_prior_bounds(model, config, hp)
     n = config.n_injections
 
