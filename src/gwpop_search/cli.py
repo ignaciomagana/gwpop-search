@@ -131,9 +131,10 @@ def _assess_synthetic_campaign(args: argparse.Namespace) -> None:
 
 
 def _add_stress_arguments(parser: argparse.ArgumentParser) -> None:
+    # fidelity ladder v2: suites stop at an evidence rung (F2 is not in the ladder)
     parser.add_argument(
         "--stop-fidelity",
-        choices=("F2", "F3", "F4"),
+        choices=("F3", "F4"),
         default="F3",
     )
     parser.add_argument(
@@ -305,6 +306,9 @@ def _run_holdout_validation(args: argparse.Namespace) -> None:
         manifest,
         data_base_dir=Path(args.base_dir),
     )
+    from .analysis.posterior_gates import PosteriorGateCriteria
+    from .inference.dynesty_backend import DynestyConfig
+
     summary = run_holdout_campaign(
         Path(args.root),
         posterior,
@@ -315,6 +319,22 @@ def _run_holdout_validation(args: argparse.Namespace) -> None:
         config=HoldoutCampaignConfig(
             n_folds=args.n_folds,
             seed=args.fold_seed,
+            repeats=args.posterior_repeats,
+            posterior_config=DynestyConfig(
+                nlive=args.posterior_nlive,
+                bound="multi",
+                sample="rslice",
+                slices=args.posterior_slices,
+                dlogz=args.posterior_dlogz,
+                maxcall=args.posterior_maxcall,
+                batch_size=args.posterior_batch_size,
+            ),
+            criteria=(
+                PosteriorGateCriteria.f4()
+                if args.gate_profile == "f4"
+                else PosteriorGateCriteria.f3()
+            ),
+            predictive_draws=args.predictive_draws,
         ),
     )
     print(json.dumps(summary, sort_keys=True, indent=2))
@@ -1323,6 +1343,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     holdout.add_argument("--n-folds", type=int, default=5)
     holdout.add_argument("--fold-seed", type=int)
+    holdout.add_argument("--posterior-repeats", type=int, default=2)
+    holdout.add_argument("--posterior-nlive", type=int, default=1000)
+    holdout.add_argument(
+        "--posterior-slices",
+        type=int,
+        help="rslice slices (default: 2*(3+ndim) per model)",
+    )
+    holdout.add_argument("--posterior-dlogz", type=float, default=0.1)
+    holdout.add_argument("--posterior-maxcall", type=int)
+    holdout.add_argument("--posterior-batch-size", type=int, default=64)
+    holdout.add_argument(
+        "--gate-profile",
+        choices=("f4", "f3"),
+        default="f4",
+        help="posterior + importance thresholds of decision D3 (evidence precision off)",
+    )
+    holdout.add_argument(
+        "--predictive-draws",
+        type=int,
+        help="score with this many pooled draws (default: every weighted point)",
+    )
     holdout.add_argument("--root", required=True)
     holdout.add_argument("--base-dir", default=".")
     holdout.add_argument("--ignore-current-commit", action="store_true")
@@ -1733,6 +1774,12 @@ def build_parser() -> argparse.ArgumentParser:
     production_freeze.add_argument("--base-dir", default=".")
     production_freeze.add_argument("--ignore-current-commit", action="store_true")
     production_freeze.set_defaults(func=_validate_production_freeze)
+
+    # --- Track C: robustness and model-comparison analyses (gwpop_search.analysis.cli) ---
+    from .analysis.cli import register_analysis_subcommands
+
+    register_analysis_subcommands(subparsers)
+    # --- end Track C ---
 
     return parser
 
