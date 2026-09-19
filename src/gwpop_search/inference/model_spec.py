@@ -1,4 +1,9 @@
-"""Bridge declarative model hyperpriors to NumPyro prior specifications."""
+"""Bridge declarative model hyperpriors to sampler-independent :class:`PriorSpec` maps.
+
+The resulting map is the hyperprior every sampler integrates against (the
+dynesty prior transform of the production ladder, and the optional NumPyro
+HSGP scouts); it is part of the model hash and never changed here.
+"""
 
 from __future__ import annotations
 

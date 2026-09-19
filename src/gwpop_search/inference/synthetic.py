@@ -712,17 +712,52 @@ def _observation_sigmas(config: SyntheticSurveyConfig) -> tuple[float, float, fl
     )
 
 
-def _observe(rng, systems: Mapping[str, np.ndarray], config: SyntheticSurveyConfig):
+def resolve_observation_sigmas(
+    config: SyntheticSurveyConfig,
+    sigmas: Mapping[str, np.ndarray] | None = None,
+):
+    """The measurement-noise scales of ``noisy_observation``, per system.
+
+    ``sigmas`` overrides the four configured scalars with per-system arrays
+    keyed by the observed fields (``log_m1_detector``, ``q``,
+    ``log_luminosity_distance``, ``chi_eff``); every entry must be finite and
+    positive. ``None`` returns the configured scalars unchanged, so the
+    default survey behaviour is bit-identical.
+    """
+    if sigmas is None:
+        return _observation_sigmas(config)
+    missing = [name for name in _OBSERVED_FIELDS if name not in sigmas]
+    if missing:
+        raise ValueError(f"per-system observation sigmas are missing {missing}")
+    resolved = []
+    for name in _OBSERVED_FIELDS:
+        values = np.asarray(sigmas[name], dtype=float)
+        if values.ndim != 1:
+            raise ValueError(f"per-system sigma {name!r} must be one-dimensional")
+        if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+            raise ValueError(f"per-system sigma {name!r} must be finite and positive")
+        resolved.append(values)
+    return tuple(resolved)
+
+
+def _observe(
+    rng,
+    systems: Mapping[str, np.ndarray],
+    config: SyntheticSurveyConfig,
+    sigmas: Mapping[str, np.ndarray] | None = None,
+):
     """One measurement-noise realisation per system (``noisy_observation``).
 
     Returns the observed data ``ln m1_detector + s_m e1``, ``q + s_q e2``,
     ``ln d_L + s_d e3`` and ``chi_eff + s_chi e4`` with independent standard
     normal ``e`` (one ``(4, n)`` draw). The observed q and chi_eff may leave
-    their physical ranges; they are data, not parameters.
+    their physical ranges; they are data, not parameters. ``sigmas`` (see
+    :func:`resolve_observation_sigmas`) replaces the configured scalars by
+    per-system scales; the noise draw itself is unchanged.
     """
     m1 = np.asarray(systems["m1_detector"], dtype=float)
     noise = rng.standard_normal((4, m1.size))
-    s_m, s_q, s_d, s_c = _observation_sigmas(config)
+    s_m, s_q, s_d, s_c = resolve_observation_sigmas(config, sigmas)
     with np.errstate(divide="ignore"):
         log_m1 = np.log(m1)
         log_d_l = np.log(np.asarray(systems["luminosity_distance"], dtype=float))
@@ -850,19 +885,37 @@ def _truncated_normal_draw(rng, mean, sigma, low, high, size):
     )
 
 
-def _detector_prior_bounds(model, config, hp):
+def _detector_prior_bounds(model, config, hp, hyperprior_mmax_sup: float | None = None):
     """PE prior (and uniform-injection) box in the gwcat detector basis.
 
     ``truth_centered`` keeps the legacy upper mass edge
     ``max(m1_detector_max, 1.1 mmax_truth (1+zmax))``. ``noisy_observation``
     replaces the truth's mmax by ``max(mmax_truth, sup(prior mmax))`` so the
     box, and hence every event's PE prior, contains the detector-frame support
-    of every Phase-3 hyperprior population and does not depend on the truth.
+    of every hyperprior population and does not depend on the truth.
+
+    ``hyperprior_mmax_sup`` is that supremum. It defaults to the Phase-3
+    synthetic hyperprior (``BASELINE_SYNTHETIC_PRIORS``); a caller whose
+    hyperprior is a different registered profile (e.g. the production
+    ``gwtc5-v1`` root, ``mmax ~ U(60, 200)``) must pass its own supremum, or
+    the box would be tied to the wrong hyperprior.
     """
     d_l_max = float(model.cosmology.dL_of_z(model.zmax))
     mmax = float(hp["mmax"])
     if config.observation_model == OBSERVATION_MODEL_NOISY:
-        mmax = max(mmax, _HYPERPRIOR_MMAX_SUP)
+        sup = (
+            _HYPERPRIOR_MMAX_SUP
+            if hyperprior_mmax_sup is None
+            else float(hyperprior_mmax_sup)
+        )
+        if not math.isfinite(sup) or sup <= 0.0:
+            raise ValueError("hyperprior_mmax_sup must be finite and positive")
+        mmax = max(mmax, sup)
+    elif hyperprior_mmax_sup is not None:
+        raise ValueError(
+            "hyperprior_mmax_sup only applies to the "
+            f"{OBSERVATION_MODEL_NOISY!r} PE prior box"
+        )
     population_mass_max = mmax * (1.0 + model.zmax)
     m1_max = max(config.m1_detector_max, 1.1 * population_mass_max)
     return {
@@ -887,7 +940,7 @@ def _uniform_detector_log_density(bounds):
     )
 
 
-def _noisy_posterior_draws(rng, observed_i, config, bounds, n_sample):
+def _noisy_posterior_draws(rng, observed_i, config, bounds, n_sample, sigmas=None):
     """Exact posterior draws for one event under the uniform detector-box prior.
 
     With ``L(d | theta)`` Gaussian in (ln m1, q, ln d_L, chi_eff) and a prior
@@ -897,8 +950,15 @@ def _noisy_posterior_draws(rng, observed_i, config, bounds, n_sample):
     ``q ~ N(x_q, s_q)`` on ``[q_min, q_max]``, ``ln d_L ~ N(x_d + s_d^2, s_d)``
     on ``(-inf, ln d_L_max]`` and ``chi_eff ~ N(x_chi, s_chi)`` on [-1, 1].
     Values are clipped onto the box only to absorb exp/log round-off.
+
+    ``sigmas`` are this event's four measurement-noise scales; ``None`` uses
+    the configured scalars.
     """
-    s_m, s_q, s_d, s_c = _observation_sigmas(config)
+    s_m, s_q, s_d, s_c = (
+        _observation_sigmas(config)
+        if sigmas is None
+        else tuple(float(value) for value in sigmas)
+    )
     x_m = float(observed_i["log_m1_detector"])
     x_q = float(observed_i["q"])
     x_d = float(observed_i["log_luminosity_distance"])
@@ -944,7 +1004,23 @@ def _noisy_posterior_draws(rng, observed_i, config, bounds, n_sample):
     }
 
 
-def _make_posterior_catalog(rng, truths, model, config, hp, observations=None):
+def _make_posterior_catalog(
+    rng,
+    truths,
+    model,
+    config,
+    hp,
+    observations=None,
+    sigmas=None,
+    hyperprior_mmax_sup=None,
+):
+    """PE catalog of one synthetic survey.
+
+    ``sigmas`` (see :func:`resolve_observation_sigmas`) gives per-event
+    measurement-noise scales for ``noisy_observation`` instead of the four
+    configured scalars; ``hyperprior_mmax_sup`` sets the PE prior box's mass
+    edge (see :func:`_detector_prior_bounds`).
+    """
     noisy = config.observation_model == OBSERVATION_MODEL_NOISY
     if noisy and observations is None:
         raise ValueError(
@@ -956,10 +1032,24 @@ def _make_posterior_catalog(rng, truths, model, config, hp, observations=None):
             "event observations are only used by observation_model="
             f"{OBSERVATION_MODEL_NOISY!r}"
         )
+    if not noisy and sigmas is not None:
+        raise ValueError(
+            "per-event measurement-noise scales are only used by "
+            f"observation_model={OBSERVATION_MODEL_NOISY!r}"
+        )
     n_event = config.n_events
     n_sample = config.posterior_samples_per_event
     n_total = n_event * n_sample
-    bounds = _detector_prior_bounds(model, config, hp)
+    bounds = _detector_prior_bounds(model, config, hp, hyperprior_mmax_sup)
+    event_sigmas = None
+    if noisy and sigmas is not None:
+        event_sigmas = resolve_observation_sigmas(config, sigmas)
+        for values in event_sigmas:
+            if values.size != n_event:
+                raise ValueError(
+                    "per-event measurement-noise scales must have one entry per "
+                    f"event ({n_event}); got {values.size}"
+                )
 
     samples = {
         "m1_detector": np.empty(n_total),
@@ -979,6 +1069,7 @@ def _make_posterior_catalog(rng, truths, model, config, hp, observations=None):
                 config,
                 bounds,
                 n_sample,
+                None if event_sigmas is None else tuple(s[i] for s in event_sigmas),
             )
             for name, values in draws.items():
                 samples[name][sl] = values
@@ -1039,14 +1130,25 @@ def _make_posterior_catalog(rng, truths, model, config, hp, observations=None):
         "reference_prior": "uniform detector basis",
     }
     if noisy:
-        s_m, s_q, s_d, s_c = _observation_sigmas(config)
         metadata["observation_model"] = OBSERVATION_MODEL_NOISY
-        metadata["observation_noise_sigma"] = {
-            "log_m1_detector": s_m,
-            "q": s_q,
-            "log_luminosity_distance": s_d,
-            "chi_eff": s_c,
-        }
+        if event_sigmas is None:
+            s_m, s_q, s_d, s_c = _observation_sigmas(config)
+            metadata["observation_noise_sigma"] = {
+                "log_m1_detector": s_m,
+                "q": s_q,
+                "log_luminosity_distance": s_d,
+                "chi_eff": s_c,
+            }
+        else:
+            metadata["observation_noise_sigma_per_event"] = True
+            metadata["observation_noise_sigma"] = {
+                name: {
+                    "median": float(np.median(values)),
+                    "min": float(values.min()),
+                    "max": float(values.max()),
+                }
+                for name, values in zip(_OBSERVED_FIELDS, event_sigmas)
+            }
 
     return PosteriorCatalog(
         event_names=names,

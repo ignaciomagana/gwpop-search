@@ -10,6 +10,7 @@ from gwpop_search.grammar import ModelSpec
 from gwpop_search.inference.fidelity import (
     DeterministicHBIEvaluator,
     FidelityRunConfig,
+    fidelity_config_sha256,
 )
 from gwpop_search.production import ProductionCampaignConfig
 from gwpop_search.search import Fidelity, evaluation_seed
@@ -52,7 +53,12 @@ def compare_scout_descendant_evidence_config(
     child: ModelSpec,
     proposal_id: str,
 ) -> dict[str, object]:
-    """Refit parent and child independently at one explicit F3 configuration."""
+    """Refit parent and child independently at one explicit F3 configuration.
+
+    Both models run the dynesty F3 rung of ``fidelity_config``; the manifest
+    (format 1.2) pins the sampler backend and the fidelity-config hash, so a
+    comparison directory can only be resumed with the same numerical setup.
+    """
     if parent.model_hash == child.model_hash:
         raise ValueError("parent and child model hashes must differ")
 
@@ -64,7 +70,9 @@ def compare_scout_descendant_evidence_config(
         child.model_hash,
     )
     manifest = {
-        "format_version": "gwpop-search-scout-descendant-comparison-1.1",
+        "format_version": "gwpop-search-scout-descendant-comparison-1.2",
+        "sampler_backend": "dynesty",
+        "fidelity_config_sha256": fidelity_config_sha256(fidelity_config),
         "comparison_identity": str(comparison_identity),
         "dataset_identity": str(dataset_identity),
         "proposal_id": str(proposal_id),
@@ -114,7 +122,8 @@ def compare_scout_descendant_evidence_config(
         )
     )
     summary = {
-        "format_version": "gwpop-search-scout-descendant-comparison-summary-1.0",
+        "format_version": "gwpop-search-scout-descendant-comparison-summary-1.1",
+        "sampler_backend": "dynesty",
         "proposal_id": str(proposal_id),
         "parent_model_hash": parent.model_hash,
         "child_model_hash": child.model_hash,

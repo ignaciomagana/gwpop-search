@@ -120,8 +120,11 @@ def test_legacy_default_manifest_payloads_are_unchanged():
     assert config.to_dict() == LEGACY_SURVEY_PAYLOAD
     assert tuple(config.to_dict()) == tuple(LEGACY_SURVEY_PAYLOAD)
     assert config.dataset_identity_suffix() == ""
+    # Exact-null configuration 1.5 deliberately departs from the legacy survey:
+    # zero-noise truth-centred PE is refused for null calibration, so its default
+    # survey is the legacy payload plus the noisy observation model.
     null = ExactNullCampaignConfig().to_dict()
-    assert null["survey"] == LEGACY_SURVEY_PAYLOAD
+    assert null["survey"] == {**LEGACY_SURVEY_PAYLOAD, "observation_model": "noisy_observation"}
     assert tuple(null) == (
         "format_version",
         "n_nulls",
@@ -130,5 +133,8 @@ def test_legacy_default_manifest_payloads_are_unchanged():
         "truth_hyperparameters",
         "data_mode",
         "min_resampling_ess",
+        "min_resampling_ess_per_event",
+        "pe_scale_policy",
         "max_gpu_hours_per_null",
+        "statistic",
     )

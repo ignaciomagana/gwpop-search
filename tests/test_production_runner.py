@@ -113,6 +113,8 @@ def test_production_runner_validates_freeze_and_wires_executor(
         seen["f3_limit"] = config.max_models_by_fidelity["F3"]
         seen["f4_limit"] = config.max_models_by_fidelity["F4"]
         seen["compute_limit"] = config.max_total_compute_cost
+        seen["ladder"] = config.scheduler.ladder
+        seen["stop"] = config.stop_fidelity.value
         return SearchExecutionSummary(
             root_hash=graph_arg.root_hash,
             n_models_registered=len(graph_arg.nodes),
@@ -141,6 +143,11 @@ def test_production_runner_validates_freeze_and_wires_executor(
     assert seen["f3_limit"] == 1
     assert seen["f4_limit"] == 1
     assert seen["compute_limit"] == 100.0
+    assert seen["ladder"] == ("F0", "F3", "F4")
+    assert seen["stop"] == "F4"
+    assert result["format_version"] == "gwpop-search-production-run-1.1"
+    assert result["sampler_backend"] == {"name": "dynesty", "version": "3.1.0"}
+    assert result["ladder"] == ["F0", "F3", "F4"]
     assert result["scientific_scoring"]["scored_graph"] is None
     assert result["scientific_scoring"]["evidence_coverage"]["complete"] is False
 

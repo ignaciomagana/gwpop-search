@@ -14,12 +14,9 @@ from .numpyro import (
 from .evidence import (
     EvidenceBackendUnavailableError,
     EvidenceRepeatSummary,
-    EvidenceResult,
-    NestedSamplingConfig,
-    load_evidence_result,
+    LegacyEvidenceArtifactError,
+    NoFiniteSupportError,
     run_hbi_evidence,
-    run_numpyro_nested_model,
-    save_evidence_result,
     summarize_evidence_repeats,
 )
 from .dynesty_backend import (
@@ -52,6 +49,21 @@ from .dynesty_backend import (
 from .model_spec import prior_specs_from_model_spec
 from .priors import BASELINE_SYNTHETIC_PRIORS, PriorSpec, serialize_prior_map
 
+# --- Track B: nested-sampling diagnostics and canonical labels (ladder v2) ---
+from .label_switching import (
+    ExchangeableComponents,
+    ModelParameterization,
+    OrderedPairPriorTransform,
+    parameterization_for_spec,
+)
+from .ns_diagnostics import (
+    cross_run_rhat,
+    kish_ess,
+    max_pairwise_z,
+    pooled_weighted_samples,
+    rank_normalized_split_rhat,
+)
+
 
 def generate_baseline_synthetic_dataset(*args, **kwargs):
     from .synthetic import generate_baseline_synthetic_dataset as _generate
@@ -78,6 +90,17 @@ def assess_recovery_campaign(*args, **kwargs):
 
 
 __all__ = [
+    "ExchangeableComponents",
+    "LegacyEvidenceArtifactError",
+    "ModelParameterization",
+    "NoFiniteSupportError",
+    "OrderedPairPriorTransform",
+    "cross_run_rhat",
+    "kish_ess",
+    "max_pairwise_z",
+    "parameterization_for_spec",
+    "pooled_weighted_samples",
+    "rank_normalized_split_rhat",
     "BASELINE_SYNTHETIC_PRIORS",
     "BatchedShapeLogLikelihood",
     "DirtyCodeWarning",
@@ -86,11 +109,9 @@ __all__ = [
     "DynestyUnavailableError",
     "EvidenceBackendUnavailableError",
     "EvidenceRepeatSummary",
-    "EvidenceResult",
     "ImportanceDiagnosticsBatch",
     "ImportanceDiagnosticsFunction",
     "NUTSConfig",
-    "NestedSamplingConfig",
     "NUTSResult",
     "NumPyroUnavailableError",
     "PoolCancelledError",
@@ -112,20 +133,17 @@ __all__ = [
     "generate_baseline_synthetic_dataset",
     "importance_diagnostics_over_posterior",
     "load_dynesty_result",
-    "load_evidence_result",
     "load_result",
     "prior_specs_from_model_spec",
     "prior_transform_for",
     "run_dynesty",
     "run_dynesty_population",
     "run_hbi_evidence",
-    "run_numpyro_nested_model",
     "run_nuts",
     "run_recovery_campaign",
     "run_resumable_chains",
     "run_synthetic_baseline_recovery",
     "save_dynesty_result",
-    "save_evidence_result",
     "save_result",
     "serialize_prior_map",
     "summarize_evidence_repeats",

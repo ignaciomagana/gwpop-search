@@ -21,32 +21,22 @@ def _write_eval(
     passed=True,
     median=None,
     model_hash=None,
+    format_version="gwpop-search-fidelity-evaluation-2.0",
 ):
     median = _median(model) if median is None else median
-    if fidelity == "F3":
-        diagnostics = {
-            "passed": passed,
-            "posterior_median": median,
-        }
-    elif fidelity == "F4":
-        diagnostics = {
-            "passed": passed,
-            "nuts": {
-                "passed": passed,
-                "posterior_median": median,
-            },
-            "evidence": {"passed": passed},
-        }
-    else:
-        diagnostics = {
-            "passed": passed,
-            "posterior_median": median,
-        }
+    diagnostics = {
+        "passed": passed,
+        "checks": [],
+        "evidence": {"log_evidence_mean": -10.0, "conservative_error": 0.1},
+        "posterior": {"median": median},
+        "posterior_median": median,
+    }
     payload = {
-        "format_version": "gwpop-search-fidelity-evaluation-1.0",
+        "format_version": format_version,
         "model_hash": model.model_hash if model_hash is None else model_hash,
         "fidelity": fidelity,
         "dataset_identity": "dataset-hash",
+        "sampler_backend": {"name": "dynesty", "version": "3.1.0"},
         "diagnostics": diagnostics,
     }
     path.write_text(json.dumps(payload))
@@ -55,8 +45,8 @@ def _write_eval(
 @pytest.mark.parametrize(
     "fidelity,source",
     [
-        ("F3", "f3_nested_sampling_posterior_median"),
-        ("F4", "f4_nuts_posterior_median"),
+        ("F3", "f3_dynesty_posterior_median"),
+        ("F4", "f4_dynesty_posterior_median"),
     ],
 )
 def test_export_scout_baseline_from_valid_full_fit(
@@ -76,8 +66,10 @@ def test_export_scout_baseline_from_valid_full_fit(
     )
 
     assert provenance["model_hash"] == model.model_hash
+    assert provenance["format_version"] == "gwpop-search-scout-baseline-1.1"
     assert provenance["fidelity"] == fidelity
     assert provenance["source"] == source
+    assert provenance["sampler_backend"] == {"name": "dynesty", "version": "3.1.0"}
     assert provenance["dataset_identity"] == "dataset-hash"
     assert provenance["evaluation_sha256"]
     assert provenance["hyperparameters_sha256"]
@@ -156,3 +148,20 @@ def test_export_scout_baseline_refuses_overwrite(tmp_path):
 
     with pytest.raises(ValueError, match="already exists"):
         export_scout_baseline_hyperparameters(evaluation, model, output)
+
+
+def test_export_scout_baseline_refuses_nuts_era_evaluations(tmp_path):
+    model = baseline_model_spec()
+    evaluation = tmp_path / "evaluation.json"
+    _write_eval(
+        evaluation,
+        model,
+        fidelity="F4",
+        format_version="gwpop-search-fidelity-evaluation-1.0",
+    )
+    with pytest.raises(ValueError, match="evaluation-2.0"):
+        export_scout_baseline_hyperparameters(
+            evaluation,
+            model,
+            tmp_path / "baseline_hp.json",
+        )
