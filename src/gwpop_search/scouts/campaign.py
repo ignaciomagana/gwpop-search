@@ -11,7 +11,11 @@ from typing import Mapping
 from gwpop_search.data import PosteriorCatalog, SelectionCatalog
 from gwpop_search.grammar import ModelSpec, baseline_model_spec
 from gwpop_search.inference.numpyro import _code_identity
-from gwpop_search.inference.synthetic import SyntheticSurveyConfig
+from gwpop_search.inference.synthetic import (
+    INJECTION_DRAW_POPULATION_PROXY,
+    SyntheticSurveyConfig,
+    population_proxy_point_violations,
+)
 from gwpop_search.models import DEFAULT_BASELINE_HYPERPARAMETERS
 
 from .config import ScoutCampaignConfig
@@ -121,7 +125,7 @@ def build_structured_scout_campaign_plan(
         "n_runs": int(n_runs),
         "root_seed": int(root_seed),
         "injection": asdict(injection),
-        "survey_config": asdict(survey_config),
+        "survey_config": survey_config.to_dict(),
         "scout_config": scout_config.to_dict(),
         "base_model_hash": base_spec.model_hash,
         "base_model_spec": base_spec.to_dict(),
@@ -188,6 +192,11 @@ def _load_or_generate_dataset(
             for name, values in dataset.event_truths.items()
         },
     }
+    if dataset.event_observations is not None:
+        truth["event_observations"] = {
+            name: values.tolist()
+            for name, values in dataset.event_observations.items()
+        }
     truth_path.write_text(json.dumps(truth, sort_keys=True, indent=2))
     return dataset.posterior, dataset.selection, truth
 
@@ -415,6 +424,18 @@ def run_structured_scout_campaign(
         if base_hyperparameters is None
         else base_hyperparameters
     )
+    if survey_config.injection_draw == INJECTION_DRAW_POPULATION_PROXY:
+        # Fail before any data is generated: the scouts evaluate the selection
+        # integral at the fixed base point.
+        problems = population_proxy_point_violations(
+            survey_config.injection_draw_hyperparameters,
+            base_hyperparameters,
+        )
+        if problems:
+            raise ValueError(
+                "population_proxy injections do not cover the scout base "
+                "hyperparameters: " + "; ".join(problems)
+            )
 
     plan = build_structured_scout_campaign_plan(
         n_runs=n_runs,

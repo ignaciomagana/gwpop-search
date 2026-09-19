@@ -65,6 +65,15 @@ class ExactNullCampaignConfig:
         }:
             raise ValueError(f"unsupported null data mode {self.data_mode!r}")
         if (
+            self.data_mode == "frozen_selection_resample"
+            and self.survey.uses_v2_options
+        ):
+            raise ValueError(
+                "frozen_selection_resample reuses the frozen production "
+                "selection and truth-centered PE; survey injection_draw and "
+                "observation_model options do not apply"
+            )
+        if (
             not math.isfinite(self.min_resampling_ess)
             or self.min_resampling_ess <= 0.0
         ):
@@ -82,7 +91,7 @@ class ExactNullCampaignConfig:
             "format_version": self.format_version,
             "n_nulls": int(self.n_nulls),
             "root_seed": int(self.root_seed),
-            "survey": asdict(self.survey),
+            "survey": self.survey.to_dict(),
             "truth_hyperparameters": dict(self.truth_hyperparameters),
             "data_mode": self.data_mode,
             "min_resampling_ess": float(self.min_resampling_ess),
@@ -97,7 +106,7 @@ class ExactNullCampaignConfig:
         return cls(
             n_nulls=int(payload["n_nulls"]),
             root_seed=int(payload["root_seed"]),
-            survey=SyntheticSurveyConfig(**dict(payload["survey"])),
+            survey=SyntheticSurveyConfig.from_dict(payload["survey"]),
             truth_hyperparameters={
                 str(name): float(value)
                 for name, value in dict(
