@@ -268,6 +268,7 @@ def _analyze_sddr(args) -> None:
             prior_specs_from_model_spec(graph.by_hash[larger]),
             prior_specs_from_model_spec(graph.by_hash[smaller]),
             log_bf_ns=lnbf, sigma_ns=sigma, n_bootstrap=args.n_bootstrap, seed=args.seed,
+            method_systematic=args.method_systematic,
         )
         rows.append({**nesting.to_dict(), **check.to_dict()})
     _write(args.output, {"format_version": SDDR_FORMAT, "graph_root_hash": graph.root_hash, "edges": rows})
@@ -471,6 +472,14 @@ def register_analysis_subcommands(subparsers) -> None:
     sddr.add_argument("--n-bootstrap", type=int, default=200)
     sddr.add_argument("--ns-error-mode", choices=("formula6", "conservative"), default="formula6")
     sddr.add_argument("--seed", type=int, default=0)
+    sddr.add_argument(
+        "--method-systematic",
+        type=float,
+        default=None,
+        help="nats added to the SDDR/NS agreement band, overriding the measured per-geometry "
+        "default (SDDR_METHOD_SYSTEMATIC: 0.10 interior, 0.25 boundary, 0.40 boundary+VW). "
+        "Pass 0 for the bare formula (8); the signed difference is reported either way.",
+    )
     sddr.add_argument("--output", required=True)
     sddr.set_defaults(func=_analyze_sddr)
 
