@@ -302,12 +302,19 @@ end-to-end H100 validation contract is
 That contract additionally requires:
 
 - Phase-3 manual H100 acceptance before real-data production;
-- the 88-run structured HSGP validation matrix;
-- explicit scout review plus independent child F3 confirmation;
+- the finite atomic model-graph search as the primary science;
+- complete evidence coverage before normalized model probabilities;
 - K-fold held-out prediction;
 - leave-one-out and explicit event-drop stress;
 - nearby-baseline robustness;
-- production exact-null calibration using the frozen estimator-ready selection
-  and full adaptive-search + evidence-completion replay.
+- production exact-null calibration of the entire atomic search using the
+  frozen estimator-ready selection and full adaptive-search +
+  evidence-completion replay.
+
+HSGP is an optional residual extension after the atomic analysis. If invoked,
+only the targeted scout direction must undergo the corresponding structured
+injection/null validation, explicit review, and independent child F3
+confirmation. The comprehensive 88-run HSGP matrix is available but is not a
+prerequisite for the core atomic analysis.
 
 Use `docs/H100_VALIDATION_REPORT_TEMPLATE.md` as the audit record.
