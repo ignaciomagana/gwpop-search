@@ -91,6 +91,30 @@ def _claim(report, mutation):
     return next(c for c in report["claims"] if c["mutation_id"] == mutation)
 
 
+def test_budget_sigma_mc_falls_back_to_the_plug_in_when_the_u_statistic_is_negative():
+    """The unbiased U-statistic can go slightly negative; the budget must not report 0.
+
+    Under common random numbers the true edge variance is tiny, so the
+    U-statistic lands below zero on finite samples (measured in the low-variance
+    toy regime: -3.9e-5 against a realized 1.25e-3). The plug-in is non-negative
+    and tracked the realized variance to 2% there, so the budget uses it.
+    """
+    from gwpop_search.analysis.model_comparison import _budget_sigma_mc
+
+    # U-statistic negative -> plug-in wins
+    assert _budget_sigma_mc({"variance": -3.9e-5, "variance_plug_in": 1.27e-3, "sigma": 0.0}) == pytest.approx(
+        math.sqrt(1.27e-3)
+    )
+    # U-statistic positive -> it is the (tighter, unbiased) estimate, plug-in ignored
+    assert _budget_sigma_mc({"variance": 0.0704, "variance_plug_in": 0.107, "sigma": math.sqrt(0.0704)}) == (
+        pytest.approx(math.sqrt(0.0704))
+    )
+    # both negative -> 0, never NaN
+    assert _budget_sigma_mc({"variance": -1e-6, "variance_plug_in": -2e-6, "sigma": 0.0}) == 0.0
+    # a supplied sigma carries no variance decomposition
+    assert _budget_sigma_mc({"sigma": 0.25, "bias": 0.0, "source": "supplied"}) == pytest.approx(0.25)
+
+
 def test_report_error_budget_probabilities_and_a_supported_claim():
     graph, evidences, root, child = _graph_and_evidence()
     prior = ComplexityModelPrior(math.log(2.0))

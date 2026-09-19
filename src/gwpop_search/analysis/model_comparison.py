@@ -340,6 +340,31 @@ class ComparisonConfig:
 # ---------------------------------------------------------------------------
 
 
+def _budget_sigma_mc(mc: Mapping[str, object]) -> float:
+    """``sigma_MC`` for the error budget, never below the plug-in estimate.
+
+    ``EdgeMCError.variance`` is the *unbiased* U-statistic of the edge
+    Monte-Carlo variance. Under common random numbers the true edge variance is
+    tiny, so that estimator can land slightly below zero on finite samples, and
+    ``EdgeMCError.sigma`` then reports 0 (the raw value stays in ``variance``
+    with ``variance_negative`` set). Reporting 0 in the budget would drop a real
+    contribution, so the budget falls back to the plug-in estimate, which is
+    non-negative and biased upward by the ``s = s'`` diagonal. Measured on the
+    two-regime toy (validation/analysis_estimators/mc_error_*.json): where the
+    U-statistic went negative the plug-in tracked the realized variance to 2%
+    (sigma ~ 0.036 nats), and where the U-statistic was positive it was the
+    tighter of the two, so this only ever widens the interval.
+    """
+    variance = mc.get("variance")
+    plug_in = mc.get("variance_plug_in")
+    if variance is None:  # a supplied sigma (source='supplied') carries no variance
+        return float(mc["sigma"])  # type: ignore[arg-type]
+    best = float(variance)
+    if best < 0.0 and plug_in is not None:
+        best = max(best, float(plug_in))
+    return math.sqrt(max(best, 0.0))
+
+
 def kass_raftery(log_bf: float) -> str:
     """Kass & Raftery (1995) scale in nats of ``ln B`` (boundaries 1, 3, 5)."""
     magnitude = abs(float(log_bf))
@@ -529,7 +554,7 @@ def build_model_comparison(
             e = edge_mc_error(mc_weights[c], mc_weights[p])
             mc = {**e.to_dict(), "source": "omega_bar"}
         sig_ns = math.hypot(ns_sigma[p], ns_sigma[c])
-        sig_mc = None if mc is None else float(mc["sigma"])
+        sig_mc = None if mc is None else _budget_sigma_mc(mc)
         total = math.sqrt(sig_ns**2 + (sig_mc or 0.0) ** 2)
         row.update(
             {
