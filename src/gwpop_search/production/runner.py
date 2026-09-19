@@ -28,6 +28,7 @@ from gwpop_search.search import (
     UniformModelPrior,
     V2_EXECUTORS,
     execute_search,
+    require_fidelity_config_identity,
     row_executor,
     score_model_graph,
 )
@@ -141,6 +142,7 @@ def collect_best_available_evidence(
     state_database: str | Path,
     *,
     fidelities: Iterable[str] = EVIDENCE_FIDELITIES,
+    fidelity_config_sha256: str | None = None,
 ) -> dict[str, ModelEvidence]:
     """Valid evidence per model: F4 preferred, F3 otherwise (within ``fidelities``).
 
@@ -148,6 +150,8 @@ def collect_best_available_evidence(
     passed gates count; a row of a retired executor raises
     ``LegacyStateError``. ``fidelities=("F3",)`` gives the F3-only evidence
     set used by the ``f3_completion`` null-calibration statistic.
+    ``fidelity_config_sha256`` refuses rows produced under a different frozen
+    numerical configuration (``FidelityConfigMismatchError``).
     """
     fidelities = tuple(str(item) for item in fidelities)
     unknown = sorted(set(fidelities) - set(EVIDENCE_FIDELITIES))
@@ -177,6 +181,7 @@ def collect_best_available_evidence(
             continue
         if row["status"] != "complete" or not bool(row["diagnostics_pass"]):
             continue
+        require_fidelity_config_identity(row, fidelity_config_sha256)
         artifact = row.get("artifact_path")
         if not artifact:
             continue
@@ -192,14 +197,21 @@ def write_scientific_scoring(
     state_database: str | Path,
     artifact_root: str | Path,
     model_prior,
+    fidelities: Iterable[str] = EVIDENCE_FIDELITIES,
+    fidelity_config_sha256: str | None = None,
 ) -> dict[str, object]:
     """Score the declared model set only when evidence coverage is complete."""
     artifact_root = Path(artifact_root)
-    evidences = collect_best_available_evidence(state_database)
+    fidelities = tuple(str(item) for item in fidelities)
+    evidences = collect_best_available_evidence(
+        state_database,
+        fidelities=fidelities,
+        fidelity_config_sha256=fidelity_config_sha256,
+    )
     coverage = {
         "format_version": EVIDENCE_COVERAGE_FORMAT_VERSION,
         "sampler_backend": "dynesty",
-        "evidence_fidelities": list(EVIDENCE_FIDELITIES),
+        "evidence_fidelities": list(fidelities),
         "n_graph_models": len(graph.nodes),
         "n_models_with_evidence": len(evidences),
         "complete": len(evidences) == len(graph.nodes),

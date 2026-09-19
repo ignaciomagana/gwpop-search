@@ -360,7 +360,7 @@ def test_fresh_failed_f3_remains_outside_scientific_evidence(
     assert summary["blocked_invalid"][0]["failure"]["type"] == "no_finite_support"
     assert summary["n_valid_evidence_final"] == 0
     assert not summary["full_model_posterior_available"]
-    assert summary["format_version"] == "gwpop-search-evidence-completion-1.1"
+    assert summary["format_version"] == "gwpop-search-evidence-completion-1.2"
     rows = ResultStore(tmp_path / "state.sqlite").evaluations()
     assert [json.loads(row["run_config_json"])["executor"] for row in rows] == [
         "evidence-completion-v2"
@@ -436,4 +436,90 @@ def test_collection_prefers_f4_filters_f3_only_and_refuses_legacy_rows(tmp_path)
         complete_graph_evidence(
             graph, object(), object(), campaign, dataset_identity="dataset",
             state_database=old_db, artifact_root=tmp_path / "x",
+        )
+
+
+def test_passed_f4_does_not_mask_a_failed_f3(monkeypatch, tmp_path):
+    """The D4 statistic reads F3 only, so an F4 row must not stand in for it.
+
+    A model whose F3 failed its gates but whose F4 passed used to count as
+    'already complete', leaving the graph without the F3 evidence the
+    ``f3_completion`` statistic needs and with no way to repair it.
+    """
+    graph = enumerate_model_graph(baseline_model_spec(), max_depth=0, max_models=1)
+    campaign = _campaign(graph)
+    database = tmp_path / "state.sqlite"
+    artifacts = tmp_path / "artifacts"
+    store = ResultStore(database)
+    model = graph.nodes[0]
+    _record_existing(
+        store, model, campaign, artifacts, Fidelity.F3_EVIDENCE,
+        diagnostics_pass=False, logz=-10.0,
+    )
+    _record_existing(
+        store, model, campaign, artifacts, Fidelity.F4_PRODUCTION,
+        diagnostics_pass=True, logz=-9.8,
+    )
+
+    # The F4 row alone would make the model look complete.
+    assert collect_best_available_evidence(database)
+    assert not collect_best_available_evidence(database, fidelities=("F3",))
+
+    monkeypatch.setattr(
+        "gwpop_search.production.completion.DeterministicHBIEvaluator",
+        _FakeEvaluator,
+    )
+    summary = complete_graph_evidence(
+        graph,
+        object(),
+        object(),
+        campaign,
+        dataset_identity="dataset",
+        state_database=database,
+        artifact_root=artifacts,
+    )
+
+    assert summary["required_evidence_fidelities"] == ["F3"]
+    assert summary["n_reused"] == 0
+    assert summary["n_evaluated"] == 0
+    assert summary["n_blocked_invalid"] == 1
+    blocked = summary["blocked_invalid"][0]
+    assert blocked["model_hash"] == model.model_hash
+    assert blocked["reason"] == "existing_frozen_f3_is_not_valid_scientific_evidence"
+    assert not summary["full_model_posterior_available"]
+
+
+def test_completion_refuses_rows_of_another_frozen_fidelity_config(
+    monkeypatch,
+    tmp_path,
+):
+    """Reuse is refused when the stored row carries a different config hash."""
+    from gwpop_search.search import FidelityConfigMismatchError
+
+    class _HashedEvaluator(_FakeEvaluator):
+        fidelity_config_sha256 = "b" * 64
+
+    graph = enumerate_model_graph(baseline_model_spec(), max_depth=0, max_models=1)
+    campaign = _campaign(graph)
+    database = tmp_path / "state.sqlite"
+    artifacts = tmp_path / "artifacts"
+    store = ResultStore(database)
+    _record_existing(
+        store, graph.nodes[0], campaign, artifacts, Fidelity.F3_EVIDENCE,
+        diagnostics_pass=True,
+    )
+
+    monkeypatch.setattr(
+        "gwpop_search.production.completion.DeterministicHBIEvaluator",
+        _HashedEvaluator,
+    )
+    with pytest.raises(FidelityConfigMismatchError, match="fidelity config"):
+        complete_graph_evidence(
+            graph,
+            object(),
+            object(),
+            campaign,
+            dataset_identity="dataset",
+            state_database=database,
+            artifact_root=artifacts,
         )

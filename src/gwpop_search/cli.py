@@ -570,10 +570,13 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
     from .inference.synthetic import SyntheticSurveyConfig
     from .models import DEFAULT_BASELINE_HYPERPARAMETERS
     from .nulls import (
+        PE_SCALE_POLICY_DECLARED_FIXED,
+        PE_SCALE_POLICY_MATCH_OBSERVED,
         ExactNullCampaignConfig,
+        measure_observed_pe_scales,
         save_exact_null_campaign_config,
     )
-    from .production import load_dataset_manifest
+    from .production import load_dataset_manifest, load_frozen_dataset
 
     truth = (
         dict(DEFAULT_BASELINE_HYPERPARAMETERS)
@@ -585,6 +588,14 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
             ).items()
         }
     )
+    pe_samples = args.pe_samples
+    pe_scale_policy = args.pe_scale_policy
+    if pe_scale_policy is None:
+        pe_scale_policy = (
+            PE_SCALE_POLICY_MATCH_OBSERVED
+            if args.data_mode == "frozen_selection_resample"
+            else PE_SCALE_POLICY_DECLARED_FIXED
+        )
     if args.data_mode == "frozen_selection_resample":
         if args.manifest is None:
             raise ValueError(
@@ -596,21 +607,48 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
             raise ValueError(
                 "--n-events disagrees with the frozen dataset manifest"
             )
+        if pe_scale_policy == PE_SCALE_POLICY_MATCH_OBSERVED:
+            # The null PE sample count is the observed one (D4: identical F3
+            # Monte-Carlo regime), so it is read from the frozen catalog and
+            # frozen into the configuration rather than chosen.
+            if args.base_dir is None:
+                raise ValueError(
+                    "--base-dir is required with --pe-scale-policy match_observed: "
+                    "the null PE sample count is read from the frozen catalog"
+                )
+            posterior, _ = load_frozen_dataset(
+                manifest,
+                data_base_dir=Path(args.base_dir),
+            )
+            observed_samples = measure_observed_pe_scales(
+                posterior
+            ).uniform_samples_per_event()
+            if pe_samples is not None and int(pe_samples) != observed_samples:
+                raise ValueError(
+                    f"--pe-samples {int(pe_samples)} disagrees with the frozen "
+                    f"catalog's {observed_samples} samples per event; "
+                    "--pe-scale-policy match_observed requires the observed count"
+                )
+            pe_samples = observed_samples
     else:
         n_events = 64 if args.n_events is None else args.n_events
+    if pe_samples is None:
+        pe_samples = 256
 
     config = ExactNullCampaignConfig(
         n_nulls=args.n_nulls,
         root_seed=args.root_seed,
         survey=SyntheticSurveyConfig(
             n_events=n_events,
-            posterior_samples_per_event=args.pe_samples,
+            posterior_samples_per_event=int(pe_samples),
             n_injections=args.n_injections,
             observation_model="noisy_observation",
         ),
         truth_hyperparameters=truth,
         data_mode=args.data_mode,
         min_resampling_ess=args.min_resampling_ess,
+        min_resampling_ess_per_event=args.min_resampling_ess_per_event,
+        pe_scale_policy=pe_scale_policy,
         max_gpu_hours_per_null=args.max_gpu_hours_per_null,
         statistic=args.statistic,
     )
@@ -618,6 +656,10 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
     print(
         "exact null calibration config written: "
         f"{args.output} n_nulls={config.n_nulls} statistic={config.statistic} "
+        f"pe_scale_policy={config.pe_scale_policy} "
+        f"pe_samples={config.survey.posterior_samples_per_event} "
+        f"min_resampling_ess>=max({config.min_resampling_ess:g}, "
+        f"{config.min_resampling_ess_per_event:g}x{config.survey.n_events}) "
         f"max_gpu_hours_per_null={config.max_gpu_hours_per_null}"
     )
 
@@ -693,6 +735,20 @@ def _prepare_exact_null_calibration(args: argparse.Namespace) -> None:
         production_dataset_identity=dataset_identity,
     )
     print(json.dumps(plan, sort_keys=True, indent=2))
+    precheck_path = Path(args.root) / "null_data_precheck.json"
+    if precheck_path.is_file():
+        precheck = json.loads(precheck_path.read_text())
+        resampling = precheck["resampling"]
+        print(
+            "null data precheck: "
+            f"resampling_ess={resampling['resampling_ess']:.6g} "
+            f"(required {resampling['required_resampling_ess']:.6g} for "
+            f"{precheck['n_events']} events, "
+            f"{resampling['resampling_ess_per_event']:.4g} per event) "
+            f"pe_scale_policy={precheck['pe_scale_policy']} "
+            f"max_observed/declared_pe_width_ratio="
+            f"{precheck['pe_scales']['max_width_ratio']:.4g} -> {precheck_path}"
+        )
 
 
 def _run_exact_null_index(args: argparse.Namespace) -> None:
@@ -1616,6 +1672,18 @@ def _summarize_fidelity_evaluation(args: argparse.Namespace) -> None:
             if item.get("stage", "gate") == "gate" and not item.get("passed")
         ],
         "n_gates": sum(1 for item in checks if item.get("stage", "gate") == "gate"),
+        # Advisory diagnostics the backend could not produce (e.g. the F4
+        # insertion-index test, which needs dynesty birth iterations): reported
+        # explicitly so an operator never reads a missing advisory as a pass.
+        "unavailable_advisories": [
+            {
+                "name": item.get("name"),
+                "reason_code": item.get("reason_code"),
+                "note": item.get("note"),
+            }
+            for item in checks
+            if item.get("stage") == "advisory" and item.get("available") is False
+        ],
         "evidence": diagnostics.get("evidence"),
         "posterior_median": diagnostics.get("posterior_median"),
     }
@@ -1626,6 +1694,10 @@ def _summarize_fidelity_evaluation(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     from .grammar import HYPERPRIOR_PROFILES
+    from .nulls import (
+        DEFAULT_MIN_RESAMPLING_ESS_PER_EVENT,
+        PE_SCALE_POLICIES,
+    )
 
     parser = argparse.ArgumentParser(
         prog="gwpop-search",
@@ -1813,10 +1885,38 @@ def build_parser() -> argparse.ArgumentParser:
     null_template.add_argument("--n-nulls", type=int, default=100)
     null_template.add_argument("--root-seed", type=int, default=20260918)
     null_template.add_argument("--n-events", type=int)
-    null_template.add_argument("--pe-samples", type=int, default=256)
+    null_template.add_argument(
+        "--pe-samples",
+        type=int,
+        help=(
+            "PE samples per null event; read from the frozen catalog under "
+            "--pe-scale-policy match_observed (default 256 otherwise)"
+        ),
+    )
     null_template.add_argument("--n-injections", type=int, default=20_000)
     null_template.add_argument("--truth-hyperparameters-json")
     null_template.add_argument("--manifest")
+    null_template.add_argument(
+        "--base-dir",
+        help=(
+            "frozen data base directory; required by --pe-scale-policy "
+            "match_observed, which measures the observed PE precision"
+        ),
+    )
+    null_template.add_argument(
+        "--pe-scale-policy",
+        choices=PE_SCALE_POLICIES,
+        default=None,
+        help=(
+            "match_observed: null PE precision and sample count come from the "
+            "frozen catalog (per-event widths rank-matched on the detection "
+            "statistic proxy), so nulls and the observed run share the F3 "
+            "Monte-Carlo regime; declared_fixed: keep the configured scalars "
+            "and record the measured mismatch (the default is match_observed "
+            "for frozen_selection_resample and declared_fixed for the "
+            "engineering synthetic_survey mode, which has no frozen catalog)"
+        ),
+    )
     null_template.add_argument(
         "--data-mode",
         choices=("frozen_selection_resample", "synthetic_survey"),
@@ -1826,6 +1926,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-resampling-ess",
         type=float,
         default=200.0,
+        help="absolute floor on the frozen-selection resampling ESS",
+    )
+    null_template.add_argument(
+        "--min-resampling-ess-per-event",
+        type=float,
+        default=DEFAULT_MIN_RESAMPLING_ESS_PER_EVENT,
+        help=(
+            "resampling ESS required per event; the gate is "
+            "max(--min-resampling-ess, this x n_events), so a null catalog is "
+            "drawn from an effective pool much larger than itself"
+        ),
     )
     null_template.add_argument(
         "--max-gpu-hours-per-null",

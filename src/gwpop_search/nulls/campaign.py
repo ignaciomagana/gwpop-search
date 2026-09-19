@@ -10,12 +10,13 @@ Calibrated statistic (``statistic="f3_completion"``, decision D4)
     seeds are ``evaluation_seed(root, model, "F3")`` on every path, so the
     complete F3 evidence set does not depend on the search beam.
 
-Formats: null configuration ``gwpop-search-exact-null-campaign-1.4``
-(frozen-selection PE uses the declared noisy-observation approximation; the
-per-null compute ceiling must be set explicitly), plan
-``gwpop-search-exact-null-plan-1.2`` and summary
-``gwpop-search-exact-null-summary-1.2`` (both record the statistic mode,
-ladder, sampler backend and fidelity-config hash).
+Formats: null configuration ``gwpop-search-exact-null-campaign-1.5``
+(frozen-selection PE uses the declared noisy-observation approximation with a
+PE precision tied to the frozen catalog, a catalog-scaled resampling-ESS gate
+and an explicit per-null compute ceiling), plan
+``gwpop-search-exact-null-plan-1.3`` and summary
+``gwpop-search-exact-null-summary-1.3`` (both record the statistic mode,
+ladder, sampler backend, PE-scale policy and fidelity-config hash).
 """
 
 from __future__ import annotations
@@ -42,15 +43,30 @@ from gwpop_search.production.runner import (
 )
 from gwpop_search.search import Fidelity, SearchExecutionConfig
 
-EXACT_NULL_CONFIG_FORMAT_VERSION = "gwpop-search-exact-null-campaign-1.4"
+from .frozen_selection import (
+    DEFAULT_MIN_RESAMPLING_ESS_PER_EVENT,
+    frozen_selection_resampling_probabilities,
+    required_resampling_ess,
+)
+from .pe_matching import (
+    PE_SCALE_POLICY_DECLARED_FIXED,
+    PE_SCALE_POLICY_MATCH_OBSERVED,
+    measure_observed_pe_scales,
+    pe_scale_comparison,
+    require_pe_scale_policy,
+)
+
+EXACT_NULL_CONFIG_FORMAT_VERSION = "gwpop-search-exact-null-campaign-1.5"
 LEGACY_EXACT_NULL_CONFIG_FORMATS = (
     "gwpop-search-exact-null-campaign-1.0",
     "gwpop-search-exact-null-campaign-1.1",
     "gwpop-search-exact-null-campaign-1.2",
     "gwpop-search-exact-null-campaign-1.3",
+    "gwpop-search-exact-null-campaign-1.4",
 )
-EXACT_NULL_PLAN_FORMAT_VERSION = "gwpop-search-exact-null-plan-1.2"
-EXACT_NULL_SUMMARY_FORMAT_VERSION = "gwpop-search-exact-null-summary-1.2"
+EXACT_NULL_PLAN_FORMAT_VERSION = "gwpop-search-exact-null-plan-1.3"
+EXACT_NULL_SUMMARY_FORMAT_VERSION = "gwpop-search-exact-null-summary-1.3"
+EXACT_NULL_PRECHECK_FORMAT_VERSION = "gwpop-search-exact-null-precheck-1.0"
 STATISTIC_F3_COMPLETION = "f3_completion"
 NULL_STATISTICS = (STATISTIC_F3_COMPLETION,)
 # Rungs a null replay runs and the evidence the statistic is computed from.
@@ -93,17 +109,29 @@ from .search_replay import (
 
 @dataclass(frozen=True)
 class ExactNullCampaignConfig:
-    """Frozen exact-null calibration settings (format 1.4).
+    """Frozen exact-null calibration settings (format 1.5).
 
     ``survey.observation_model`` must be ``noisy_observation`` in every data
     mode (zero-noise truth-centred PE is disqualifying). In
-    ``frozen_selection_resample`` mode the survey supplies only the event
-    count, PE samples per event and measurement-noise scales; its injection
-    options must stay unset. ``max_gpu_hours_per_null`` is the per-null
-    compute ceiling in the evaluator's ``compute_cost`` units (wall-clock
-    hours); it has no default because it must be frozen from cost calibration
-    (``None`` = not yet set; a plan cannot be prepared without it).
-    ``statistic`` is the calibrated search statistic (``f3_completion``).
+    ``frozen_selection_resample`` mode the survey supplies the event count and
+    the PE settings; its injection options must stay unset.
+
+    ``pe_scale_policy`` decides where the null PE precision comes from
+    (:mod:`gwpop_search.nulls.pe_matching`). ``match_observed`` (default) takes
+    the per-event measurement scales and the PE sample count from the frozen
+    observed catalog, so a null's F3 Monte-Carlo regime is the observed run's
+    regime, as D4's "identical F3 procedure" requires; ``declared_fixed``
+    keeps the configured scalars and records the measured mismatch.
+
+    The resampling gate is ``max(min_resampling_ess, min_resampling_ess_per_event
+    * n_events)``: an absolute floor alone lets a catalog draw more events than
+    there are effectively distinct truths.
+
+    ``max_gpu_hours_per_null`` is the per-null compute ceiling in the
+    evaluator's ``compute_cost`` units (wall-clock hours); it has no default
+    because it must be frozen from cost calibration (``None`` = not yet set; a
+    plan cannot be prepared without it). ``statistic`` is the calibrated search
+    statistic (``f3_completion``).
     """
 
     n_nulls: int = 100
@@ -114,6 +142,8 @@ class ExactNullCampaignConfig:
     )
     data_mode: str = "frozen_selection_resample"
     min_resampling_ess: float = 200.0
+    min_resampling_ess_per_event: float = DEFAULT_MIN_RESAMPLING_ESS_PER_EVENT
+    pe_scale_policy: str = PE_SCALE_POLICY_MATCH_OBSERVED
     max_gpu_hours_per_null: float | None = None
     statistic: str = STATISTIC_F3_COMPLETION
     format_version: str = EXACT_NULL_CONFIG_FORMAT_VERSION
@@ -168,6 +198,26 @@ class ExactNullCampaignConfig:
             or self.min_resampling_ess <= 0.0
         ):
             raise ValueError("min_resampling_ess must be finite and positive")
+        if (
+            not math.isfinite(self.min_resampling_ess_per_event)
+            or self.min_resampling_ess_per_event <= 0.0
+        ):
+            raise ValueError(
+                "min_resampling_ess_per_event must be finite and positive"
+            )
+        object.__setattr__(
+            self,
+            "pe_scale_policy",
+            require_pe_scale_policy(str(self.pe_scale_policy)),
+        )
+        if (
+            self.data_mode != "frozen_selection_resample"
+            and self.pe_scale_policy != PE_SCALE_POLICY_DECLARED_FIXED
+        ):
+            raise ValueError(
+                "pe_scale_policy='match_observed' matches the frozen observed "
+                "catalog and applies to data_mode='frozen_selection_resample' only"
+            )
         if self.max_gpu_hours_per_null is not None:
             ceiling = float(self.max_gpu_hours_per_null)
             if not math.isfinite(ceiling) or ceiling <= 0.0:
@@ -194,6 +244,10 @@ class ExactNullCampaignConfig:
             "truth_hyperparameters": dict(self.truth_hyperparameters),
             "data_mode": self.data_mode,
             "min_resampling_ess": float(self.min_resampling_ess),
+            "min_resampling_ess_per_event": float(
+                self.min_resampling_ess_per_event
+            ),
+            "pe_scale_policy": self.pe_scale_policy,
             "max_gpu_hours_per_null": (
                 None
                 if self.max_gpu_hours_per_null is None
@@ -211,7 +265,8 @@ class ExactNullCampaignConfig:
         if version != EXACT_NULL_CONFIG_FORMAT_VERSION:
             raise ValueError(
                 f"unsupported exact null campaign format {version!r}: re-freeze as "
-                f"{EXACT_NULL_CONFIG_FORMAT_VERSION} (noisy-observation PE, "
+                f"{EXACT_NULL_CONFIG_FORMAT_VERSION} (noisy-observation PE matched to "
+                "the frozen catalog, catalog-scaled resampling-ESS gate, "
                 "f3_completion statistic, explicit per-null compute ceiling)"
             )
         ceiling = payload.get("max_gpu_hours_per_null")
@@ -229,6 +284,10 @@ class ExactNullCampaignConfig:
                 payload.get("data_mode", "frozen_selection_resample")
             ),
             min_resampling_ess=float(payload["min_resampling_ess"]),
+            min_resampling_ess_per_event=float(
+                payload["min_resampling_ess_per_event"]
+            ),
+            pe_scale_policy=str(payload["pe_scale_policy"]),
             max_gpu_hours_per_null=None if ceiling is None else float(ceiling),
             statistic=str(payload["statistic"]),
             format_version=str(version),
@@ -368,6 +427,68 @@ def _validate_exact_null_inputs(
             raise ValueError(
                 "null config n_events must equal the frozen observed event count"
             )
+        if config.pe_scale_policy == PE_SCALE_POLICY_MATCH_OBSERVED:
+            observed = measure_observed_pe_scales(
+                production_posterior
+            ).uniform_samples_per_event()
+            if int(config.survey.posterior_samples_per_event) != observed:
+                raise ValueError(
+                    "pe_scale_policy='match_observed' requires the null PE sample "
+                    "count to equal the frozen catalog's so that the nulls and the "
+                    "observed run share the F3 Monte-Carlo regime (D4); freeze "
+                    f"survey.posterior_samples_per_event={observed}, got "
+                    f"{int(config.survey.posterior_samples_per_event)}"
+                )
+
+
+def exact_null_data_precheck(
+    graph: ModelGraph,
+    config: ExactNullCampaignConfig,
+    *,
+    production_posterior,
+    production_selection,
+) -> dict[str, object]:
+    """Measure, before any replay is launched, what the null catalogs will be.
+
+    Reports the frozen selection's resampling ESS at the null truth against the
+    gate the replays apply, the effective truth pool per catalog and the null
+    PE precision against the observed catalog. Cheap (one population-density
+    pass over the selection rows) and always run by
+    :func:`prepare_exact_null_campaign`.
+    """
+    if config.data_mode != "frozen_selection_resample":
+        raise ValueError(
+            "the null data precheck applies to data_mode='frozen_selection_resample'"
+        )
+    root_spec, root_profile = declared_null_root(graph)
+    _, diagnostics = frozen_selection_resampling_probabilities(
+        production_selection,
+        root_spec,
+        config.truth_hyperparameters,
+    )
+    n_events = int(production_posterior.n_events)
+    required = required_resampling_ess(
+        n_events,
+        min_resampling_ess=config.min_resampling_ess,
+        min_resampling_ess_per_event=config.min_resampling_ess_per_event,
+    )
+    scales = measure_observed_pe_scales(production_posterior)
+    ess = float(diagnostics["resampling_ess"])
+    return {
+        "format_version": EXACT_NULL_PRECHECK_FORMAT_VERSION,
+        "graph_root_hash": graph.root_hash,
+        "root_hyperprior_profile": root_profile,
+        "n_events": n_events,
+        "truth_hyperparameters": dict(config.truth_hyperparameters),
+        "resampling": {
+            **{str(k): v for k, v in diagnostics.items()},
+            "required_resampling_ess": required,
+            "resampling_ess_per_event": ess / n_events,
+            "passes_gate": bool(ess >= required),
+        },
+        "pe_scale_policy": config.pe_scale_policy,
+        "pe_scales": pe_scale_comparison(config.survey, scales),
+    }
 
 
 def prepare_exact_null_campaign(
@@ -392,6 +513,23 @@ def prepare_exact_null_campaign(
     root.mkdir(parents=True, exist_ok=True)
     plan = build_exact_null_campaign_plan(graph, campaign, config)
     _write_plan_once(root / "null_campaign_plan.json", plan)
+    if config.data_mode == "frozen_selection_resample":
+        precheck = exact_null_data_precheck(
+            graph,
+            config,
+            production_posterior=production_posterior,
+            production_selection=production_selection,
+        )
+        (root / "null_data_precheck.json").write_text(
+            json.dumps(precheck, sort_keys=True, indent=2)
+        )
+        if not precheck["resampling"]["passes_gate"]:
+            raise ValueError(
+                "the frozen selection cannot support the requested null catalogs: "
+                f"resampling ESS {precheck['resampling']['resampling_ess']:.6g} < "
+                f"{precheck['resampling']['required_resampling_ess']:.6g} required for "
+                f"{precheck['n_events']} events; every replay would fail the same gate"
+            )
     return plan
 
 
@@ -483,6 +621,8 @@ def run_exact_null_index(
         frozen_selection=production_selection,
         production_dataset_identity=production_dataset_identity,
         min_resampling_ess=config.min_resampling_ess,
+        min_resampling_ess_per_event=config.min_resampling_ess_per_event,
+        pe_scale_policy=config.pe_scale_policy,
         statistic=config.statistic,
     )
     if result.null_index != index or result.seed != data_seed:
@@ -493,6 +633,48 @@ def run_exact_null_index(
         json.dumps(result.to_dict(), sort_keys=True, indent=2)
     )
     return result
+
+
+def _null_data_diagnostics(
+    results: tuple[SearchReplayResult, ...],
+) -> dict[str, object]:
+    """Per-null truth-pool and PE-precision summary over a finished campaign.
+
+    Each null catalog draws its truths with replacement from the frozen
+    selection, so ``unique_truth_fraction`` (distinct truth rows per event) and
+    the resampling ESS say how independent the replicates really are.
+    """
+    def _collect(key: str) -> list[float]:
+        values = []
+        for item in results:
+            payload = (item.metadata or {}).get("null_data_metadata") or {}
+            if key in payload:
+                values.append(float(payload[key]))
+        return values
+
+    out: dict[str, object] = {"n_nulls": len(results)}
+    for key in ("resampling_ess", "unique_truth_fraction", "n_unique_truth_rows"):
+        values = _collect(key)
+        if not values:
+            continue
+        out[key] = {
+            "min": min(values),
+            "median": float(sorted(values)[len(values) // 2]),
+            "max": max(values),
+            "n_reported": len(values),
+        }
+    policies = sorted(
+        {
+            str(
+                ((item.metadata or {}).get("null_data_metadata") or {})
+                .get("pe_approximation", {})
+                .get("pe_scale_policy", "unrecorded")
+            )
+            for item in results
+        }
+    )
+    out["pe_scale_policies"] = policies
+    return out
 
 
 def finalize_exact_null_campaign(
@@ -541,18 +723,23 @@ def finalize_exact_null_campaign(
         evidence = collect_best_available_evidence(
             observed_state_database,
             fidelities=STATISTIC_EVIDENCE_FIDELITIES[config.statistic],
+            fidelity_config_sha256=fidelity_config_sha256(campaign.fidelity),
         )
-        if evidence:
-            if len(evidence) != len(graph.nodes):
-                raise ValueError(
-                    "observed production state lacks complete valid F3 evidence; "
-                    "run complete-production-evidence before null calibration"
-                )
-            observed = search_statistics_from_evidence(
-                graph,
-                evidence,
-                model_prior=model_prior,
+        # An empty evidence set is not "no observed run requested": the caller
+        # passed a state database precisely to obtain a calibrated p-value, so a
+        # summary without one would look complete while carrying no result.
+        if len(evidence) != len(graph.nodes):
+            raise ValueError(
+                "observed production state lacks complete valid "
+                f"{'/'.join(STATISTIC_EVIDENCE_FIDELITIES[config.statistic])} evidence "
+                f"({len(evidence)} of {len(graph.nodes)} graph models); run "
+                "complete-production-evidence before null calibration"
             )
+        observed = search_statistics_from_evidence(
+            graph,
+            evidence,
+            model_prior=model_prior,
+        )
 
     calibrated = calibrate_search_replays(
         results,
@@ -573,8 +760,10 @@ def finalize_exact_null_campaign(
         "graph_root_hash": graph.root_hash,
         "root_hyperprior_profile": declared_null_root(graph)[1],
         "null_data_mode": config.data_mode,
+        "pe_scale_policy": config.pe_scale_policy,
         "max_gpu_hours_per_null": config.require_compute_ceiling(),
         "production_dataset_identity": production_dataset_identity,
+        "null_data_diagnostics": _null_data_diagnostics(results),
         "observed_search_statistics": observed,
         "calibration": calibrated,
     }

@@ -617,3 +617,128 @@ def test_mixture_model_is_evaluated_on_canonical_labels(dataset, tmp_path):
         (tmp_path / "f3" / "evidence" / "repeat_000" / "manifest.json").read_text()
     )
     assert manifest["parameterization"]["kind"] == "ordered_exchangeable_pairs"
+
+
+# ---------------------------------------------------------------------------
+# Artifact contract (review findings 6 and 7)
+# ---------------------------------------------------------------------------
+
+
+def test_evaluation_json_is_strict_json_when_an_importance_gate_fails(
+    monkeypatch, dataset, tmp_path
+):
+    """A failing importance gate writes +inf metrics; the artifact stays valid JSON.
+
+    NaN metrics are mapped to +inf so that ``le`` gates fail, and that value is
+    recorded in the over-posterior summary. Emitting it as the bare token
+    ``Infinity`` made evaluation.json unreadable by any strict JSON consumer.
+    """
+    spec = baseline_model_spec()
+    results = _fake_runs(dataset, spec)
+    monkeypatch.setattr(
+        "gwpop_search.inference.fidelity.run_model_evidence_repeats",
+        lambda *args, **kwargs: (results, {}),
+    )
+
+    class _NanBatch:
+        def __init__(self, batch):
+            self._batch = batch
+
+        def __getattr__(self, name):
+            return getattr(self._batch, name)
+
+        def summary_statistics(self):
+            stats = dict(self._batch.summary_statistics())
+            stats["shape_log_likelihood_variance"] = np.full_like(
+                np.asarray(stats["shape_log_likelihood_variance"], dtype=float),
+                np.nan,
+            )
+            return stats
+
+    def _nan_diagnostics(*args, **kwargs):
+        real = build_importance_diagnostics(*args, **kwargs)
+
+        class _Wrapped:
+            names = real.names
+
+            @staticmethod
+            def likelihood_identity():
+                return real.likelihood_identity()
+
+            def __call__(self, theta):
+                return _NanBatch(real(theta))
+
+        return _Wrapped()
+
+    monkeypatch.setattr(
+        "gwpop_search.inference.fidelity.build_importance_diagnostics",
+        _nan_diagnostics,
+    )
+    evaluator = DeterministicHBIEvaluator(
+        dataset.posterior,
+        dataset.selection,
+        config=_small_config(),
+        dataset_identity="sha",
+    )
+    record = evaluator.evaluate(
+        spec, Fidelity.F3_EVIDENCE, seed=3, run_dir=tmp_path / "f3nan"
+    )
+    assert not record.diagnostics_pass
+
+    raw = (tmp_path / "f3nan" / "evaluation.json").read_text()
+    assert "Infinity" not in raw.replace('"Infinity"', "").replace('"-Infinity"', "")
+
+    def _refuse(token):
+        raise AssertionError(f"non-standard JSON token {token}")
+
+    strict = json.loads(raw, parse_constant=_refuse)
+    variance = strict["diagnostics"]["importance"]["over_posterior"]["metrics"][
+        "shape_log_likelihood_variance"
+    ]
+    assert variance["median"] == "Infinity"
+
+    # read_evaluation restores the floats, so in-repo consumers are unchanged.
+    payload = read_evaluation(tmp_path / "f3nan" / "evaluation.json")
+    restored = payload["diagnostics"]["importance"]["over_posterior"]["metrics"][
+        "shape_log_likelihood_variance"
+    ]
+    assert restored["median"] == float("inf")
+    failed = _names(payload["diagnostics"]["checks"], failed_gates_only=True)
+    assert "importance.shape_log_likelihood_variance.point" in failed
+
+
+def test_f4_insertion_index_advisory_is_explicitly_unavailable(dataset):
+    """D3 asks for the advisory; the backend cannot supply it, and says so."""
+    from gwpop_search.inference.fidelity import (
+        INSERTION_INDEX_UNAVAILABLE_REASON,
+        default_f4_criteria,
+    )
+
+    spec = baseline_model_spec()
+    results = _fake_runs(dataset, spec)
+    criteria = _lenient(insertion_index_advisory=True)
+    assert default_f4_criteria().insertion_index_advisory is True
+    diagnostics = summarize_dynesty_fit(
+        results,
+        dataset.posterior,
+        dataset.selection,
+        compile_model_spec(spec),
+        priors=prior_specs_from_model_spec(spec),
+        criteria=criteria,
+        hbi_config=HBI,
+        n_draws=16,
+        draw_seed=1,
+    )
+    insertion = diagnostics["nested_sampling"]["insertion_index"]
+    assert insertion["available"] is False
+    assert insertion["reason_code"] == INSERTION_INDEX_UNAVAILABLE_REASON
+    assert insertion["requires"] == "DynestyResult.samples_it"
+
+    checks = {item["name"]: item for item in diagnostics["checks"]}
+    advisory = checks["nested_sampling.insertion_index_ks"]
+    assert advisory["stage"] == "advisory"
+    assert advisory["available"] is False
+    assert advisory["reason_code"] == INSERTION_INDEX_UNAVAILABLE_REASON
+    assert advisory["passed"] is None
+    # An unavailable advisory never enters the gate decision.
+    assert diagnostics["passed"] is True

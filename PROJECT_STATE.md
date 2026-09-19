@@ -381,8 +381,17 @@ Implemented:
   estimator-ready production selection with relative weight
   `p_pop(theta|Lambda_null)/pdraw(theta)`;
 - null-selection preflight reporting resampling ESS and maximum discrete weight;
-- default resampling ESS floor of 200 and independent 12 GPU-hour per-null
-  ceiling frozen in exact-null config v1.3;
+- catalog-scaled resampling gate `max(min_resampling_ess, per_event x n_events)`
+  (default 10 per event) with a prepared-campaign precheck that measures the
+  production resampling ESS and the effective truth pool before any replay runs;
+- null PE precision tied to the frozen observed catalog (`pe_scale_policy`,
+  exact-null config v1.5): `match_observed` gives every null event an observed
+  event's four marginal measurement scales, rank-matched on the
+  detection-statistic proxy, and the observed PE sample count, so the nulls and
+  the observed run share the F3 Monte-Carlo regime; `declared_fixed` keeps the
+  synthetic scales and records the measured mismatch as a declared
+  approximation;
+- an explicit per-null compute ceiling frozen in the exact-null config;
 - exact-null plan v1.1 records the actual per-null cap separately from the
   source production campaign budget;
 - array-safe exact-null lifecycle: immutable prepare step, deterministic

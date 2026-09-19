@@ -266,3 +266,107 @@ def test_executor_checks_the_ladder_against_the_evaluator(tmp_path):
             state_database=tmp_path / "state.sqlite",
             artifact_root=tmp_path / "artifacts",
         )
+
+
+class _ConfiguredEvaluator(StubEvaluator):
+    """Evaluator that carries the hash of a frozen numerical configuration."""
+
+    def __init__(self, fidelity_config_sha256):
+        super().__init__()
+        self.fidelity_config_sha256 = fidelity_config_sha256
+
+
+def _single_rung_config():
+    return SearchExecutionConfig(
+        root_seed=11,
+        scheduler=SchedulerConfig(ladder=("F0", "F3"), beam_width=1, exploration_quota=0),
+        start_fidelity=Fidelity.F0_SANITY,
+        stop_fidelity=Fidelity.F0_SANITY,
+    )
+
+
+def test_stored_rows_record_the_frozen_fidelity_config_hash(tmp_path):
+    graph = enumerate_model_graph(baseline_model_spec(), max_depth=0, max_models=1)
+    evaluator = _ConfiguredEvaluator("a" * 64)
+    database = tmp_path / "state.sqlite"
+
+    execute_search(
+        graph,
+        evaluator,
+        state_database=database,
+        artifact_root=tmp_path / "artifacts",
+        config=_single_rung_config(),
+    )
+    rows = ResultStore(database).evaluations()
+    assert len(rows) == 1
+    assert json.loads(rows[0]["run_config_json"])["fidelity_config_sha256"] == "a" * 64
+
+
+def test_re_freezing_the_numerics_refuses_to_reuse_stale_evaluations(tmp_path):
+    """Seeds do not depend on the fidelity config, so reuse must check it.
+
+    Re-freezing the numerics against the same state database used to be
+    silently accepted: the stored evaluation of the previous configuration was
+    reused and the new configuration never ran.
+    """
+    from gwpop_search.search import FidelityConfigMismatchError
+
+    graph = enumerate_model_graph(baseline_model_spec(), max_depth=0, max_models=1)
+    database = tmp_path / "state.sqlite"
+    artifacts = tmp_path / "artifacts"
+
+    first = _ConfiguredEvaluator("a" * 64)
+    execute_search(
+        graph,
+        first,
+        state_database=database,
+        artifact_root=artifacts,
+        config=_single_rung_config(),
+    )
+    assert len(first.calls) == 1
+
+    reused = _ConfiguredEvaluator("a" * 64)
+    execute_search(
+        graph,
+        reused,
+        state_database=database,
+        artifact_root=artifacts,
+        config=_single_rung_config(),
+    )
+    assert reused.calls == []
+
+    refrozen = _ConfiguredEvaluator("c" * 64)
+    with pytest.raises(FidelityConfigMismatchError, match="fidelity config"):
+        execute_search(
+            graph,
+            refrozen,
+            state_database=database,
+            artifact_root=artifacts,
+            config=_single_rung_config(),
+        )
+    assert refrozen.calls == []
+
+
+def test_rows_without_a_config_hash_are_not_reused_by_a_configured_run(tmp_path):
+    from gwpop_search.search import FidelityConfigMismatchError
+
+    graph = enumerate_model_graph(baseline_model_spec(), max_depth=0, max_models=1)
+    database = tmp_path / "state.sqlite"
+    artifacts = tmp_path / "artifacts"
+
+    # A stub evaluator declares no configuration, so its rows carry none.
+    execute_search(
+        graph,
+        StubEvaluator(),
+        state_database=database,
+        artifact_root=artifacts,
+        config=_single_rung_config(),
+    )
+    with pytest.raises(FidelityConfigMismatchError):
+        execute_search(
+            graph,
+            _ConfiguredEvaluator("a" * 64),
+            state_database=database,
+            artifact_root=artifacts,
+            config=_single_rung_config(),
+        )

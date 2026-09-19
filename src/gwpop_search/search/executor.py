@@ -9,11 +9,15 @@ rung is reached by the search or by evidence completion, so F3 evidence is
 path independent.
 
 Every stored evaluation row carries ``run_config = {"executor":
-"deterministic-fidelity-v2", "backend": "dynesty", "fidelity": F}`` (evidence
-completion writes ``"evidence-completion-v2"``). A state database holding
-rows of any other executor (NUTS/JAXNS-era 1.x rows, whose run ids and seeds
-coincide with the new ones) is refused with :class:`LegacyStateError`
-instead of being silently reused.
+"deterministic-fidelity-v2", "backend": "dynesty", "fidelity": F,
+"fidelity_config_sha256": H}`` (evidence completion writes
+``"evidence-completion-v2"``). A state database holding rows of any other
+executor (NUTS/JAXNS-era 1.x rows, whose run ids and seeds coincide with the
+new ones) is refused with :class:`LegacyStateError` instead of being silently
+reused, and a row produced under a different frozen numerical configuration
+``H`` is refused with :class:`FidelityConfigMismatchError`: evaluation seeds
+do not depend on the fidelity configuration, so re-freezing the numerics
+against an existing state database would otherwise reuse stale evaluations.
 """
 
 from __future__ import annotations
@@ -54,24 +58,78 @@ class LegacyStateError(RuntimeError):
     """The state database holds evaluations of a retired (NUTS/JAXNS-era) executor."""
 
 
-def evaluation_run_config(fidelity, *, executor: str = EXECUTOR_VERSION) -> dict[str, str]:
-    """The ``run_config`` stored with every v2 evaluation row."""
+class FidelityConfigMismatchError(RuntimeError):
+    """A stored evaluation was produced under a different frozen fidelity config."""
+
+
+def evaluation_run_config(
+    fidelity,
+    *,
+    executor: str = EXECUTOR_VERSION,
+    fidelity_config_sha256: str | None = None,
+) -> dict[str, str]:
+    """The ``run_config`` stored with every v2 evaluation row.
+
+    ``fidelity_config_sha256`` pins the frozen numerical configuration the row
+    was produced under; rows written without it cannot be reused by a run that
+    knows its own configuration hash.
+    """
     if executor not in V2_EXECUTORS:
         raise ValueError(f"unknown executor {executor!r}")
-    return {
+    payload = {
         "executor": executor,
         "backend": SAMPLER_BACKEND,
         "fidelity": Fidelity(fidelity).value,
     }
+    if fidelity_config_sha256 is not None:
+        payload["fidelity_config_sha256"] = str(fidelity_config_sha256)
+    return payload
 
 
-def row_executor(row: Mapping[str, object]) -> str | None:
-    """The executor recorded in a state-store row (``None`` if absent)."""
+def _row_run_config(row: Mapping[str, object]) -> dict[str, object] | None:
     try:
         payload = json.loads(str(row["run_config_json"]))
     except (KeyError, TypeError, ValueError):
         return None
-    return payload.get("executor") if isinstance(payload, dict) else None
+    return payload if isinstance(payload, dict) else None
+
+
+def row_executor(row: Mapping[str, object]) -> str | None:
+    """The executor recorded in a state-store row (``None`` if absent)."""
+    payload = _row_run_config(row)
+    return None if payload is None else payload.get("executor")
+
+
+def row_fidelity_config_sha256(row: Mapping[str, object]) -> str | None:
+    """The frozen fidelity-config hash recorded in a row (``None`` if absent)."""
+    payload = _row_run_config(row)
+    if payload is None:
+        return None
+    value = payload.get("fidelity_config_sha256")
+    return None if value is None else str(value)
+
+
+def require_fidelity_config_identity(
+    row: Mapping[str, object],
+    expected: str | None,
+) -> None:
+    """Refuse reuse of a row produced under a different frozen numerical config.
+
+    ``expected is None`` means the caller does not know its own configuration
+    hash (e.g. a stub evaluator) and no check is possible.
+    """
+    if expected is None:
+        return
+    stored = row_fidelity_config_sha256(row)
+    if stored == str(expected):
+        return
+    raise FidelityConfigMismatchError(
+        f"stored evaluation {row['run_id']} was produced under fidelity config "
+        f"{stored!r}, not the frozen {str(expected)!r}; evaluation seeds do not "
+        "depend on the numerical configuration, so reusing it would silently mix "
+        "two freezes. Re-run against a new state database, or restore the "
+        "configuration the rows were produced with."
+    )
 
 
 def require_v2_state(store: ResultStore) -> None:
@@ -219,6 +277,7 @@ def _existing_evaluation(
     model_hash: str,
     fidelity: Fidelity,
     seed: int,
+    fidelity_config_sha256: str | None = None,
 ) -> EvaluationRecord | None:
     rows = store.evaluations(model_hash=model_hash, fidelity=fidelity.value)
     matching = [row for row in rows if int(row["seed"]) == int(seed)]
@@ -234,6 +293,7 @@ def _existing_evaluation(
             f"stored evaluation {matching[0]['run_id']} was written by executor "
             f"{executor!r}, not by the dynesty ladder; refusing to reuse it"
         )
+    require_fidelity_config_identity(matching[0], fidelity_config_sha256)
     return _record_from_row(matching[0])
 
 
@@ -259,6 +319,10 @@ def execute_search(
             )
     artifact_root = Path(artifact_root)
     artifact_root.mkdir(parents=True, exist_ok=True)
+    # Evaluators that carry a frozen numerical configuration expose its hash;
+    # every row this run writes records it, and every row it reuses must match.
+    config_sha256 = getattr(evaluator, "fidelity_config_sha256", None)
+    config_sha256 = None if config_sha256 is None else str(config_sha256)
 
     for model in graph.nodes:
         store.register_model(model)
@@ -289,6 +353,7 @@ def execute_search(
                 model_hash=model_hash,
                 fidelity=fidelity,
                 seed=seed,
+                fidelity_config_sha256=config_sha256,
             )
             if existing is None:
                 if (
@@ -314,7 +379,10 @@ def execute_search(
                     run_id,
                     record,
                     seed=seed,
-                    run_config=evaluation_run_config(fidelity),
+                    run_config=evaluation_run_config(
+                        fidelity,
+                        fidelity_config_sha256=config_sha256,
+                    ),
                     artifact_path=str(run_dir),
                 )
                 total_compute_cost = _total_compute_cost(store)

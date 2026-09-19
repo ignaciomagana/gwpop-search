@@ -480,7 +480,7 @@ def test_write_null_calibration_config_cli_parses():
         )
 
 
-def test_write_null_calibration_config_writes_format_1_4(tmp_path):
+def test_write_null_calibration_config_writes_format_1_5(tmp_path):
     from gwpop_search.nulls import load_exact_null_campaign_config
 
     output = tmp_path / "nulls.json"
@@ -501,7 +501,7 @@ def test_write_null_calibration_config_writes_format_1_4(tmp_path):
     )
     args.func(args)
     config = load_exact_null_campaign_config(output)
-    assert config.format_version == "gwpop-search-exact-null-campaign-1.4"
+    assert config.format_version == "gwpop-search-exact-null-campaign-1.5"
     assert config.survey.observation_model == "noisy_observation"
     assert config.statistic == "f3_completion"
     assert config.max_gpu_hours_per_null == 2.5

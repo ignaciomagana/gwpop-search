@@ -106,6 +106,7 @@ def test_f3_completion_null_replay_runs_f0_and_f3_only(monkeypatch, tmp_path):
         completion_campaign=campaign,
         completion_seed_root=7,
         data_mode="synthetic_survey",
+        pe_scale_policy="declared_fixed",
         statistic="f3_completion",
     )
     fidelities = [call[1] for call in _FakeEvaluator.calls]
@@ -198,6 +199,7 @@ def test_gwtc5_null_replay_records_the_root_profile(monkeypatch, tmp_path):
             observation_model="noisy_observation",
         ),
         data_mode="synthetic_survey",
+        pe_scale_policy="declared_fixed",
         statistic="f3_completion",
     )
     assert result.metadata["null_data_metadata"]["root_hyperprior_profile"] == "gwtc5-v1"

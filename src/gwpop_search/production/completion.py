@@ -2,11 +2,15 @@
 
 Completion runs the identical F3 rung (seed ``evaluation_seed(root, model,
 "F3")``, dynesty repeats of the frozen fidelity configuration) for every
-graph node that lacks valid F3/F4 evidence, so the complete F3 evidence set
-does not depend on which models the search beam promoted. A frozen F3 that
-failed its gates (including typed numerical failures such as no finite
-prior support) is never re-run; it blocks the normalized graph posterior.
-Rows are recorded with executor ``evidence-completion-v2``.
+graph node that lacks valid evidence at the *required* fidelity, so the
+complete evidence set does not depend on which models the search beam
+promoted. The requirement is ``("F3",)`` by default because the calibrated
+null statistic (D4, ``f3_completion``) reads F3 evidence only: an F4 row must
+not stand in for a missing or failed F3, or the statistic would have no
+defined value for that model and completion could never repair it. A frozen
+F3 that failed its gates (including typed numerical failures such as no
+finite prior support) is never re-run; it blocks the normalized graph
+posterior. Rows are recorded with executor ``evidence-completion-v2``.
 """
 
 from __future__ import annotations
@@ -24,11 +28,14 @@ from gwpop_search.search import (
     evaluation_run_config,
     evaluation_run_id,
     evaluation_seed,
+    require_fidelity_config_identity,
     require_v2_state,
 )
 from gwpop_search.store import ResultStore
 
-EVIDENCE_COMPLETION_FORMAT_VERSION = "gwpop-search-evidence-completion-1.1"
+EVIDENCE_COMPLETION_FORMAT_VERSION = "gwpop-search-evidence-completion-1.2"
+# The evidence the completed set must contain (D4: the null statistic is F3).
+REQUIRED_EVIDENCE_FIDELITIES = ("F3",)
 
 from .config import ProductionCampaignConfig
 from .runner import (
@@ -72,13 +79,19 @@ def complete_graph_evidence(
     state_database: str | Path,
     artifact_root: str | Path,
     root_seed: int | None = None,
+    required_fidelities: tuple[str, ...] = REQUIRED_EVIDENCE_FIDELITIES,
 ) -> dict[str, object]:
-    """Run/resume F3 for all graph nodes lacking valid F3/F4 evidence.
+    """Run/resume F3 for all graph nodes lacking valid evidence.
 
     Screening can prioritize which nodes reach evidence first, but it cannot
     define a normalized posterior over the declared model space. This function
     is the explicit completion stage required before full model probabilities.
+
+    ``required_fidelities`` is the evidence a node must already have to count
+    as complete; it defaults to ``("F3",)`` so that a passed F4 never masks a
+    missing or failed F3 (see the module docstring).
     """
+    required_fidelities = tuple(str(item) for item in required_fidelities)
     if len(graph.nodes) > campaign.budget.max_f3_models:
         raise SearchBudgetExceeded(
             f"declared graph has {len(graph.nodes)} models but the frozen "
@@ -106,7 +119,12 @@ def complete_graph_evidence(
     for model in graph.nodes:
         store.register_model(model)
 
-    initially_valid = collect_best_available_evidence(state_database)
+    config_sha256 = getattr(evaluator, "fidelity_config_sha256", None)
+    initially_valid = collect_best_available_evidence(
+        state_database,
+        fidelities=required_fidelities,
+        fidelity_config_sha256=config_sha256,
+    )
     evaluated = []
     reused = []
     blocked = []
@@ -137,6 +155,7 @@ def complete_graph_evidence(
                     f"multiple F3 evaluations for {model_hash} seed={seed}"
                 )
             row = rows[0]
+            require_fidelity_config_identity(row, config_sha256)
             blocked.append(
                 {
                     "model_hash": model_hash,
@@ -175,7 +194,9 @@ def complete_graph_evidence(
             record,
             seed=seed,
             run_config=evaluation_run_config(
-                Fidelity.F3_EVIDENCE, executor=COMPLETION_EXECUTOR_VERSION
+                Fidelity.F3_EVIDENCE,
+                executor=COMPLETION_EXECUTOR_VERSION,
+                fidelity_config_sha256=config_sha256,
             ),
             artifact_path=str(run_dir),
         )
@@ -205,12 +226,20 @@ def complete_graph_evidence(
         state_database=state_database,
         artifact_root=artifact_root,
         model_prior=model_prior_from_config(campaign.model_prior),
+        fidelities=required_fidelities,
+        fidelity_config_sha256=config_sha256,
     )
-    valid = collect_best_available_evidence(state_database)
+    valid = collect_best_available_evidence(
+        state_database,
+        fidelities=required_fidelities,
+        fidelity_config_sha256=config_sha256,
+    )
     summary = {
         "format_version": EVIDENCE_COMPLETION_FORMAT_VERSION,
         "executor": COMPLETION_EXECUTOR_VERSION,
         "sampler_backend": dict(campaign.sampler_backend),
+        "required_evidence_fidelities": list(required_fidelities),
+        "fidelity_config_sha256": config_sha256,
         "campaign_id": campaign.campaign_id,
         "dataset_identity": str(dataset_identity),
         "evidence_seed_root": int(seed_root),

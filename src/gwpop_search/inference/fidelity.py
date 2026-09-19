@@ -97,6 +97,8 @@ from .synthetic import require_population_proxy_coverage
 
 FIDELITY_CONFIG_FORMAT_VERSION = "gwpop-search-fidelity-config-2.0"
 EVALUATION_FORMAT_VERSION = "gwpop-search-fidelity-evaluation-2.0"
+# Machine-readable reason the F4 insertion-index advisory carries no value.
+INSERTION_INDEX_UNAVAILABLE_REASON = "backend_does_not_persist_birth_iterations"
 POOLED_POSTERIOR_FORMAT_VERSION = "gwpop-search-pooled-posterior-1.0"
 POOLED_POSTERIOR_FILENAME = "pooled_posterior.npz"
 LADDER_V2 = (Fidelity.F0_SANITY, Fidelity.F3_EVIDENCE, Fidelity.F4_PRODUCTION)
@@ -152,8 +154,19 @@ class NumericalCriteria:
     metrics ("larger is better") and the ``1 - q`` quantile for maximum
     weights and ``Var[log L]``. With ``gate_importance_over_posterior=False``
     the draw median/tail are recorded as advisory only (the posterior-median
-    point is always gated). ``insertion_index_advisory`` records the
-    insertion-index KS test (never gated).
+    point is always gated).
+
+    ``insertion_index_advisory`` (D3: advisory at F4) requests the
+    insertion-index KS test. It is never gated, and with the current dynesty
+    backend it is *not computed*: the reconstruction needs each dead point's
+    birth iteration (``samples_it``), which :class:`DynestyResult` does not
+    persist. The evaluation then records ``available=False`` with
+    ``reason_code=INSERTION_INDEX_UNAVAILABLE_REASON`` on both the check and
+    the ``nested_sampling.insertion_index`` block, so the absence is explicit
+    rather than an empty advisory. The test itself is implemented and tested
+    (:func:`gwpop_search.inference.ns_diagnostics.insertion_index_ranks`,
+    :func:`~gwpop_search.inference.ns_diagnostics.insertion_index_test`) and
+    becomes live as soon as the backend persists the birth iterations.
     """
 
     max_cross_run_r_hat: float | None = None
@@ -636,6 +649,33 @@ def _gates_passed(checks: Sequence[Mapping[str, object]]) -> bool:
     return bool(gates) and all(bool(item["passed"]) for item in gates)
 
 
+# Non-finite floats are written as these strings: ``json.dumps`` would
+# otherwise emit the non-standard tokens Infinity/-Infinity/NaN, which is
+# exactly what happens when an importance gate fails (a NaN metric is mapped
+# to +inf so that it fails), leaving evaluation.json unreadable by any strict
+# JSON consumer. ``float()`` of each sentinel reproduces the value, and
+# :func:`read_evaluation` restores them.
+NON_FINITE_JSON_SENTINELS = {
+    math.inf: "Infinity",
+    -math.inf: "-Infinity",
+}
+NAN_JSON_SENTINEL = "NaN"
+_JSON_SENTINEL_VALUES = {
+    "Infinity": math.inf,
+    "-Infinity": -math.inf,
+    "NaN": math.nan,
+}
+
+
+def _json_float(value: float):
+    value = float(value)
+    if math.isnan(value):
+        return NAN_JSON_SENTINEL
+    if math.isinf(value):
+        return NON_FINITE_JSON_SENTINELS[math.inf if value > 0 else -math.inf]
+    return value
+
+
 def _json_ready(value):
     if isinstance(value, Mapping):
         return {str(k): _json_ready(v) for k, v in value.items()}
@@ -647,14 +687,27 @@ def _json_ready(value):
         return bool(value)
     if isinstance(value, np.integer):
         return int(value)
-    if isinstance(value, np.floating):
-        return float(value)
+    if isinstance(value, (float, np.floating)):
+        return _json_float(value)
+    return value
+
+
+def _json_restore(value):
+    """Inverse of :func:`_json_ready` for the non-finite sentinels."""
+    if isinstance(value, Mapping):
+        return {str(k): _json_restore(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_restore(v) for v in value]
+    if isinstance(value, str) and value in _JSON_SENTINEL_VALUES:
+        return _JSON_SENTINEL_VALUES[value]
     return value
 
 
 def _atomic_write_json(path: Path, payload) -> None:
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(_json_ready(payload), sort_keys=True, indent=2))
+    tmp.write_text(
+        json.dumps(_json_ready(payload), sort_keys=True, indent=2, allow_nan=False)
+    )
     os.replace(tmp, path)
 
 
@@ -1025,9 +1078,17 @@ def summarize_dynesty_fit(
 
     insertion = {
         "available": False,
+        "reason_code": INSERTION_INDEX_UNAVAILABLE_REASON,
         "reason": (
-            "the dynesty backend results do not persist samples_it, which the "
-            "insertion-index reconstruction needs"
+            "the dynesty backend results do not persist samples_it (the birth "
+            "iteration of each dead point), which the insertion-index "
+            "reconstruction needs"
+        ),
+        "requires": "DynestyResult.samples_it",
+        "implementation": (
+            "gwpop_search.inference.ns_diagnostics.insertion_index_ranks / "
+            "insertion_index_test (ready; unused until the backend persists the "
+            "birth iterations)"
         ),
     }
     if criteria.insertion_index_advisory:
@@ -1035,10 +1096,12 @@ def summarize_dynesty_fit(
             {
                 "name": "nested_sampling.insertion_index_ks",
                 "stage": "advisory",
+                "available": False,
                 "value": None,
                 "comparison": "p_value_ge",
                 "limit": None,
                 "passed": None,
+                "reason_code": INSERTION_INDEX_UNAVAILABLE_REASON,
                 "note": insertion["reason"],
             }
         )
@@ -1340,6 +1403,16 @@ class DeterministicHBIEvaluator:
 
     supported_fidelities = tuple(item.value for item in LADDER_V2)
 
+    @property
+    def fidelity_config_sha256(self) -> str:
+        """Hash of the frozen numerical configuration of every evaluation.
+
+        The search executor records it with each stored evaluation row and
+        refuses to reuse a row produced under a different one (evaluation seeds
+        do not depend on the configuration).
+        """
+        return fidelity_config_sha256(self.config)
+
     def _write_evaluation(
         self,
         run_dir: Path,
@@ -1507,7 +1580,12 @@ class DeterministicHBIEvaluator:
 
 
 def read_evaluation(path: str | Path) -> dict[str, object]:
-    """Load an ``evaluation.json`` of format 2.0; legacy (1.x) evaluations are refused."""
+    """Load an ``evaluation.json`` of format 2.0; legacy (1.x) evaluations are refused.
+
+    The artifact is strict JSON: non-finite numbers are stored as the strings
+    ``"Infinity"``, ``"-Infinity"`` and ``"NaN"`` and are restored to floats
+    here.
+    """
     path = Path(path)
     payload = json.loads(path.read_text())
     version = payload.get("format_version")
@@ -1516,7 +1594,7 @@ def read_evaluation(path: str | Path) -> dict[str, object]:
             f"{path} is a {version!r} evaluation; only {EVALUATION_FORMAT_VERSION} "
             "(dynesty ladder v2) evaluations are accepted"
         )
-    return payload
+    return _json_restore(payload)
 
 
 # ---------------------------------------------------------------------------

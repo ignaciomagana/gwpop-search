@@ -44,9 +44,11 @@ from gwpop_search.search import (
 )
 
 from .frozen_selection import (
+    DEFAULT_MIN_RESAMPLING_ESS_PER_EVENT,
     generate_frozen_selection_null_dataset,
     require_frozen_selection_survey,
 )
+from .pe_matching import PE_SCALE_POLICY_MATCH_OBSERVED
 from .replay import SearchReplayResult
 
 _STATISTIC_EVIDENCE_FIDELITIES = {"f3_completion": ("F3",)}
@@ -139,6 +141,8 @@ def run_baseline_null_search_replay(
     frozen_selection=None,
     production_dataset_identity: str | None = None,
     min_resampling_ess: float = 200.0,
+    min_resampling_ess_per_event: float = DEFAULT_MIN_RESAMPLING_ESS_PER_EVENT,
+    pe_scale_policy: str = PE_SCALE_POLICY_MATCH_OBSERVED,
     statistic: str = "f3_completion",
 ) -> SearchReplayResult:
     """Generate one baseline-null catalog and replay the frozen search procedure.
@@ -201,6 +205,8 @@ def run_baseline_null_search_replay(
             truth_hyperparameters=truth_hyperparameters,
             survey_config=survey_config,
             min_resampling_ess=min_resampling_ess,
+            min_resampling_ess_per_event=min_resampling_ess_per_event,
+            pe_scale_policy=pe_scale_policy,
             model_spec=declared_root,
         )
         null_posterior = dataset.posterior
@@ -208,9 +214,11 @@ def run_baseline_null_search_replay(
         null_truth_hyperparameters = dict(dataset.truth_hyperparameters)
         null_data_metadata = dict(dataset.metadata)
         null_data_metadata["root_hyperprior_profile"] = root_profile
+        # The PE-scale policy changes the data drawn for the same seed, so it
+        # is part of the dataset identity (run directories, evidence reuse).
         dataset_identity = (
             f"frozen-selection-null:{production_dataset_identity}:{int(seed)}"
-            f"{survey_config.dataset_identity_suffix()}"
+            f"{survey_config.dataset_identity_suffix()}:pe-{pe_scale_policy}"
         )
     else:
         raise ValueError(f"unsupported null data mode {data_mode!r}")
@@ -247,7 +255,9 @@ def run_baseline_null_search_replay(
         )
 
     evidences = collect_best_available_evidence(
-        database, fidelities=_STATISTIC_EVIDENCE_FIDELITIES[statistic]
+        database,
+        fidelities=_STATISTIC_EVIDENCE_FIDELITIES[statistic],
+        fidelity_config_sha256=getattr(evaluator, "fidelity_config_sha256", None),
     )
     if completion_campaign is not None and len(evidences) != len(graph.nodes):
         raise RuntimeError(

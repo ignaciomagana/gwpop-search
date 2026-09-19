@@ -901,9 +901,11 @@ def test_survey_v2_options_enter_the_synthetic_null_dataset_identity(monkeypatch
 
 
 def test_frozen_selection_nulls_reject_survey_v2_options():
-    # Exact-null configuration 1.4: every null uses the noisy observation model
+    # Exact-null configuration 1.5: every null uses the noisy observation model
     # (truth-centred PE is refused); frozen-selection nulls reuse the frozen
-    # selection, so the injection-draw options do not apply to them.
+    # selection, so the injection-draw options do not apply to them. The
+    # engineering synthetic mode has no frozen catalog, so its PE scales are
+    # the declared fixed ones.
     from gwpop_search.nulls.campaign import ExactNullCampaignConfig
 
     noisy_proxy = SyntheticSurveyConfig(
@@ -913,14 +915,25 @@ def test_frozen_selection_nulls_reject_survey_v2_options():
         ExactNullCampaignConfig(survey=noisy_proxy, data_mode="frozen_selection_resample")
     for mode in ("frozen_selection_resample", "synthetic_survey"):
         with pytest.raises(ValueError, match="noisy_observation"):
-            ExactNullCampaignConfig(survey=SyntheticSurveyConfig(), data_mode=mode)
-    for survey, mode in (
-        (noisy_proxy, "synthetic_survey"),
-        (SyntheticSurveyConfig(observation_model="noisy_observation"), "synthetic_survey"),
+            ExactNullCampaignConfig(
+                survey=SyntheticSurveyConfig(),
+                data_mode=mode,
+                pe_scale_policy="declared_fixed",
+            )
+    for survey, mode, policy in (
+        (noisy_proxy, "synthetic_survey", "declared_fixed"),
+        (
+            SyntheticSurveyConfig(observation_model="noisy_observation"),
+            "synthetic_survey",
+            "declared_fixed",
+        ),
         (
             SyntheticSurveyConfig(observation_model="noisy_observation"),
             "frozen_selection_resample",
+            "match_observed",
         ),
     ):
-        config = ExactNullCampaignConfig(survey=survey, data_mode=mode)
+        config = ExactNullCampaignConfig(
+            survey=survey, data_mode=mode, pe_scale_policy=policy
+        )
         assert ExactNullCampaignConfig.from_dict(config.to_dict()) == config
