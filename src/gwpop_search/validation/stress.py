@@ -20,6 +20,7 @@ from gwpop_search.search import (
     Fidelity,
     ModelEvidence,
     SearchExecutionConfig,
+    evaluation_seed,
     execute_search,
 )
 
@@ -30,6 +31,7 @@ SUITE_FORMAT = "gwpop-search-event-stress-suite-1.1"
 _READABLE_SUITE_FORMATS = ("gwpop-search-event-stress-suite-1.0", SUITE_FORMAT)
 PLAN_FORMAT = "gwpop-search-event-stress-plan-1.1"
 SUMMARY_FORMAT = "gwpop-search-event-stress-summary-1.1"
+MODEL_EVALUATION_FORMAT = "gwpop-search-stress-model-evaluation-1.0"
 
 
 @dataclass(frozen=True)
@@ -216,6 +218,20 @@ def stress_seed(
     return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
 
+def stress_event_subset(posterior, scenario: EventDropScenario):
+    """The stressed catalog of one scenario.
+
+    The ``reason`` string is part of the subset's catalog provenance, so the
+    suite and the per-model evaluation must build it here rather than each
+    spelling it out.
+    """
+    return drop_posterior_events(
+        posterior,
+        scenario.drop_events,
+        reason=f"{scenario.category}:{scenario.scenario_id}",
+    )
+
+
 def stress_dataset_identity(
     base_dataset_identity: str,
     scenario: EventDropScenario,
@@ -332,6 +348,100 @@ def _write_plan_once(path: Path, payload: dict[str, object]) -> None:
         path.write_text(json.dumps(payload, sort_keys=True, indent=2))
 
 
+def stress_scenario_model_run_dir(
+    root: str | Path,
+    scenario_id: str,
+    model_hash: str,
+    fidelity: Fidelity,
+) -> Path:
+    """The run directory the suite uses for one scenario/model evaluation.
+
+    ``root`` is the SUITE root; the suite writes each scenario under
+    ``<root>/<scenario_id>/artifacts/<fidelity>/<model hash>``.
+    """
+    return (
+        Path(root)
+        / str(scenario_id)
+        / "artifacts"
+        / Fidelity(fidelity).value
+        / str(model_hash)
+    )
+
+
+def run_stress_model_evaluation(
+    root: str | Path,
+    posterior,
+    selection,
+    graph: ModelGraph,
+    campaign: ProductionCampaignConfig,
+    *,
+    base_dataset_identity: str,
+    scenario: EventDropScenario,
+    model_hash: str,
+) -> dict[str, object]:
+    """Pre-compute one model's F3 evidence inside one stress scenario's tree.
+
+    Execution-only plumbing, the event-drop counterpart of the per-null
+    per-model evaluation: :func:`run_event_drop_stress_suite` evaluates every
+    graph model serially in a single process, and this runs exactly one of
+    those evaluations with the scenario's own stressed catalog, dataset
+    identity, evaluation seed and run directory, so the later suite reloads it
+    instead of recomputing it.
+
+    Nothing is written to any state database and no ``stress_plan.json`` is
+    written: the plan freezes the whole scenario list, which only the suite
+    knows, and writing a one-scenario plan here would make the suite refuse to
+    run. F3 is pre-computed whatever the suite's stop fidelity is, because the
+    F3 rung is evaluated (with this same seed and directory) on the way to F4.
+    """
+    if model_hash not in graph.by_hash:
+        raise ValueError(f"unknown graph model hash {model_hash!r}")
+
+    subset = stress_event_subset(posterior, scenario)
+    dataset_identity = stress_dataset_identity(base_dataset_identity, scenario)
+    evaluator = DeterministicHBIEvaluator(
+        subset,
+        selection,
+        config=campaign.fidelity,
+        dataset_identity=dataset_identity,
+    )
+    fidelity = Fidelity.F3_EVIDENCE
+    seed = evaluation_seed(
+        stress_seed(campaign.seed_policy.root_seed, scenario.scenario_id),
+        model_hash,
+        fidelity,
+    )
+    run_dir = stress_scenario_model_run_dir(
+        root,
+        scenario.scenario_id,
+        model_hash,
+        fidelity,
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    record = evaluator.evaluate(
+        graph.by_hash[model_hash],
+        fidelity,
+        seed=seed,
+        run_dir=run_dir,
+    )
+    return {
+        "format_version": MODEL_EVALUATION_FORMAT,
+        "state_database_written": False,
+        "scenario_id": scenario.scenario_id,
+        "model_hash": str(model_hash),
+        "fidelity": fidelity.value,
+        "n_events": int(subset.n_events),
+        "seed": int(seed),
+        "dataset_identity": dataset_identity,
+        "fidelity_config_sha256": evaluator.fidelity_config_sha256,
+        "diagnostics_pass": record.diagnostics_pass,
+        "screen_value": record.screen_value,
+        "compute_cost_hours": record.compute_cost,
+        "run_dir": str(run_dir),
+        "evaluation": str(run_dir / "evaluation.json"),
+    }
+
+
 def run_event_drop_stress_suite(
     root: str | Path,
     posterior,
@@ -368,11 +478,7 @@ def run_event_drop_stress_suite(
 
     scenario_results = []
     for scenario in scenarios:
-        subset = drop_posterior_events(
-            posterior,
-            scenario.drop_events,
-            reason=f"{scenario.category}:{scenario.scenario_id}",
-        )
+        subset = stress_event_subset(posterior, scenario)
         scenario_root = root / scenario.scenario_id
         artifacts = scenario_root / "artifacts"
         database = scenario_root / "state.sqlite"

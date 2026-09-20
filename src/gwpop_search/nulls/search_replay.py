@@ -16,6 +16,7 @@ the search scores.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 
 from gwpop_search.grammar import (
     HYPERPRIOR_PROFILES,
@@ -123,19 +124,27 @@ def search_statistics_from_evidence(
     }
 
 
-def run_baseline_null_search_replay(
-    null_index: int,
+class NullReplayDataset(NamedTuple):
+    """One null catalog and the dataset identity every run of it is filed under.
+
+    ``posterior``/``selection``/``dataset_identity`` are exactly what the
+    replay hands to :class:`DeterministicHBIEvaluator`; ``truth_hyperparameters``
+    and ``metadata`` are the provenance the replay result records.
+    """
+
+    posterior: object
+    selection: object
+    dataset_identity: str
+    truth_hyperparameters: dict[str, float]
+    metadata: dict[str, object]
+
+
+def build_null_replay_dataset(
     seed: int,
     *,
-    root: str | Path,
     graph: ModelGraph,
-    model_prior: ModelPrior,
-    execution_config: SearchExecutionConfig,
-    fidelity_config: FidelityRunConfig,
     survey_config: SyntheticSurveyConfig | None = None,
     truth_hyperparameters=None,
-    completion_campaign=None,
-    completion_seed_root: int | None = None,
     data_mode: str = "synthetic_survey",
     observed_posterior=None,
     frozen_selection=None,
@@ -143,16 +152,14 @@ def run_baseline_null_search_replay(
     min_resampling_ess: float = 200.0,
     min_resampling_ess_per_event: float = DEFAULT_MIN_RESAMPLING_ESS_PER_EVENT,
     pe_scale_policy: str = PE_SCALE_POLICY_MATCH_OBSERVED,
-    statistic: str = "f3_completion",
-) -> SearchReplayResult:
-    """Generate one baseline-null catalog and replay the frozen search procedure.
+) -> NullReplayDataset:
+    """Draw the null catalog one replay scores, with its dataset identity.
 
-    ``execution_config`` fixes the rungs (``f3_completion``: stop at F3) and
-    ``completion_campaign`` the evidence completion; the statistic is computed
-    from the evidence fidelities the statistic declares.
+    Called by :func:`run_baseline_null_search_replay` and by the per-model
+    evaluation that pre-computes one model's evidence for the same replay, so
+    both paths consume the same seed in the same order and file their runs
+    under the same identity.
     """
-    if statistic not in _STATISTIC_EVIDENCE_FIDELITIES:
-        raise ValueError(f"unsupported null statistic {statistic!r}")
     declared_root, root_profile = declared_null_root(graph)
 
     survey_config = (
@@ -222,6 +229,71 @@ def run_baseline_null_search_replay(
         )
     else:
         raise ValueError(f"unsupported null data mode {data_mode!r}")
+
+    return NullReplayDataset(
+        posterior=null_posterior,
+        selection=null_selection,
+        dataset_identity=dataset_identity,
+        truth_hyperparameters=null_truth_hyperparameters,
+        metadata=null_data_metadata,
+    )
+
+
+def run_baseline_null_search_replay(
+    null_index: int,
+    seed: int,
+    *,
+    root: str | Path,
+    graph: ModelGraph,
+    model_prior: ModelPrior,
+    execution_config: SearchExecutionConfig,
+    fidelity_config: FidelityRunConfig,
+    survey_config: SyntheticSurveyConfig | None = None,
+    truth_hyperparameters=None,
+    completion_campaign=None,
+    completion_seed_root: int | None = None,
+    data_mode: str = "synthetic_survey",
+    observed_posterior=None,
+    frozen_selection=None,
+    production_dataset_identity: str | None = None,
+    min_resampling_ess: float = 200.0,
+    min_resampling_ess_per_event: float = DEFAULT_MIN_RESAMPLING_ESS_PER_EVENT,
+    pe_scale_policy: str = PE_SCALE_POLICY_MATCH_OBSERVED,
+    statistic: str = "f3_completion",
+) -> SearchReplayResult:
+    """Generate one baseline-null catalog and replay the frozen search procedure.
+
+    ``execution_config`` fixes the rungs (``f3_completion``: stop at F3) and
+    ``completion_campaign`` the evidence completion; the statistic is computed
+    from the evidence fidelities the statistic declares.
+    """
+    if statistic not in _STATISTIC_EVIDENCE_FIDELITIES:
+        raise ValueError(f"unsupported null statistic {statistic!r}")
+
+    survey_config = (
+        SyntheticSurveyConfig()
+        if survey_config is None
+        else survey_config
+    )
+    (
+        null_posterior,
+        null_selection,
+        dataset_identity,
+        null_truth_hyperparameters,
+        null_data_metadata,
+    ) = build_null_replay_dataset(
+        seed,
+        graph=graph,
+        survey_config=survey_config,
+        truth_hyperparameters=truth_hyperparameters,
+        data_mode=data_mode,
+        observed_posterior=observed_posterior,
+        frozen_selection=frozen_selection,
+        production_dataset_identity=production_dataset_identity,
+        min_resampling_ess=min_resampling_ess,
+        min_resampling_ess_per_event=min_resampling_ess_per_event,
+        pe_scale_policy=pe_scale_policy,
+    )
 
     root = Path(root)
     replay_root = root / "searches" / f"null_{int(null_index):05d}"
