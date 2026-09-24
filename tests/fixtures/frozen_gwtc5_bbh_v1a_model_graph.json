@@ -1,0 +1,1939 @@
+{
+  "edges": [
+    {
+      "child_hash": "7a0d4c70f41125756312601fa4b8aedd596a7475d3849b7298ab684c9c708ffd",
+      "depth": 1,
+      "mutation_id": "chieff.family.gaussian_mixture",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "190c9234543674d2c82209bbc91307bd284c5595cce7fc6b7559a052424f0088",
+      "depth": 1,
+      "mutation_id": "chieff.mean.linear_m1",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "33715204a20b6ef5e11371c3b0be9a671535d81d28a2df744d27c380764d92ed",
+      "depth": 1,
+      "mutation_id": "chieff.mean.linear_q",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "243b4593705c7c9013c0d5c9b1e0875ef494244b780cbd88c202201b0e93dfc1",
+      "depth": 1,
+      "mutation_id": "chieff.mean.linear_z",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "467e4bf5859c10c6ca753e53fc2301d00ba2a305155aa19ead1521950f4a172e",
+      "depth": 1,
+      "mutation_id": "chieff.width.linear_m1",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "6f7fb264ddf35c37a7072c56471423b2b89b2f2ed5f989573bb527345a3a9127",
+      "depth": 1,
+      "mutation_id": "chieff.width.linear_q",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "3e36f327c564a63994bc2a972a175b2ca1bf11ecc06b630009ddab849f679ccb",
+      "depth": 1,
+      "mutation_id": "chieff.width.linear_z",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "6ef26a317a99482c68264638f3777b81033e251fc3b7b7ded697ee0de03f6ad3",
+      "depth": 1,
+      "mutation_id": "mass.family.broken_powerlaw",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "f5f5af3e9128ac5440a23dec9752054e5c86d9b56561ef1377650c33c294e870",
+      "depth": 1,
+      "mutation_id": "mass.family.pl_two_peak",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "479f7064930ce97ffdd110fb6475d4b5cf4ddbbefa9a2ff3e8ec1373a69a5bd4",
+      "depth": 1,
+      "mutation_id": "mass.family.powerlaw",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "cef0bafd3a7469cce31403a6b8e7b2cc767469b0f114941359155343b618c37f",
+      "depth": 1,
+      "mutation_id": "pairing.beta.linear_m1",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "05dac13762cdd13d2a239a64cb6b46effeb305ff97c7883f969b4c10065e3de5",
+      "depth": 1,
+      "mutation_id": "pairing.beta.logistic_m1",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "78b6cf7e1e7a3803bd941631efb8b1f75358e38d1f9e3c708cfbae724a008625",
+      "depth": 1,
+      "mutation_id": "pairing.family.truncated_gaussian_q",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    },
+    {
+      "child_hash": "48e9e45a03c4334f6fb9a07d7de0438d1fbcaff1f4de4021ead81ac840274bb7",
+      "depth": 1,
+      "mutation_id": "redshift.family.madau_dickinson",
+      "parent_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+    }
+  ],
+  "format_version": "gwpop-search-model-graph-1.0",
+  "nodes": [
+    {
+      "depth": 0,
+      "model_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "constant",
+              "q_pivot": 0.7,
+              "width_dependence": "constant",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "7a0d4c70f41125756312601fa4b8aedd596a7475d3849b7298ab684c9c708ffd",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "gaussian_mixture",
+            "options": {
+              "components": 2,
+              "fraction_dependence": "constant"
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "chi_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 1.0,
+              "low": 0.0
+            }
+          },
+          "chi_mu_1": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": -0.5
+            }
+          },
+          "chi_mu_2": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": -0.5
+            }
+          },
+          "chi_sigma_1": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.02
+            }
+          },
+          "chi_sigma_2": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.02
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "190c9234543674d2c82209bbc91307bd284c5595cce7fc6b7559a052424f0088",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "linear_m1",
+              "q_pivot": 0.7,
+              "width_dependence": "constant",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_mu_m1_slope": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.02,
+              "low": -0.02
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "33715204a20b6ef5e11371c3b0be9a671535d81d28a2df744d27c380764d92ed",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "linear_q",
+              "q_pivot": 0.7,
+              "width_dependence": "constant",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_mu_q_slope": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.6,
+              "low": -0.6
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "243b4593705c7c9013c0d5c9b1e0875ef494244b780cbd88c202201b0e93dfc1",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "linear_z",
+              "q_pivot": 0.7,
+              "width_dependence": "constant",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_mu_z_slope": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.4,
+              "low": -0.4
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "467e4bf5859c10c6ca753e53fc2301d00ba2a305155aa19ead1521950f4a172e",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "constant",
+              "q_pivot": 0.7,
+              "width_dependence": "linear_m1",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "log_chi_sigma_m1_slope": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.05,
+              "low": -0.05
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "6f7fb264ddf35c37a7072c56471423b2b89b2f2ed5f989573bb527345a3a9127",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "constant",
+              "q_pivot": 0.7,
+              "width_dependence": "linear_q",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "log_chi_sigma_q_slope": {
+            "family": "uniform",
+            "parameters": {
+              "high": 2.0,
+              "low": -2.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "3e36f327c564a63994bc2a972a175b2ca1bf11ecc06b630009ddab849f679ccb",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "constant",
+              "q_pivot": 0.7,
+              "width_dependence": "linear_z",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "log_chi_sigma_z_slope": {
+            "family": "uniform",
+            "parameters": {
+              "high": 1.0,
+              "low": -1.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "6ef26a317a99482c68264638f3777b81033e251fc3b7b7ded697ee0de03f6ad3",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "constant",
+              "q_pivot": 0.7,
+              "width_dependence": "constant",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "broken_powerlaw",
+            "options": {}
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha1": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "alpha2": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "break_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.9,
+              "low": 0.1
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "f5f5af3e9128ac5440a23dec9752054e5c86d9b56561ef1377650c33c294e870",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "constant",
+              "q_pivot": 0.7,
+              "width_dependence": "constant",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_two_peak",
+            "options": {
+              "peak_count": 2
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak1_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak1_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 45.0,
+              "low": 15.0
+            }
+          },
+          "peak1_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          },
+          "peak2_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak2_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 80.0,
+              "low": 30.0
+            }
+          },
+          "peak2_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 20.0,
+              "low": 1.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "479f7064930ce97ffdd110fb6475d4b5cf4ddbbefa9a2ff3e8ec1373a69a5bd4",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "constant",
+              "q_pivot": 0.7,
+              "width_dependence": "constant",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "powerlaw",
+            "options": {}
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "cef0bafd3a7469cce31403a6b8e7b2cc767469b0f114941359155343b618c37f",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "constant",
+              "q_pivot": 0.7,
+              "width_dependence": "constant",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "linear_m1",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "beta_q_m1_slope": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "05dac13762cdd13d2a239a64cb6b46effeb305ff97c7883f969b4c10065e3de5",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "constant",
+              "q_pivot": 0.7,
+              "width_dependence": "constant",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "logistic_m1",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "beta_q_m1_transition": {
+            "family": "uniform",
+            "parameters": {
+              "high": 80.0,
+              "low": 10.0
+            }
+          },
+          "beta_q_m1_width": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 30.0,
+              "low": 1.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "delta_beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": -10.0
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "78b6cf7e1e7a3803bd941631efb8b1f75358e38d1f9e3c708cfbae724a008625",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "constant",
+              "q_pivot": 0.7,
+              "width_dependence": "constant",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "truncated_gaussian_q",
+            "options": {}
+          },
+          "redshift": {
+            "family": "powerlaw",
+            "options": {
+              "kappa_dependence": "constant"
+            }
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "kappa": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -6.0
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          },
+          "q_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 1.0,
+              "low": 0.2
+            }
+          },
+          "q_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.02
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    },
+    {
+      "depth": 1,
+      "model_hash": "48e9e45a03c4334f6fb9a07d7de0438d1fbcaff1f4de4021ead81ac840274bb7",
+      "spec": {
+        "blocks": {
+          "chieff": {
+            "family": "truncated_gaussian",
+            "options": {
+              "components": 1,
+              "m1_pivot": 30.0,
+              "mean_dependence": "constant",
+              "q_pivot": 0.7,
+              "width_dependence": "constant",
+              "z_pivot": 0.3
+            }
+          },
+          "mass": {
+            "family": "pl_peak",
+            "options": {
+              "peak_count": 1
+            }
+          },
+          "mixture": {
+            "family": "single",
+            "options": {
+              "components": 1
+            }
+          },
+          "pairing": {
+            "family": "powerlaw_q",
+            "options": {
+              "beta_dependence": "constant",
+              "m1_pivot": 30.0
+            }
+          },
+          "redshift": {
+            "family": "madau_dickinson",
+            "options": {}
+          }
+        },
+        "priors": {
+          "alpha": {
+            "family": "uniform",
+            "parameters": {
+              "high": 8.0,
+              "low": 0.0
+            }
+          },
+          "beta_q": {
+            "family": "uniform",
+            "parameters": {
+              "high": 12.0,
+              "low": -4.0
+            }
+          },
+          "chi_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.3,
+              "low": -0.3
+            }
+          },
+          "chi_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.03
+            }
+          },
+          "mmax": {
+            "family": "uniform",
+            "parameters": {
+              "high": 200.0,
+              "low": 60.0
+            }
+          },
+          "mmin": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 2.0
+            }
+          },
+          "peak_fraction": {
+            "family": "uniform",
+            "parameters": {
+              "high": 0.5,
+              "low": 0.0
+            }
+          },
+          "peak_mu": {
+            "family": "uniform",
+            "parameters": {
+              "high": 50.0,
+              "low": 20.0
+            }
+          },
+          "peak_sigma": {
+            "family": "log_uniform",
+            "parameters": {
+              "high": 15.0,
+              "low": 1.0
+            }
+          },
+          "rate_a": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 0.0
+            }
+          },
+          "rate_b": {
+            "family": "uniform",
+            "parameters": {
+              "high": 10.0,
+              "low": 0.0
+            }
+          },
+          "rate_z_turnover": {
+            "family": "uniform",
+            "parameters": {
+              "high": 4.0,
+              "low": 0.1
+            }
+          }
+        },
+        "schema_version": "1.0"
+      }
+    }
+  ],
+  "root_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+}

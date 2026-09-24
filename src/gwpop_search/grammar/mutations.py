@@ -24,6 +24,11 @@ class MutationSpec:
     prior_updates: Mapping[str, PriorConfig] = field(default_factory=dict)
     prior_removals: tuple[str, ...] = ()
     description: str = ""
+    #: Auxiliary options (e.g. a pivot) written together with ``option`` when the
+    #: parent block does not already carry them. Like the default options of a
+    #: family change they are part of the one atomic axis, not extra mutations.
+    #: Empty for every DEFAULT_MUTATIONS entry.
+    companion_options: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.mutation_id:
@@ -34,6 +39,10 @@ class MutationSpec:
             raise ValueError("set_option mutations require an option name")
         if self.operation == "change_family" and self.option is not None:
             raise ValueError("change_family mutations cannot name an option")
+        if self.companion_options and self.operation != "set_option":
+            raise ValueError("companion_options require a set_option mutation")
+        if self.option is not None and self.option in self.companion_options:
+            raise ValueError("companion_options cannot repeat the mutated option")
 
     @property
     def axis(self) -> str:
@@ -69,6 +78,8 @@ def apply_mutation(
                 f"{mutation.mutation_id} would leave option unchanged"
             )
         options[str(mutation.option)] = mutation.value
+        for key, value in mutation.companion_options.items():
+            options.setdefault(str(key), value)
         child_block = type(block)(family=block.family, options=options)
 
     priors = dict(parent.priors)
@@ -80,6 +91,11 @@ def apply_mutation(
     registry.validate_model(child)
 
     axes = structural_diff_axes(parent, child)
+    if mutation.companion_options:
+        companions = {
+            f"{mutation.block}.options.{key}" for key in mutation.companion_options
+        }
+        axes = tuple(axis for axis in axes if axis not in companions)
     if axes != (mutation.axis,):
         raise ValueError(
             f"mutation {mutation.mutation_id} declared axis {mutation.axis!r} "
@@ -280,3 +296,90 @@ DEFAULT_MUTATIONS: tuple[MutationSpec, ...] = (
         description="replace power-law rate evolution with Madau-Dickinson form",
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# Follow-up chi_eff atoms (exploratory depth-2 follow-up of the GWTC-5 search).
+#
+# Deliberately NOT part of DEFAULT_MUTATIONS: adding them there would change the
+# enumerated graph (and every campaign keyed on it). Pass them explicitly, e.g.
+# ``enumerate_model_graph(root, mutations=DEFAULT_MUTATIONS + FOLLOWUP_MUTATIONS)``
+# or ``apply_mutation(parent, FOLLOWUP_MUTATION_TABLE[...])``.
+# ---------------------------------------------------------------------------
+
+_CHIEFF_SINGLE_EXTENSION_PRIORS = (
+    "chi_mu_m1_slope",
+    "chi_mu_q_slope",
+    "chi_mu_z_slope",
+    "log_chi_sigma_m1_slope",
+    "log_chi_sigma_q_slope",
+    "log_chi_sigma_z_slope",
+    "delta_log_chi_sigma",
+    "q_transition",
+    "q_transition_width",
+)
+
+FOLLOWUP_MUTATIONS: tuple[MutationSpec, ...] = (
+    MutationSpec(
+        "chieff.family.student_t",
+        "chieff",
+        "change_family",
+        "truncated_student_t",
+        requires_family="truncated_gaussian",
+        # chi_mu and chi_sigma are inherited from the parent (the gwtc5-v1 root
+        # has chi_mu ~ U(-0.3, 0.3), chi_sigma ~ LU(0.03, 0.5)).
+        prior_removals=_CHIEFF_SINGLE_EXTENSION_PRIORS,
+        prior_updates={"chi_nu": _lu(1.0, 100.0)},
+        description=(
+            "replace the truncated-Gaussian chi_eff with a heavy-tailed truncated "
+            "Student-t (Gaussian recovered as chi_nu -> infinity)"
+        ),
+    ),
+    MutationSpec(
+        "chieff.fraction.logistic_q",
+        "chieff",
+        "set_option",
+        "logistic_q",
+        option="fraction_dependence",
+        requires_family="gaussian_mixture",
+        companion_options={"q_pivot": 0.7},
+        prior_removals=("chi_fraction",),
+        # Components are no longer exchangeable (the weight depends on q), so the
+        # label symmetry is broken by the priors: component 1 is the bulk,
+        # component 2 the spinning component.
+        prior_updates={
+            "chi_mu_1": _u(-0.5, 0.5),
+            "chi_sigma_1": _lu(0.02, 0.5),
+            "chi_mu_2": _u(0.0, 1.0),
+            "chi_sigma_2": _lu(0.02, 0.5),
+            "logit_chi_fraction": _u(-8.0, 2.0),
+            "chi_fraction_q_slope": _u(-10.0, 10.0),
+        },
+        description=(
+            "let the weight of chi_eff mixture component 2 vary logistically with q"
+        ),
+    ),
+    MutationSpec(
+        "chieff.width.logistic_q",
+        "chieff",
+        "set_option",
+        "logistic_q",
+        option="width_dependence",
+        requires_family="truncated_gaussian",
+        prior_removals=(
+            "log_chi_sigma_m1_slope",
+            "log_chi_sigma_q_slope",
+            "log_chi_sigma_z_slope",
+        ),
+        prior_updates={
+            "delta_log_chi_sigma": _u(-1.0, 4.0),
+            "q_transition": _u(0.1, 1.0),
+            "q_transition_width": _lu(0.01, 0.3),
+        },
+        description="allow a logistic step in log chi_eff width versus q",
+    ),
+)
+
+FOLLOWUP_MUTATION_TABLE: dict[str, MutationSpec] = {
+    item.mutation_id: item for item in FOLLOWUP_MUTATIONS
+}

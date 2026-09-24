@@ -14,6 +14,13 @@ class FamilyDefinition:
     family: str
     default_options: Mapping[str, JsonValue] = field(default_factory=dict)
     option_choices: Mapping[str, tuple[JsonValue, ...]] = field(default_factory=dict)
+    #: Options that are legal but absent from ``default_options`` (so a family
+    #: change does not add them and existing hashes are unchanged). They are only
+    #: written by the mutations or specs that need them.
+    optional_options: tuple[str, ...] = ()
+    #: ``(option, value, required)``: when ``option == value`` every name in
+    #: ``required`` must be present in the block options.
+    option_requirements: tuple[tuple[str, JsonValue, tuple[str, ...]], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.block or not self.family:
@@ -25,7 +32,11 @@ class FamilyDefinition:
                 f"definition for {self.block}.{self.family} cannot validate "
                 f"family {block.family!r}"
             )
-        allowed = set(self.default_options) | set(self.option_choices)
+        allowed = (
+            set(self.default_options)
+            | set(self.option_choices)
+            | set(self.optional_options)
+        )
         unknown = set(block.options) - allowed
         if unknown:
             raise ValueError(
@@ -37,6 +48,14 @@ class FamilyDefinition:
                     f"illegal {self.block}.{self.family} option {key}="
                     f"{block.options[key]!r}; allowed={choices}"
                 )
+        for key, value, required in self.option_requirements:
+            if block.options.get(key) == value:
+                missing = [name for name in required if name not in block.options]
+                if missing:
+                    raise ValueError(
+                        f"{self.block}.{self.family} option {key}={value!r} "
+                        f"requires option(s) {missing}"
+                    )
 
 
 class ComponentRegistry:
@@ -117,6 +136,8 @@ DEFAULT_COMPONENT_REGISTRY = ComponentRegistry(
                     "linear_m1",
                     "linear_q",
                     "linear_z",
+                    # follow-up (opt-in, not in DEFAULT_MUTATIONS):
+                    "logistic_q",
                 ),
             },
         ),
@@ -129,7 +150,27 @@ DEFAULT_COMPONENT_REGISTRY = ComponentRegistry(
             },
             {
                 "components": (2,),
-                "fraction_dependence": ("constant",),
+                # "logistic_q" is a follow-up option (not in DEFAULT_MUTATIONS).
+                "fraction_dependence": ("constant", "logistic_q"),
+            },
+            # q_pivot is deliberately not a default option: adding it there would
+            # change the hash of every existing gaussian_mixture node.
+            optional_options=("q_pivot",),
+            option_requirements=(("fraction_dependence", "logistic_q", ("q_pivot",)),),
+        ),
+        # Follow-up heavy-tailed single chi_eff distribution (opt-in).
+        FamilyDefinition(
+            "chieff",
+            "truncated_student_t",
+            {
+                "components": 1,
+                "mean_dependence": "constant",
+                "width_dependence": "constant",
+            },
+            {
+                "components": (1,),
+                "mean_dependence": ("constant",),
+                "width_dependence": ("constant",),
             },
         ),
         FamilyDefinition(
