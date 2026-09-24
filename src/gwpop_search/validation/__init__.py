@@ -40,7 +40,11 @@ __all__ = [
     "mutation_log_bayes_factors",
     "nearby_baseline_seed",
     "nearby_dataset_identity",
+    "nearby_scenario_graph",
+    "nearby_scenario_model_run_dir",
+    "nearby_scenario_models",
     "run_nearby_baseline_suite",
+    "run_nearby_model_evaluation",
     "save_nearby_baseline_suite_spec",
 ]
 
@@ -73,6 +77,10 @@ from .baselines import (
     mutation_log_bayes_factors,
     nearby_baseline_seed,
     nearby_dataset_identity,
+    nearby_scenario_graph,
+    nearby_scenario_model_run_dir,
+    nearby_scenario_models,
     run_nearby_baseline_suite,
+    run_nearby_model_evaluation,
     save_nearby_baseline_suite_spec,
 )

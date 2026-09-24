@@ -27,6 +27,7 @@ from gwpop_search.search import (
     Fidelity,
     ModelEvidence,
     SearchExecutionConfig,
+    evaluation_seed,
     execute_search,
 )
 
@@ -38,6 +39,8 @@ SUITE_FORMAT = "gwpop-search-nearby-baseline-suite-1.1"
 _READABLE_SUITE_FORMATS = ("gwpop-search-nearby-baseline-suite-1.0", SUITE_FORMAT)
 PLAN_FORMAT = "gwpop-search-nearby-baseline-plan-1.1"
 SUMMARY_FORMAT = "gwpop-search-nearby-baseline-summary-1.1"
+MODEL_EVALUATION_FORMAT = "gwpop-search-nearby-model-evaluation-1.0"
+MODEL_LIST_FORMAT = "gwpop-search-nearby-scenario-models-1.0"
 
 
 @dataclass(frozen=True)
@@ -293,6 +296,190 @@ def _write_plan_once(path: Path, payload: dict[str, object]) -> None:
         path.write_text(json.dumps(payload, sort_keys=True, indent=2))
 
 
+def nearby_scenario_graph(scenario: NearbyBaselineScenario) -> ModelGraph:
+    """The alternative-root graph neighbourhood one scenario searches.
+
+    The suite and the per-model evaluation both enumerate it here, so they
+    cannot disagree on which models (and which model hashes) a scenario holds.
+    """
+    return enumerate_model_graph(
+        scenario.root_spec,
+        max_depth=scenario.max_depth,
+        max_models=scenario.max_models,
+    )
+
+
+def nearby_scenario_model_run_dir(
+    root: str | Path,
+    scenario_id: str,
+    model_hash: str,
+    fidelity: Fidelity,
+) -> Path:
+    """The run directory the suite uses for one scenario/model evaluation.
+
+    ``root`` is the SUITE root; the suite writes each scenario under
+    ``<root>/<scenario_id>/artifacts/<fidelity>/<model hash>``.
+    """
+    return (
+        Path(root)
+        / str(scenario_id)
+        / "artifacts"
+        / Fidelity(fidelity).value
+        / str(model_hash)
+    )
+
+
+def nearby_scenario_models(
+    scenario: NearbyBaselineScenario,
+    config: NearbyBaselineConfig | None = None,
+) -> dict[str, object]:
+    """Which models one scenario evaluates, in the order the suite does.
+
+    The suite's search evaluates every graph model at F0, then every model
+    that passes F0 at F3, each rung in sorted model-hash order (F0 promotes
+    every passing model; the beam only applies above F0). So the F3 candidates
+    are all graph models, and which of them actually reach F3 is decided by
+    F0 inside the suite. With ``stop_fidelity=F3`` nothing is evaluated above
+    F3. If more than ``max_f3_models`` models pass F0 the suite raises
+    :class:`~gwpop_search.search.SearchBudgetExceeded` before any F3 run.
+    """
+    graph = nearby_scenario_graph(scenario)
+    mutation_by_child: dict[str, list[str]] = {}
+    for edge in graph.edges:
+        if edge.parent_hash == graph.root_hash:
+            mutation_by_child.setdefault(edge.child_hash, []).append(
+                edge.mutation_id
+            )
+    order = sorted(model.model_hash for model in graph.nodes)
+    models = [
+        {
+            "model_hash": model_hash,
+            "depth": int(graph.depths[model_hash]),
+            "is_root": model_hash == graph.root_hash,
+            "root_mutation_ids": sorted(mutation_by_child.get(model_hash, [])),
+        }
+        for model_hash in order
+    ]
+    payload: dict[str, object] = {
+        "format_version": MODEL_LIST_FORMAT,
+        "scenario_id": scenario.scenario_id,
+        "root_model_hash": graph.root_hash,
+        "max_depth": int(scenario.max_depth),
+        "max_models": int(scenario.max_models),
+        "n_graph_models": len(graph.nodes),
+        "evaluation_order": "sorted_model_hash",
+        "models": models,
+    }
+    if config is not None:
+        payload["stop_fidelity"] = config.stop_fidelity.value
+        payload["max_f3_models"] = int(config.max_f3_models)
+        payload["f3_budget_fits_all_models"] = (
+            len(graph.nodes) <= int(config.max_f3_models)
+        )
+    return payload
+
+
+def _nearby_evaluator(
+    posterior,
+    selection,
+    campaign: ProductionCampaignConfig,
+    *,
+    base_dataset_identity: str,
+    scenario: NearbyBaselineScenario,
+) -> DeterministicHBIEvaluator:
+    return DeterministicHBIEvaluator(
+        posterior,
+        selection,
+        config=campaign.fidelity,
+        dataset_identity=nearby_dataset_identity(
+            base_dataset_identity,
+            scenario,
+        ),
+    )
+
+
+def run_nearby_model_evaluation(
+    root: str | Path,
+    posterior,
+    selection,
+    campaign: ProductionCampaignConfig,
+    *,
+    base_dataset_identity: str,
+    scenario: NearbyBaselineScenario,
+    model_hash: str,
+) -> dict[str, object]:
+    """Pre-compute one model's F3 evidence inside one nearby scenario's tree.
+
+    Execution-only plumbing, the alternative-root counterpart of
+    :func:`gwpop_search.validation.stress.run_stress_model_evaluation`:
+    :func:`run_nearby_baseline_suite` evaluates every model of the scenario's
+    graph serially in one process, and this runs exactly one of those F3
+    evaluations with the scenario's own evaluator (full frozen catalog,
+    scenario dataset identity), evaluation seed and run directory, so the
+    later suite reloads it instead of recomputing it.
+
+    Nothing is written to any state database and no
+    ``nearby_baseline_plan.json`` is written (the plan freezes the whole suite
+    and the reference graph, which only the suite run pins). F0 stays with the
+    suite: its outcome is read from the suite's state database, so it cannot
+    be pre-computed here. A model that later fails F0 inside the suite is not
+    promoted, and its pre-computed F3 run is then simply never read.
+    """
+    graph = nearby_scenario_graph(scenario)
+    model_hash = str(model_hash)
+    if model_hash not in graph.by_hash:
+        raise ValueError(
+            f"model hash {model_hash!r} is not in the graph of nearby scenario "
+            f"{scenario.scenario_id!r}"
+        )
+
+    evaluator = _nearby_evaluator(
+        posterior,
+        selection,
+        campaign,
+        base_dataset_identity=base_dataset_identity,
+        scenario=scenario,
+    )
+    fidelity = Fidelity.F3_EVIDENCE
+    seed = evaluation_seed(
+        nearby_baseline_seed(
+            campaign.seed_policy.root_seed,
+            scenario.scenario_id,
+        ),
+        model_hash,
+        fidelity,
+    )
+    run_dir = nearby_scenario_model_run_dir(
+        root,
+        scenario.scenario_id,
+        model_hash,
+        fidelity,
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    record = evaluator.evaluate(
+        graph.by_hash[model_hash],
+        fidelity,
+        seed=seed,
+        run_dir=run_dir,
+    )
+    return {
+        "format_version": MODEL_EVALUATION_FORMAT,
+        "state_database_written": False,
+        "scenario_id": scenario.scenario_id,
+        "root_model_hash": graph.root_hash,
+        "model_hash": model_hash,
+        "fidelity": fidelity.value,
+        "seed": int(seed),
+        "dataset_identity": evaluator.dataset_identity,
+        "fidelity_config_sha256": evaluator.fidelity_config_sha256,
+        "diagnostics_pass": record.diagnostics_pass,
+        "screen_value": record.screen_value,
+        "compute_cost_hours": record.compute_cost,
+        "run_dir": str(run_dir),
+        "evaluation": str(run_dir / "evaluation.json"),
+    }
+
+
 def run_nearby_baseline_suite(
     root: str | Path,
     posterior,
@@ -325,23 +512,17 @@ def run_nearby_baseline_suite(
 
     results = []
     for scenario in suite.scenarios:
-        graph = enumerate_model_graph(
-            scenario.root_spec,
-            max_depth=scenario.max_depth,
-            max_models=scenario.max_models,
-        )
+        graph = nearby_scenario_graph(scenario)
         scenario_root = root / scenario.scenario_id
         artifacts = scenario_root / "artifacts"
         database = scenario_root / "state.sqlite"
 
-        evaluator = DeterministicHBIEvaluator(
+        evaluator = _nearby_evaluator(
             posterior,
             selection,
-            config=campaign.fidelity,
-            dataset_identity=nearby_dataset_identity(
-                base_dataset_identity,
-                scenario,
-            ),
+            campaign,
+            base_dataset_identity=base_dataset_identity,
+            scenario=scenario,
         )
         execution = execute_search(
             graph,

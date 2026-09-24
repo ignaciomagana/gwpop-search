@@ -26,6 +26,14 @@ from .runner import (
     write_scientific_scoring,
 )
 from .validate import sampler_backend_status, validate_production_freeze
+from .spec_evaluation import (
+    MODEL_SPEC_EVALUATION_FORMAT,
+    model_spec_diff,
+    model_spec_provenance_path,
+    model_spec_run_dir,
+    run_model_spec_evaluation,
+    with_prior,
+)
 from .manifest import (
     ArtifactEntry,
     DatasetManifest,
@@ -38,6 +46,12 @@ from .manifest import (
 
 __all__ = [
     "LegacyCampaignError",
+    "MODEL_SPEC_EVALUATION_FORMAT",
+    "model_spec_diff",
+    "model_spec_provenance_path",
+    "model_spec_run_dir",
+    "run_model_spec_evaluation",
+    "with_prior",
     "PRODUCTION_CAMPAIGN_FORMAT_VERSION",
     "evidence_from_evaluation",
     "installed_sampler_backend",
