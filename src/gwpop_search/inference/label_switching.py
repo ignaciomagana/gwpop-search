@@ -137,7 +137,10 @@ def exchangeable_components_for_spec(spec) -> tuple[ExchangeableComponents, ...]
     Only ``chieff.family.gaussian_mixture`` with a constant mixture fraction
     qualifies in the current grammar (``chi_eff_mixture_logpdf`` weights
     component 1 by ``1 - chi_fraction`` and component 2 by ``chi_fraction``,
-    both with the same truncated-normal density).
+    both with the same truncated-normal density). The follow-up
+    ``fraction_dependence="logistic_q"`` mixture is *not* exchangeable (its
+    weight depends on q and its component priors differ by design), so it is
+    sampled in the identity parameterization with labels fixed by the priors.
     """
     chieff = getattr(spec, "chieff", None)
     if chieff is None or chieff.family != "gaussian_mixture":

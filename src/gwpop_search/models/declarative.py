@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 try:
+    import jax
     import jax.numpy as jnp
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -18,8 +19,10 @@ from gwpop_search.grammar import (
 )
 
 from .components import (
+    chi_eff_logistic_mixture_logpdf,
     chi_eff_logpdf,
     chi_eff_mixture_logpdf,
+    chi_eff_student_t_logpdf,
     mass_ratio_logpdf,
     mass_ratio_truncated_normal_logpdf,
     powerlaw_logpdf,
@@ -113,8 +116,24 @@ def _pairing_logpdf(spec, q, m1, hp, q_floor):
 
 def _chieff_logpdf(spec, chi, m1, q, z, hp):
     if spec.family == "gaussian_mixture":
-        if spec.options["fraction_dependence"] != "constant":
-            raise ValueError("only constant chi_eff mixture fraction is implemented")
+        fraction_dep = spec.options["fraction_dependence"]
+        if fraction_dep == "logistic_q":
+            # Weight of component 2: sigmoid(logit + slope * (q - q_pivot)).
+            logit = hp["logit_chi_fraction"] + hp["chi_fraction_q_slope"] * (
+                q - float(spec.options["q_pivot"])
+            )
+            return chi_eff_logistic_mixture_logpdf(
+                chi,
+                mu1=hp["chi_mu_1"],
+                sigma1=hp["chi_sigma_1"],
+                mu2=hp["chi_mu_2"],
+                sigma2=hp["chi_sigma_2"],
+                fraction_logit=logit,
+            )
+        if fraction_dep != "constant":
+            raise ValueError(
+                f"unsupported chi_eff mixture fraction dependence {fraction_dep!r}"
+            )
         return chi_eff_mixture_logpdf(
             chi,
             mu1=hp["chi_mu_1"],
@@ -122,6 +141,18 @@ def _chieff_logpdf(spec, chi, m1, q, z, hp):
             mu2=hp["chi_mu_2"],
             sigma2=hp["chi_sigma_2"],
             fraction=hp["chi_fraction"],
+        )
+    if spec.family == "truncated_student_t":
+        for option in ("mean_dependence", "width_dependence"):
+            if spec.options[option] != "constant":
+                raise ValueError(
+                    f"truncated_student_t supports only constant {option}"
+                )
+        return chi_eff_student_t_logpdf(
+            chi,
+            mu=hp["chi_mu"],
+            sigma=hp["chi_sigma"],
+            nu=hp["chi_nu"],
         )
     if spec.family != "truncated_gaussian":
         raise ValueError(f"unsupported chi_eff family {spec.family!r}")
@@ -157,6 +188,11 @@ def _chieff_logpdf(spec, chi, m1, q, z, hp):
         log_sigma = log_sigma + hp["log_chi_sigma_z_slope"] * (
             z - float(spec.options["z_pivot"])
         )
+    elif width_dep == "logistic_q":
+        # Smooth step in q: log sigma rises by delta_log_chi_sigma below
+        # q_transition (broader at low q when the step is positive).
+        argument = (hp["q_transition"] - q) / hp["q_transition_width"]
+        log_sigma = log_sigma + hp["delta_log_chi_sigma"] * jax.nn.sigmoid(argument)
     elif width_dep != "constant":
         raise ValueError(f"unsupported chi_eff width dependence {width_dep!r}")
 

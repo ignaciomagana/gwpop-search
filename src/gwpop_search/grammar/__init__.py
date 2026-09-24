@@ -10,6 +10,8 @@ from .enumerate import ModelEdge, ModelGraph, enumerate_model_graph
 from .io import load_model_graph, load_model_spec, save_model_graph, save_model_spec
 from .mutations import (
     DEFAULT_MUTATIONS,
+    FOLLOWUP_MUTATION_TABLE,
+    FOLLOWUP_MUTATIONS,
     InapplicableMutation,
     MutationSpec,
     apply_mutation,
@@ -33,6 +35,8 @@ __all__ = [
     "ComponentRegistry",
     "DEFAULT_COMPONENT_REGISTRY",
     "DEFAULT_MUTATIONS",
+    "FOLLOWUP_MUTATION_TABLE",
+    "FOLLOWUP_MUTATIONS",
     "FamilyDefinition",
     "InapplicableMutation",
     "load_model_graph",
