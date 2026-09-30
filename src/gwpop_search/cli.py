@@ -1209,8 +1209,19 @@ def _write_v2_alt_root_config(args: argparse.Namespace) -> None:
         NearbyBaselineSuiteSpec,
         save_nearby_baseline_suite_spec,
         v2_alt_root_scenario,
+        v2_chi_eff_atom_mutations,
     )
 
+    if (args.root_model is None) == (args.alt_root is None):
+        raise ValueError("pass exactly one of --root-model or --alt-root")
+    if args.alt_root is not None:
+        from .grammar.v2 import V2_PROFILE, v2_alternative_roots
+
+        root_spec = v2_alternative_roots()[args.alt_root]
+        catalogue = args.mutation_catalogue or V2_PROFILE
+    else:
+        root_spec = load_model_spec(Path(args.root_model))
+        catalogue = args.mutation_catalogue or "default"
     chi_eff = {}
     for item in args.chi_eff_atom or []:
         label, sep, mutation_id = str(item).partition("=")
@@ -1219,13 +1230,16 @@ def _write_v2_alt_root_config(args: argparse.Namespace) -> None:
         if label in chi_eff:
             raise ValueError(f"--chi-eff-atom {label} given twice")
         chi_eff[label] = tuple(x for x in mutation_id.split(",") if x) if "," in mutation_id else mutation_id
+    if not chi_eff and catalogue == "gwtc5-v2":
+        # the v2 grammar's own C1-C6 / S1-S4 atoms (each one mutation of R0)
+        chi_eff = v2_chi_eff_atom_mutations()
     candidates = [tuple(x for x in str(item).split(",") if x) for item in args.candidate or []]
     scenario = v2_alt_root_scenario(
         args.scenario_id,
-        load_model_spec(Path(args.root_model)),
+        root_spec,
         candidate_paths=candidates,
         chi_eff_mutation_ids=chi_eff,
-        mutation_catalogue_name=args.mutation_catalogue,
+        mutation_catalogue_name=catalogue,
         note=args.note or "",
     )
     spec = NearbyBaselineSuiteSpec(
@@ -2421,7 +2435,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     v2_alt.add_argument("--scenario-id", required=True)
-    v2_alt.add_argument("--root-model", required=True, help="alternative root model spec JSON")
+    v2_alt.add_argument("--root-model", help="alternative root model spec JSON")
+    v2_alt.add_argument(
+        "--alt-root",
+        choices=("A1", "A2"),
+        help="the v2 grammar's alternative root (A1 = R0 + beta per component, "
+        "A2 = R0 + kappa(m1)) instead of --root-model; implies --mutation-catalogue gwtc5-v2",
+    )
     v2_alt.add_argument(
         "--candidate",
         action="append",
@@ -2431,9 +2451,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--chi-eff-atom",
         action="append",
         help="LABEL=MUTATION_ID (or LABEL=A,B for a two-step atom) for each of C1-C6, "
-        "S1-S4 (all ten required)",
+        "S1-S4 (all ten required; default with the gwtc5-v2 catalogue: the v2 atoms)",
     )
-    v2_alt.add_argument("--mutation-catalogue", default="default")
+    v2_alt.add_argument(
+        "--mutation-catalogue",
+        default=None,
+        help="named mutation catalogue (default: 'gwtc5-v2' with --alt-root, else 'default')",
+    )
     v2_alt.add_argument("--note")
     v2_alt.add_argument("--output", required=True)
     _add_stress_arguments(v2_alt)

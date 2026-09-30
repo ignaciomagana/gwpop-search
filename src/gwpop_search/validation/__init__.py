@@ -53,6 +53,7 @@ __all__ = [
     "restricted_model_graph",
     "root_edge_log_bayes_factors",
     "v2_alt_root_scenario",
+    "v2_chi_eff_atom_mutations",
 ]
 
 from .stress import (
@@ -97,4 +98,5 @@ from .baselines import (
     restricted_model_graph,
     root_edge_log_bayes_factors,
     v2_alt_root_scenario,
+    v2_chi_eff_atom_mutations,
 )

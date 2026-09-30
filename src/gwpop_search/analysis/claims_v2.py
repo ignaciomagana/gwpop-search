@@ -490,6 +490,113 @@ def _edge_key(edge: Mapping, root_hash: str | None, paths: Mapping[str, tuple] |
     return None
 
 
+def collect_v2_evaluations(paths) -> dict[str, dict]:
+    """Per-model D1 inputs from the production evaluator's ``evaluation.json`` files.
+
+    ``paths`` are ``evaluation.json`` files or directories searched recursively.
+    Returns ``{"gates": {model_hash: passed}, "taper_mass": {model_hash:
+    pooled posterior mass fraction inside the taper region}, "fidelity":
+    {model_hash: rung}, "files": {model_hash: path}}``; a model evaluated at
+    more than one rung or in more than one file is refused (D1 needs one rung).
+    The taper mass is the ``diagnostics.taper.pooled`` block the tapered
+    evaluator writes (``summarize_dynesty_fit``); it is absent (not reported)
+    for an untapered likelihood or an F0 row.
+    """
+    out: dict[str, dict] = {"gates": {}, "taper_mass": {}, "fidelity": {}, "files": {}}
+    for path, payload in _evidence_evaluations(paths):
+        model_hash = str(payload["model_hash"])
+        if model_hash in out["files"]:
+            raise AnalysisInputError(
+                f"model {model_hash} has more than one evaluation ({out['files'][model_hash]}, {path}); "
+                "pass the evaluations of one fidelity rung"
+            )
+        diagnostics = payload.get("diagnostics") or {}
+        out["files"][model_hash] = str(path)
+        out["fidelity"][model_hash] = payload.get("fidelity")
+        out["gates"][model_hash] = bool(diagnostics.get("passed"))
+        pooled = ((diagnostics.get("taper") or {}).get("pooled") or {})
+        if "posterior_mass_in_taper_region" in pooled:
+            out["taper_mass"][model_hash] = float(pooled["posterior_mass_in_taper_region"])
+    if len(set(out["fidelity"].values())) > 1:
+        raise AnalysisInputError(f"evaluations span several rungs {sorted(set(out['fidelity'].values()))}")
+    return out
+
+
+def _evidence_evaluations(paths):
+    """``(path, payload)`` of every evidence-rung ``evaluation.json`` under ``paths``."""
+    import json
+    from pathlib import Path
+
+    files = []
+    for item in paths:
+        item = Path(item)
+        files.extend(sorted(item.rglob("evaluation.json")) if item.is_dir() else [item])
+    for path in files:
+        payload = json.loads(path.read_text())
+        if payload.get("fidelity") == "F0":
+            continue
+        yield path, payload
+
+
+#: D3: the taper-at-2 sensitivity rerun (plan 2026-09-30, Numerics)
+TAPER2_THRESHOLD = 2.0
+
+
+def taper2_rows_from_evaluations(graph, paths, *, threshold: float = TAPER2_THRESHOLD) -> list[dict]:
+    """D3 taper-2 rows (``v2-claim-table --taper2`` format) from rerun evaluations.
+
+    ``paths`` hold the ``evaluation.json`` files of the reruns under the
+    taper-at-``threshold`` fidelity configuration
+    (``v2_fidelity_run_config(2.0)``). Every evaluation must carry the taper
+    diagnostic of that threshold (a rerun under another taper is refused).
+    One row per graph edge whose two endpoints were rerun:
+    ``log_bayes_factor = ln Z_child - ln Z_parent`` and ``valid`` when both
+    evaluations pass their numerical checks.
+    """
+    runs: dict[str, dict] = {}
+    for path, payload in _evidence_evaluations(paths):
+        diagnostics = payload.get("diagnostics") or {}
+        taper = (((diagnostics.get("taper") or {}).get("pooled") or {}).get("taper") or {})
+        if taper.get("threshold") is None or float(taper["threshold"]) != float(threshold):
+            raise AnalysisInputError(
+                f"{path}: not a taper-at-{threshold:g} evaluation (taper {taper or None})"
+            )
+        model_hash = str(payload["model_hash"])
+        if model_hash in runs:
+            raise AnalysisInputError(f"model {model_hash} has more than one taper-2 evaluation")
+        evidence = diagnostics.get("evidence") or {}
+        runs[model_hash] = {
+            "passed": bool(diagnostics.get("passed")),
+            "log_evidence": evidence.get("log_evidence_mean"),
+            "error": evidence.get("conservative_error"),
+            "path": str(path),
+        }
+    rows = []
+    for edge in graph.edges:
+        p, c = runs.get(edge.parent_hash), runs.get(edge.child_hash)
+        if p is None or c is None:
+            continue
+        lnbf = None
+        if p["log_evidence"] is not None and c["log_evidence"] is not None:
+            lnbf = float(c["log_evidence"]) - float(p["log_evidence"])
+        rows.append({
+            "parent_hash": edge.parent_hash,
+            "child_hash": edge.child_hash,
+            "mutation_id": edge.mutation_id,
+            "log_bayes_factor": lnbf,
+            "valid": bool(p["passed"] and c["passed"] and lnbf is not None),
+            "taper_threshold": float(threshold),
+            "rerun_job": {"parent": p["path"], "child": c["path"]},
+        })
+    return rows
+
+
+def atom_labels_from_graph_payload(payload: Mapping) -> dict[str, str]:
+    """``{mutation_id: atom label}`` from a v2 graph JSON's ``metadata.atoms``."""
+    atoms = ((payload.get("metadata") or {}).get("atoms") or {}) if isinstance(payload, Mapping) else {}
+    return {str(v["mutation_id"]): str(k) for k, v in atoms.items() if isinstance(v, Mapping) and "mutation_id" in v}
+
+
 def count_atoms_tried(report: Mapping) -> int:
     """Trials count: distinct evaluated edges of the report (every depth)."""
     return sum(1 for e in report.get("edges", []) if not e.get("skipped") and e.get("log_bayes_factor") is not None)

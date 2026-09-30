@@ -67,6 +67,22 @@ MUTATION_CATALOGUES: dict[str, tuple[MutationSpec, ...]] = {
 V2_CHI_EFF_ATOMS = ("C1", "C2", "C3", "C4", "C5", "C6", "S1", "S2", "S3", "S4")
 
 
+def _register_v2_catalogue() -> None:
+    from gwpop_search.grammar.v2 import V2_MUTATIONS, V2_PROFILE
+
+    MUTATION_CATALOGUES[V2_PROFILE] = tuple(V2_MUTATIONS)
+
+
+_register_v2_catalogue()
+
+
+def v2_chi_eff_atom_mutations() -> dict[str, str]:
+    """Plan label -> mutation id of the ten v2 chi_eff atoms (each one mutation of R0)."""
+    from gwpop_search.grammar.v2 import V2_ATOM_IDS
+
+    return {label: V2_ATOM_IDS[label] for label in V2_CHI_EFF_ATOMS}
+
+
 def register_mutation_catalogue(name: str, mutations) -> None:
     """Register (or identically re-register) a named mutation catalogue."""
     name = str(name)

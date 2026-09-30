@@ -17,6 +17,7 @@ Markdown for the model-comparison report).
 * ``run-ppc``                    — v2 D6 posterior predictive checks with selection
 * ``reweight-data-variants``     — importance reweighting to the 249-event / SNR 9 / SNR 11
   variants with ESS and the (operator-gated) rerun flag; never runs a sampler
+* ``collect-v2-evaluations``     — per-model D1 gates and taper mass from evaluation.json
 * ``v2-claim-table``             — the v2 claim table, criteria D1-D6
 """
 
@@ -170,6 +171,7 @@ def _analyze_edge_mc_error(args) -> None:
         edge_mc_error,
         edge_mc_report,
         mc_covariance_matrix,
+        mc_taper_treatment,
         save_model_mc_weights,
     )
     from ._common import hbi_config_from_identity
@@ -178,7 +180,7 @@ def _analyze_edge_mc_error(args) -> None:
     posterior, selection = _load_data(args)
     graph, grouped = _load_graph_and_results(args)
     out = Path(args.output_dir)
-    weights, samples, models, catalogs = {}, {}, {}, {}
+    weights, samples, models, catalogs, treatments = {}, {}, {}, {}, {}
     for model_hash, results in sorted(grouped.items()):
         spec = graph.by_hash[model_hash]
         models[model_hash] = compile_model_spec(spec)
@@ -189,9 +191,11 @@ def _analyze_edge_mc_error(args) -> None:
         # sampled under: raw_selection_use_observing_time changes the per-campaign
         # log(T_k / N_k) factors, hence the self-normalized selection weights that
         # C_PP, sigma_A^2 and the edge sigma_MC are built from
+        run_hbi = hbi_config_from_identity(samples[model_hash].likelihood_identity)
+        treatments[model_hash] = mc_taper_treatment(run_hbi)
         catalogs[model_hash] = pad_catalog(
             posterior, selection, models[model_hash],
-            hbi_config=hbi_config_from_identity(samples[model_hash].likelihood_identity),
+            hbi_config=run_hbi, taper_treatment=treatments[model_hash],
         )
         weights[model_hash] = compute_model_mc_weights(
             samples[model_hash], posterior, selection, models[model_hash], label=model_hash,
@@ -234,6 +238,13 @@ def _analyze_edge_mc_error(args) -> None:
         "sigma_mc": {"model_hashes": keys, "matrix": mc_covariance_matrix([weights[h] for h in keys]).tolist()},
         "edges": edges,
     }
+    if any(treatments.values()):
+        from .terms import TAPER_TREATMENTS
+
+        payload["taper_treatment"] = {
+            h: treatments[h] for h in keys
+        }
+        payload["taper_treatment_note"] = TAPER_TREATMENTS["first_order_untapered_mc"]
     _write(out / "edge_mc_error.json", payload)
 
 
@@ -425,10 +436,11 @@ def _run_psis_loo_influence(args) -> None:
     check_same_catalog(grouped)
     config = PSISLOOConfig(k_threshold=args.k_threshold, min_loo_ess=args.min_loo_ess,
                            max_complement_mass=args.max_complement_mass)
-    results = {}
+    results, loo_tapers = {}, {}
     for model_hash, runs in sorted(grouped.items()):
         terms = evaluate_model_loo_terms(runs, posterior, selection, compile_model_spec(graph.by_hash[model_hash]),
                                          label=model_hash, batch_size=args.batch_size)
+        loo_tapers[model_hash] = terms.taper_treatment
         results[model_hash] = psis_loo_model(terms, config=config, forced_events=args.force_event or ())
     edges = [e.to_dict() for e in _edges_with(graph, grouped)]
     log_priors = membership = None
@@ -442,8 +454,14 @@ def _run_psis_loo_influence(args) -> None:
                                           ComplexityModelPrior(float(args.penalty)))
         membership = membership_by_atom(graph.by_hash[graph.root_hash], specs)
         results = {h: results[h] for h in heads}
+    extra = {"graph_root_hash": graph.root_hash}
+    if any(loo_tapers.values()):
+        from .terms import TAPER_TREATMENTS
+
+        extra["taper_treatment"] = dict(sorted(loo_tapers.items()))
+        extra["taper_treatment_note"] = TAPER_TREATMENTS["taper_as_prior"]
     report = psis_loo_report(results, edges=edges, log_model_priors=log_priors,
-                             structure_membership=membership, extra={"graph_root_hash": graph.root_hash})
+                             structure_membership=membership, extra=extra)
     _write(args.output, report)
     if args.write_exact_refit_config:
         from gwpop_search.search import Fidelity
@@ -595,6 +613,15 @@ def _run_reweight_data_variants(args) -> None:
         print("RERUN RECOMMENDED (operator-gated; nothing was launched): " + ", ".join(flagged))
 
 
+def _collect_v2_evaluations(args) -> None:
+    from .claims_v2 import collect_v2_evaluations
+
+    collected = collect_v2_evaluations(args.evaluations)
+    _write(args.gates_output, collected["gates"])
+    if args.taper_mass_output:
+        _write(args.taper_mass_output, collected["taper_mass"])
+
+
 def _v2_claim_table(args) -> None:
     from ._common import read_json
     from .claims_v2 import build_claim_table, render_claims_markdown
@@ -604,6 +631,15 @@ def _v2_claim_table(args) -> None:
     prior = read_json(args.prior_sensitivity) if args.prior_sensitivity else None
     reruns = read_json(args.d3_reruns)["rows"] if args.d3_reruns else []
     taper2 = read_json(args.taper2)["rows"] if args.taper2 else []
+    if args.taper2_evaluations:
+        if not args.graph:
+            raise ValueError("--taper2-evaluations needs --graph")
+        from gwpop_search.grammar import load_model_graph
+
+        from .claims_v2 import taper2_rows_from_evaluations
+
+        taper2 = [*taper2, *taper2_rows_from_evaluations(load_model_graph(Path(args.graph)),
+                                                          args.taper2_evaluations)]
     alt = {}
     for item in args.alt_root or []:
         name, sep, path = str(item).partition("=")
@@ -619,6 +655,14 @@ def _v2_claim_table(args) -> None:
     taper_mass = None
     if args.taper_mass:
         taper_mass = {str(k): float(v) for k, v in read_json(args.taper_mass).items() if k != "format_version"}
+    if args.evaluations:
+        from .claims_v2 import collect_v2_evaluations
+
+        collected = collect_v2_evaluations(args.evaluations)["taper_mass"]
+        clash = sorted(k for k in set(collected) & set(taper_mass or {}) if collected[k] != taper_mass[k])
+        if clash:
+            raise ValueError(f"--taper-mass disagrees with --evaluations for {clash}")
+        taper_mass = {**collected, **(taper_mass or {})}
     labels = None
     if args.atom_labels:
         labels = {str(k): str(v) for k, v in read_json(args.atom_labels).items()}
@@ -626,7 +670,11 @@ def _v2_claim_table(args) -> None:
     if args.graph:
         from gwpop_search.grammar import load_model_graph
 
+        from .claims_v2 import atom_labels_from_graph_payload
+
         graph = load_model_graph(Path(args.graph))
+        if labels is None:
+            labels = atom_labels_from_graph_payload(read_json(args.graph)) or None
     table = build_claim_table(
         report, sddr=sddr, prior_sensitivity=prior, d3_reruns=reruns, taper2=taper2, alt_roots=alt,
         ppc=ppc, loo=loo, taper_mass=taper_mass, graph=graph, n_atoms_tried=args.n_atoms_tried,
@@ -786,6 +834,17 @@ def register_analysis_subcommands(subparsers) -> None:
     variants.add_argument("--output", required=True)
     variants.set_defaults(func=_run_reweight_data_variants)
 
+    collect = subparsers.add_parser(
+        "collect-v2-evaluations",
+        help="per-model D1 gates and taper mass from evaluation.json files "
+        "(inputs of analyze-model-comparison --gates and v2-claim-table --taper-mass)",
+    )
+    collect.add_argument("--evaluations", action="append", required=True,
+                         help="evaluation.json file or directory; repeatable")
+    collect.add_argument("--gates-output", required=True, help="JSON {model_hash: gates passed}")
+    collect.add_argument("--taper-mass-output", help="JSON {model_hash: posterior taper mass}")
+    collect.set_defaults(func=_collect_v2_evaluations)
+
     claims = subparsers.add_parser("v2-claim-table", help="the v2 claim table (criteria D1-D6)")
     claims.add_argument("--report", required=True, help="analyze-model-comparison JSON")
     claims.add_argument("--graph", help="model graph JSON (keys depth-2 edges for D5)")
@@ -793,11 +852,18 @@ def register_analysis_subcommands(subparsers) -> None:
     claims.add_argument("--prior-sensitivity", help="analyze-prior-sensitivity JSON (checks the factor 2)")
     claims.add_argument("--d3-reruns", help="JSON {rows: [...]} of halved/doubled-prior reruns")
     claims.add_argument("--taper2", help="JSON {rows: [{parent_hash, child_hash, log_bayes_factor, valid}]}")
+    claims.add_argument("--taper2-evaluations", action="append",
+                        help="evaluation.json file or directory of the taper-at-2 reruns "
+                        "(rows are built per graph edge; needs --graph); repeatable")
     claims.add_argument("--alt-root", action="append", help="A1=<summary.json> / A2=<summary.json>")
     claims.add_argument("--ppc", action="append", help="run-ppc output; repeatable")
     claims.add_argument("--loo", help="run-psis-loo-influence output (reported, not binding)")
     claims.add_argument("--taper-mass", help="JSON {model_hash: posterior mass fraction inside the taper}")
-    claims.add_argument("--atom-labels", help="JSON {mutation_id: plan atom label}")
+    claims.add_argument("--evaluations", action="append",
+                        help="evaluation.json file or directory (the taper mass of every tapered "
+                        "evaluation is read from it); repeatable")
+    claims.add_argument("--atom-labels",
+                        help="JSON {mutation_id: plan atom label} (default: the v2 graph's metadata.atoms)")
     claims.add_argument("--n-atoms-tried", type=int, help="override the trials count (default: evaluated edges)")
     claims.add_argument("--output", required=True)
     claims.add_argument("--markdown")
