@@ -100,6 +100,16 @@ def build_production_campaign(
                 f"{require_root_profile!r} hyperprior profile; re-enumerate the "
                 f"graph with --hyperprior-profile {require_root_profile}"
             )
+    root_spec = graph.by_hash[graph.root_hash]
+    from gwpop_search.grammar.v2_structure import is_v2_model
+
+    if is_v2_model(root_spec) and fidelity.hbi.variance_taper is None:
+        # v2 spec (plan 2026-09-30, Numerics): the sigma^2_lnL taper lives inside
+        # the likelihood; a v2 campaign without it would score a different model
+        raise ValueError(
+            "a v2 model graph needs a fidelity configuration whose HBI likelihood "
+            "carries the variance taper (inference.v2_numerics.v2_fidelity_run_config)"
+        )
     return ProductionCampaignConfig(
         campaign_id=campaign_id,
         dataset_manifest_hash=manifest.manifest_hash,

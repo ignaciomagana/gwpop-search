@@ -1663,6 +1663,16 @@ class DeterministicHBIEvaluator:
         start = time.perf_counter()
 
         population_model = compile_model_spec(model)
+        data_support = None
+        if getattr(population_model, "is_v2", False):
+            # v2 models declare their support (zmax, q_floor, mmin/mmax, sky,
+            # cosmology); the dataset must match it before anything is sampled
+            from gwpop_search.models.data_support import require_v2_data_support
+
+            data_support = require_v2_data_support(
+                population_model, self.posterior, self.selection,
+                context=f"model {model.model_hash}",
+            )
         priors = prior_specs_from_model_spec(model)
         require_population_proxy_coverage(
             self.selection,
@@ -1697,6 +1707,8 @@ class DeterministicHBIEvaluator:
                 run_dir=run_dir,
             )
 
+        if data_support is not None:
+            diagnostics = {**diagnostics, "v2_data_support": data_support}
         elapsed = time.perf_counter() - start
         self._write_evaluation(
             run_dir,

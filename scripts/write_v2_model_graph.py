@@ -37,7 +37,16 @@ def main(argv=None) -> None:
     parser.add_argument("--pe", default=None, help="gwcat PE export: its z_max attr enters the G12 check")
     parser.add_argument("--selection", default=None,
                         help="gwcat selection export: its z_max attr enters the G12 check")
+    parser.add_argument("--canonical-pe", default=None,
+                        help="canonical PE HDF5 (adapter output): every node's support is checked "
+                        "against it (G12 model + data; with --canonical-selection)")
+    parser.add_argument("--canonical-selection", default=None,
+                        help="canonical selection HDF5 (adapter output)")
+    parser.add_argument("--v2-policy", default=None,
+                        help="v2 data policy JSON: its z_max enters the data-support check")
     args = parser.parse_args(argv)
+    if (args.canonical_pe is None) != (args.canonical_selection is None):
+        raise SystemExit("pass both --canonical-pe and --canonical-selection, or neither")
     export_zmax = {}
     for name, path in (("pe", args.pe), ("selection", args.selection)):
         if path:
@@ -58,6 +67,29 @@ def main(argv=None) -> None:
     payload["metadata"]["g12_model_checks"]["export_files"] = {
         name: str(Path(path).resolve()) for name, path in (("pe", args.pe), ("selection", args.selection)) if path
     }
+    if args.canonical_pe:
+        import jax
+
+        jax.config.update("jax_enable_x64", True)
+        from gwpop_search.data import PosteriorCatalog, SelectionCatalog
+        from gwpop_search.models.data_support import v2_data_support_report
+
+        policy = None
+        if args.v2_policy:
+            from gwpop_search.data.v2_policy import GwcatV2DataPolicy
+
+            policy = GwcatV2DataPolicy.from_json(args.v2_policy)
+        posterior = PosteriorCatalog.from_hdf5(args.canonical_pe)
+        selection = SelectionCatalog.from_hdf5(args.canonical_selection)
+        reports = [v2_data_support_report(node, posterior, selection, policy=policy) for node in graph.nodes]
+        payload["metadata"]["g12_data_support"] = {
+            "pass": all(r["pass"] for r in reports),
+            "files": {"pe": str(Path(args.canonical_pe).resolve()),
+                      "selection": str(Path(args.canonical_selection).resolve()),
+                      "v2_policy": None if not args.v2_policy else str(Path(args.v2_policy).resolve())},
+            "models": {r["model_hash"]: {"pass": r["pass"], "checks": r["checks"], "reported": r["reported"]}
+                       for r in reports},
+        }
     try:
         from gwpop_search.inference.numpyro import _code_identity
 
@@ -75,6 +107,7 @@ def main(argv=None) -> None:
         "edges": len(loaded.edges),
         "root_hash": loaded.root_hash,
         "g12_model_checks_pass": payload["metadata"]["g12_model_checks"]["pass"],
+        "g12_data_support_pass": (payload["metadata"].get("g12_data_support") or {}).get("pass"),
     }, indent=2))
 
 
