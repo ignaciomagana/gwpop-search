@@ -460,11 +460,13 @@ def _enumerate_models(args: argparse.Namespace) -> None:
     from .grammar import (
         baseline_model_spec,
         enumerate_model_graph,
+        mutations_for_profile,
         save_model_graph,
     )
 
     graph = enumerate_model_graph(
         baseline_model_spec(args.hyperprior_profile),
+        mutations=mutations_for_profile(args.hyperprior_profile),
         max_depth=args.max_depth,
         max_models=args.max_models,
     )

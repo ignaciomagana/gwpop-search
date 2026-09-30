@@ -21,6 +21,17 @@ from .registry import (
     ComponentRegistry,
     FamilyDefinition,
 )
+from .v2 import (
+    V2_ATOM_IDS,
+    V2_MUTATION_TABLE,
+    V2_MUTATIONS,
+    V2_PROFILE,
+    compose_atoms,
+    enumerate_v2_depth1,
+    mutations_for_profile,
+    plan_depth2,
+    v2_root_model_spec,
+)
 from .schema import (
     BlockSpec,
     ModelSpec,
@@ -53,4 +64,13 @@ __all__ = [
     "save_model_graph",
     "save_model_spec",
     "structural_diff_axes",
+    "V2_ATOM_IDS",
+    "V2_MUTATION_TABLE",
+    "V2_MUTATIONS",
+    "V2_PROFILE",
+    "compose_atoms",
+    "enumerate_v2_depth1",
+    "mutations_for_profile",
+    "plan_depth2",
+    "v2_root_model_spec",
 ]

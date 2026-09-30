@@ -70,6 +70,33 @@ _PHI0 = 1.0 / math.sqrt(2.0 * math.pi)
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class UniformDifferencePrior:
+    """Prior of ``d = x - y`` for independent ``x ~ U(a1, b1)``, ``y ~ U(a2, b2)``.
+
+    The density is the overlap length ``|[a1, b1] cap [a2 + d, b2 + d]| / (w1 w2)``
+    (a trapezoid) on ``[a1 - b2, b1 - a2]``. It is the prior of the tested
+    coordinate of a difference null (``alpha_2 = alpha_1``, ``beta_high = beta_low``).
+    """
+
+    a1: float
+    b1: float
+    a2: float
+    b2: float
+    family: str = "uniform_difference"
+
+    @property
+    def parameters(self) -> dict[str, float]:
+        return {"a1": self.a1, "b1": self.b1, "a2": self.a2, "b2": self.b2}
+
+
+def _difference_density(params, x):
+    x = np.asarray(x, dtype=np.float64)
+    a1, b1, a2, b2 = params["a1"], params["b1"], params["a2"], params["b2"]
+    overlap = np.minimum(b1, b2 + x) - np.maximum(a1, a2 + x)
+    return np.maximum(overlap, 0.0) / ((b1 - a1) * (b2 - a2))
+
+
 def prior_log_density(prior, value: float) -> float:
     """Log density of a ``PriorSpec`` or grammar ``PriorConfig`` at ``value``.
 
@@ -78,6 +105,9 @@ def prior_log_density(prior, value: float) -> float:
     """
     family, params = _prior_parts(prior)
     x = float(value)
+    if family == "uniform_difference":
+        d = float(_difference_density(params, x))
+        return math.log(d) if d > 0 else -math.inf
     if family == "uniform":
         lo, hi = params["low"], params["high"]
         return -math.log(hi - lo) if lo <= x <= hi else -math.inf
@@ -93,6 +123,10 @@ def prior_log_density(prior, value: float) -> float:
 def prior_log_density_array(prior, values) -> np.ndarray:
     family, params = _prior_parts(prior)
     x = np.asarray(values, dtype=np.float64)
+    if family == "uniform_difference":
+        d = _difference_density(params, x)
+        with np.errstate(divide="ignore"):
+            return np.where(d > 0, np.log(np.where(d > 0, d, 1.0)), -np.inf)
     if family == "uniform":
         lo, hi = params["low"], params["high"]
         return np.where((x >= lo) & (x <= hi), -math.log(hi - lo), -np.inf)
@@ -109,6 +143,8 @@ def prior_log_density_array(prior, values) -> np.ndarray:
 
 def prior_support(prior) -> tuple[float, float]:
     family, params = _prior_parts(prior)
+    if family == "uniform_difference":
+        return float(params["a1"] - params["b2"]), float(params["b1"] - params["a2"])
     if family in {"uniform", "log_uniform"}:
         return float(params["low"]), float(params["high"])
     return -math.inf, math.inf
@@ -348,6 +384,14 @@ class NullEmbedding:
     ``parameter_map`` maps smaller-model parameters to their larger-model
     counterparts (identity for names not listed); ``unidentified`` are
     larger-model parameters that drop out at the null.
+
+    ``difference_of = (a, b)`` makes the tested coordinate the derived
+    difference ``a - b`` of two larger-model parameters (``tested_parameter``
+    is then only its label). With independent identical uniform priors on
+    ``a`` and ``b`` the null ``a - b = 0`` is exactly nested: in the
+    coordinates ``(b, d = a - b)`` the conditional prior of ``b`` at ``d = 0`` is
+    its own uniform prior (the smaller model's prior of the parameter mapped
+    to ``b``), and the prior density of ``d`` at 0 is ``1 / (high - low)``.
     """
 
     tested_parameter: str
@@ -355,15 +399,39 @@ class NullEmbedding:
     location: str  # interior | lower | upper
     parameter_map: Mapping[str, str] = field(default_factory=dict)
     unidentified: tuple[str, ...] = ()
+    difference_of: tuple[str, str] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "tested_parameter": self.tested_parameter,
             "null_value": self.null_value,
             "location": self.location,
             "parameter_map": dict(self.parameter_map),
             "unidentified": list(self.unidentified),
         }
+        if self.difference_of is not None:
+            payload["difference_of"] = list(self.difference_of)
+        return payload
+
+    def tested_values(self, sample) -> np.ndarray:
+        if self.difference_of is None:
+            return sample.column(self.tested_parameter)
+        a, b = self.difference_of
+        return sample.column(a) - sample.column(b)
+
+    def tested_prior(self, larger_priors: Mapping[str, object]):
+        if self.difference_of is None:
+            return larger_priors[self.tested_parameter]
+        a, b = self.difference_of
+        fa, pa = _prior_parts(larger_priors[a])
+        fb, pb = _prior_parts(larger_priors[b])
+        if fa != "uniform" or fb != "uniform":
+            raise AnalysisInputError("difference nulls need uniform priors on both parameters")
+        return UniformDifferencePrior(pa["low"], pa["high"], pb["low"], pb["high"])
+
+    @property
+    def tested_names(self) -> tuple[str, ...]:
+        return tuple(self.difference_of) if self.difference_of is not None else (self.tested_parameter,)
 
 
 @dataclass(frozen=True)
@@ -419,6 +487,33 @@ _OPTION_NULLS: dict[tuple[str, str, str], tuple[str, tuple[str, ...]]] = {
 }
 _NULL_OPTION_VALUE = "constant"
 
+# v2 (GWTC-5 atom search) option nulls: the LVK-linear chi_eff correlations
+# (slope 0 = constant), kappa(m1) (slope 0), and the logistic pairing step, whose
+# null beta_high = beta_low is a difference null (the step location and width
+# are unidentified there; beta_low takes the root beta).
+_OPTION_NULLS.update({
+    ("chieff", "mean_q", "linear"): ("chi_mu_q_slope", ()),
+    ("chieff", "mean_z", "linear"): ("chi_mu_z_slope", ()),
+    ("chieff", "mean_log_m1", "linear"): ("chi_mu_log_m1_slope", ()),
+    ("chieff", "log_sigma_q", "linear"): ("chi_log_sigma_q_slope", ()),
+    ("chieff", "log_sigma_z", "linear"): ("chi_log_sigma_z_slope", ()),
+    ("chieff", "log_sigma_log_m1", "linear"): ("chi_log_sigma_log_m1_slope", ()),
+    ("redshift", "kappa_dependence", "linear_log_m1"): ("kappa_log_m1_slope", ()),
+})
+_OPTION_EMBEDDINGS: dict[tuple[str, str, str], tuple[NullEmbedding, ...]] = {
+    ("pairing", "beta_dependence", "logistic_log_m1"): (
+        NullEmbedding(
+            "beta_high-beta_low", 0.0, "interior", {"beta": "beta_low"},
+            ("beta_m_t", "beta_width"), difference_of=("beta_high", "beta_low"),
+        ),
+    ),
+}
+#: v2 edges that are deliberately evidence-only, with the reason.
+_NOT_NESTED_REASONS: dict[tuple[str, str, str], str] = {
+    ("pairing", "beta_dependence", "per_mass_component"):
+        "beta per mass component: the null is a two-dimensional equality (beta_pl = beta_p10 = beta_p35)",
+}
+
 # (block, smaller family, larger family) -> embeddings of the smaller family
 # in the larger one; ``exact`` marks an embedding that reproduces the smaller
 # density exactly in the compiled components.
@@ -470,9 +565,76 @@ _FAMILY_NULLS: dict[tuple[str, str, str], dict[str, object]] = {
 }
 
 
+_V2_CHIEFF_CORRELATION_OPTIONS = (
+    "mean_q", "mean_z", "mean_log_m1", "log_sigma_q", "log_sigma_z", "log_sigma_log_m1",
+    "q_pivot", "z_pivot", "m1_pivot",
+)
+_FAMILY_NULLS.update({
+    # Dirichlet unit coordinates: dropping component c is lam_u_c = 0 with every
+    # other prior unchanged (grammar.v2_structure), so these are exact.
+    ("mass", "bp1p_low", "bp2p"): {
+        "exact": True, "symmetric": False,
+        "embeddings": (NullEmbedding("lam_u_p35", 0.0, "lower", {}, ("mu_p35", "sigma_p35")),),
+    },
+    ("mass", "bp1p_high", "bp2p"): {
+        "exact": True, "symmetric": False,
+        "embeddings": (NullEmbedding("lam_u_p10", 0.0, "lower", {}, ("mu_p10", "sigma_p10")),),
+    },
+    ("mass", "bp2p", "bp3p"): {
+        "exact": True, "symmetric": False,
+        "embeddings": (NullEmbedding("lam_u_p3", 0.0, "lower", {}, ("mu_p3", "sigma_p3")),),
+    },
+    # no break: alpha_2 = alpha_1 (m_break unidentified), a difference null.
+    ("mass", "pl2p", "bp2p"): {
+        "exact": True, "symmetric": False,
+        "embeddings": (
+            NullEmbedding("alpha_2-alpha_1", 0.0, "interior", {"alpha": "alpha_1"}, ("m_break",),
+                          difference_of=("alpha_2", "alpha_1")),
+        ),
+    },
+    # constant-fraction mixture: component 1 is the Gaussian (same names, same
+    # correlations); the fraction of the ordered component 2 at 0.
+    ("chieff", "linear_gaussian", "linear_gaussian_mixture"): {
+        "exact": True, "symmetric": False,
+        "embeddings": (
+            NullEmbedding("chi_fraction", 0.0, "lower", {}, ("chi_mu_2_frac", "chi_log_sigma_2")),
+        ),
+        "requires_larger_options": {"fraction_dependence": "constant"},
+        "requires_equal_options": _V2_CHIEFF_CORRELATION_OPTIONS,
+    },
+    ("chieff", "linear_gaussian", "linear_skew_normal"): {
+        "exact": True, "symmetric": False,
+        "embeddings": (NullEmbedding("chi_eps", 0.0, "interior", {}, ()),),
+        "requires_equal_options": _V2_CHIEFF_CORRELATION_OPTIONS,
+    },
+    # Madau-Dickinson with kappa_MD = 0 is (1+z)^gamma exactly (z_peak unidentified).
+    ("redshift", "powerlaw_1pz", "madau_dickinson_psi"): {
+        "exact": True, "symmetric": False,
+        "embeddings": (NullEmbedding("md_kappa", 0.0, "lower", {"kappa": "md_gamma"}, ("md_z_peak",)),),
+        "requires_constant_options": ("kappa_dependence",),
+    },
+})
+
+
+_V2_FAMILY_REASONS = {
+    ("chieff", "linear_gaussian", "linear_student_t"):
+        "Student-t: the Gaussian is the nu -> infinity limit, outside the nu prior",
+    ("chieff", "linear_gaussian", "linear_gaussian_mixture"):
+        "mass-dependent mixture fraction: the null chi_fraction_low = chi_fraction_high = 0 "
+        "is two-dimensional",
+}
+
+
 def _family_rule(smaller: ModelSpec, larger: ModelSpec, block: str):
     key = (block, getattr(smaller, block).family, getattr(larger, block).family)
-    return _FAMILY_NULLS.get(key)
+    rule = _FAMILY_NULLS.get(key)
+    if rule is None:
+        return None
+    larger_options = getattr(larger, block).options
+    for option, value in dict(rule.get("requires_larger_options", {})).items():
+        if larger_options.get(option) != value:
+            return None
+    return rule
 
 
 def _support_contains(outer, inner) -> bool:
@@ -501,8 +663,13 @@ def classify_edge(parent: ModelSpec, child: ModelSpec, mutation_id: str) -> Edge
     larger = None
     if ".options." in axis:
         option = axis.split(".options.")[1]
-        rule = _OPTION_NULLS.get((block, option, str(cb.options.get(option))))
-        if rule is None:
+        key = (block, option, str(cb.options.get(option)))
+        rule = _OPTION_NULLS.get(key)
+        explicit = _OPTION_EMBEDDINGS.get(key)
+        if key in _NOT_NESTED_REASONS:
+            return EdgeNesting(**base, classification="evidence_only", larger_model=None,
+                               reason=_NOT_NESTED_REASONS[key])
+        if rule is None and explicit is None:
             return EdgeNesting(**base, classification="evidence_only", larger_model=None,
                                reason=f"no nesting embedding registered for {axis}={cb.options.get(option)!r}")
         if pb.options.get(option) != _NULL_OPTION_VALUE:
@@ -511,8 +678,11 @@ def classify_edge(parent: ModelSpec, child: ModelSpec, mutation_id: str) -> Edge
                 reason=(f"option replacement {pb.options.get(option)!r} -> {cb.options.get(option)!r}: "
                         "non-nested siblings sharing the constant sub-model"),
             )
-        tested, unidentified = rule
-        embeddings = (NullEmbedding(tested, 0.0, "interior", {}, tuple(unidentified)),)
+        if explicit is not None:
+            embeddings = tuple(explicit)
+        else:
+            tested, unidentified = rule
+            embeddings = (NullEmbedding(tested, 0.0, "interior", {}, tuple(unidentified)),)
         larger, smaller_spec, larger_spec = "child", parent, child
     else:
         rule = _family_rule(child, parent, block)
@@ -521,8 +691,11 @@ def classify_edge(parent: ModelSpec, child: ModelSpec, mutation_id: str) -> Edge
         else:
             rule = _family_rule(parent, child, block)
             if rule is None:
-                return EdgeNesting(**base, classification="evidence_only", larger_model=None,
-                                   reason=f"family change {pb.family} -> {cb.family} is not nested within the priors")
+                reason = _V2_FAMILY_REASONS.get(
+                    (block, pb.family, cb.family),
+                    _V2_FAMILY_REASONS.get((block, cb.family, pb.family)),
+                ) or f"family change {pb.family} -> {cb.family} is not nested within the priors"
+                return EdgeNesting(**base, classification="evidence_only", larger_model=None, reason=reason)
             larger, smaller_spec, larger_spec = "child", parent, child
         for option in rule.get("requires_constant_options", ()):
             if getattr(smaller_spec, block).options.get(option, _NULL_OPTION_VALUE) != _NULL_OPTION_VALUE:
@@ -530,6 +703,12 @@ def classify_edge(parent: ModelSpec, child: ModelSpec, mutation_id: str) -> Edge
                     **base, classification="evidence_only", larger_model=None,
                     reason=f"the smaller model has {block}.{option}="
                     f"{getattr(smaller_spec, block).options.get(option)!r}, which the larger family lacks",
+                )
+        for option in rule.get("requires_equal_options", ()):
+            if getattr(smaller_spec, block).options.get(option) != getattr(larger_spec, block).options.get(option):
+                return EdgeNesting(
+                    **base, classification="evidence_only", larger_model=None,
+                    reason=f"{block}.{option} differs between the two families' blocks",
                 )
         embeddings = tuple(rule["embeddings"])
         symmetric = bool(rule["symmetric"])
@@ -552,8 +731,16 @@ def classify_edge(parent: ModelSpec, child: ModelSpec, mutation_id: str) -> Edge
                 mismatches.append(f"{name}->{target}")
                 if not _support_contains(other, prior):
                     first_form_valid = False
+        if emb.difference_of is not None:
+            a, b = emb.difference_of
+            if _prior_key(larger_spec.priors[a]) != _prior_key(larger_spec.priors[b]) or \
+                    _prior_parts(larger_spec.priors[a])[0] != "uniform":
+                return EdgeNesting(
+                    **base, classification="evidence_only", larger_model=None,
+                    reason=f"difference null {a} - {b} needs identical uniform priors on both",
+                )
         expected = set(smaller_spec.priors) - set(mapped) | set(mapped.values())
-        extra = set(larger_spec.priors) - expected - {emb.tested_parameter} - set(emb.unidentified)
+        extra = set(larger_spec.priors) - expected - set(emb.tested_names) - set(emb.unidentified)
         if extra:
             raise AnalysisInputError(
                 f"{mutation_id}: larger-model parameters {sorted(extra)} are neither shared, tested "
@@ -659,7 +846,11 @@ def verify_nesting(
             hp_l = {}
             for name, value in hp_s.items():
                 hp_l[emb.parameter_map.get(name, name)] = value
-            hp_l[emb.tested_parameter] = emb.null_value
+            if emb.difference_of is None:
+                hp_l[emb.tested_parameter] = emb.null_value
+            else:
+                a, b = emb.difference_of
+                hp_l[a] = hp_l[b] + emb.null_value
             for name in emb.unidentified:
                 hp_l[name] = _draw_prior(rng, larger_spec.priors[name])
             a = np.asarray(smaller_model(samples, hp_s), dtype=np.float64)
@@ -699,7 +890,7 @@ def vw_factor(
     ``|omega - omega_0| <= eps`` (``eps`` in the units of the tested
     parameter; approximate). Requires ``supp pi_S ⊆ supp pi_L`` (first VW form).
     """
-    omega = sample.column(embedding.tested_parameter)
+    omega = embedding.tested_values(sample)
     near = np.abs(omega - embedding.null_value) <= eps
     w = sample.weights[near]
     if w.size == 0:
@@ -875,10 +1066,10 @@ def sddr_edge_check(
     embeddings = nesting.embeddings if nesting.symmetric_embeddings else nesting.embeddings[:1]
     densities = []
     for k, emb in enumerate(embeddings):
-        prior = larger_priors[emb.tested_parameter]
+        prior = emb.tested_prior(larger_priors)
         densities.append(
             density_at_null(
-                larger_sample.column(emb.tested_parameter),
+                emb.tested_values(larger_sample),
                 larger_sample.weights,
                 emb.null_value,
                 parameter=emb.tested_parameter,
@@ -891,7 +1082,7 @@ def sddr_edge_check(
             )
         )
     emb0 = embeddings[0]
-    log_prior = prior_log_density(larger_priors[emb0.tested_parameter], emb0.null_value)
+    log_prior = prior_log_density(emb0.tested_prior(larger_priors), emb0.null_value)
     details: dict[str, object] = {
         "larger_model": nesting.larger_model,
         "densities": [d.to_dict() for d in densities],

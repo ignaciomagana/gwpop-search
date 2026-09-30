@@ -58,6 +58,12 @@ class FamilyDefinition:
                     )
 
 
+def _v2_definitions() -> tuple[FamilyDefinition, ...]:
+    from .v2_structure import v2_family_definitions
+
+    return v2_family_definitions()
+
+
 class ComponentRegistry:
     def __init__(self, definitions: tuple[FamilyDefinition, ...]):
         table: dict[tuple[str, str], FamilyDefinition] = {}
@@ -91,6 +97,16 @@ class ComponentRegistry:
         components = model.mixture.options.get("components", 1)
         if model.mixture.family == "single" and components != 1:
             raise ValueError("single mixture family requires components=1")
+
+        from .v2_structure import is_v2_model, validate_v2_model
+
+        if is_v2_model(model):
+            validate_v2_model(model)
+        elif model.support:
+            raise ValueError(
+                "ModelSpec.support is only defined for v2 families; v1 models keep "
+                "their historical compiler defaults"
+            )
 
 
 DEFAULT_COMPONENT_REGISTRY = ComponentRegistry(
@@ -182,4 +198,6 @@ DEFAULT_COMPONENT_REGISTRY = ComponentRegistry(
         FamilyDefinition("redshift", "madau_dickinson"),
         FamilyDefinition("mixture", "single", {"components": 1}, {"components": (1,)}),
     )
+    # v2 (GWTC-5 atom search) families; see grammar.v2_structure.
+    + _v2_definitions()
 )
