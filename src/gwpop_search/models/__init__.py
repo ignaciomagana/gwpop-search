@@ -18,11 +18,24 @@ from .components import (
     truncated_student_t_logpdf,
 )
 from .cosmology import FlatLambdaCDM
-from .declarative import DeclarativeGwcatChiEffModel, compile_model_spec
+from .declarative import (
+    LVK_DEFAULT_TO_V2,
+    DeclarativeGwcatChiEffModel,
+    compile_model_spec,
+    lvk_default_coordinates,
+    lvk_default_physical,
+    v2_mass_logpdf,
+    v2_physical_hyperparameters,
+)
 
 __all__ = [
     "DEFAULT_BASELINE_HYPERPARAMETERS",
     "DeclarativeGwcatChiEffModel",
+    "LVK_DEFAULT_TO_V2",
+    "lvk_default_coordinates",
+    "lvk_default_physical",
+    "v2_mass_logpdf",
+    "v2_physical_hyperparameters",
     "FlatLambdaCDM",
     "GwcatChiEffBBHModel",
     "chi_eff_logistic_mixture_logpdf",
