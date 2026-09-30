@@ -160,5 +160,42 @@ def test_event_stress_suite_spec_roundtrip(tmp_path):
     restored = load_event_stress_suite_spec(path)
     assert restored == spec
     payload = json.loads(path.read_text())
-    assert payload["format_version"] == "gwpop-search-event-stress-suite-1.0"
+    assert payload["format_version"] == "gwpop-search-event-stress-suite-1.1"
     assert payload["config"]["stop_fidelity"] == "F3"
+
+
+def test_event_stress_requires_an_evidence_rung_of_ladder_v2(tmp_path):
+    import pytest
+
+    from gwpop_search.search import Fidelity
+
+    for stop in (Fidelity.F0_SANITY, Fidelity.F1_SCREEN, Fidelity.F2_INFERENCE):
+        with pytest.raises(ValueError, match="F3 or F4"):
+            EventStressConfig(stop_fidelity=stop)
+    assert EventStressConfig(stop_fidelity=Fidelity.F4_PRODUCTION).stop_fidelity is Fidelity.F4_PRODUCTION
+    # a 1.0 spec with an evidence stop is read and re-written as 1.1; F2 specs are refused
+    legacy = {
+        "format_version": "gwpop-search-event-stress-suite-1.0",
+        "config": {"stop_fidelity": "F3", "max_gpu_hours_per_scenario": 5.0, "max_f3_models": 3,
+                   "max_f4_models": 2},
+        "scenarios": [{"scenario_id": "drop_A", "drop_events": ["GW_A"], "category": "custom", "note": ""}],
+    }
+    assert EventStressSuiteSpec.from_dict(legacy).to_dict()["format_version"] == (
+        "gwpop-search-event-stress-suite-1.1"
+    )
+    legacy["config"]["stop_fidelity"] = "F2"
+    with pytest.raises(ValueError, match="F2 is not in the ladder"):
+        EventStressSuiteSpec.from_dict(legacy)
+
+
+def test_event_stress_plan_records_the_backend():
+    graph = enumerate_model_graph(baseline_model_spec(), max_depth=1, max_models=3)
+    plan = build_event_stress_plan(
+        campaign=_campaign(),
+        base_dataset_identity="dataset-sha",
+        graph=graph,
+        scenarios=(EventDropScenario("drop_A", ("GW_A",)),),
+        config=EventStressConfig(),
+    )
+    assert plan["format_version"] == "gwpop-search-event-stress-plan-1.1"
+    assert plan["sampler_backend"] == "dynesty"

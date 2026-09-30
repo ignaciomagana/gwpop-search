@@ -6,11 +6,16 @@ from pathlib import Path
 from typing import Mapping
 
 from gwpop_search.data import PosteriorCatalog, SelectionCatalog
-from gwpop_search.grammar import ModelGraph
+from gwpop_search.grammar import ModelGraph, baseline_hyperprior_profile
 from gwpop_search.inference.fidelity import FidelityRunConfig
 from gwpop_search.search import SchedulerConfig
 
-from .config import ProductionCampaignConfig, SearchBudget, SeedPolicy
+from .config import (
+    ProductionCampaignConfig,
+    SearchBudget,
+    SeedPolicy,
+    installed_sampler_backend,
+)
 from .freeze import model_graph_hash
 from .manifest import (
     DatasetManifest,
@@ -75,7 +80,26 @@ def build_production_campaign(
     artifact_root: str,
     state_database: str,
     agents_enabled: bool = False,
+    sampler_backend: Mapping[str, str] | None = None,
+    require_root_profile: str | None = None,
 ) -> ProductionCampaignConfig:
+    """Freeze a v2 campaign; the sampler pin defaults to the installed dynesty.
+
+    ``require_root_profile`` asserts which registered root hyperprior profile
+    the graph was enumerated under (GWTC-5 production: ``"gwtc5-v1"``). The
+    profile is implicit in ``graph.root_hash`` because priors are part of every
+    model hash; naming it here refuses a graph frozen under the wrong
+    hyperpriors before any compute is spent.
+    """
+    if require_root_profile is not None:
+        profile = baseline_hyperprior_profile(graph.by_hash[graph.root_hash])
+        if profile != require_root_profile:
+            found = "no registered profile" if profile is None else repr(profile)
+            raise ValueError(
+                f"model graph root is {found}, not the required "
+                f"{require_root_profile!r} hyperprior profile; re-enumerate the "
+                f"graph with --hyperprior-profile {require_root_profile}"
+            )
     return ProductionCampaignConfig(
         campaign_id=campaign_id,
         dataset_manifest_hash=manifest.manifest_hash,
@@ -90,4 +114,7 @@ def build_production_campaign(
         artifact_root=artifact_root,
         state_database=state_database,
         agents_enabled=agents_enabled,
+        sampler_backend=(
+            installed_sampler_backend() if sampler_backend is None else dict(sampler_backend)
+        ),
     )

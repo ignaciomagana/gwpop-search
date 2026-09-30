@@ -157,6 +157,61 @@ Partial or conflicting pre-existing outputs fail instead of being overwritten.
 No PE prior or selection density is reconstructed during this step:
 `p_pe` and estimator-ready `pdraw` remain authoritative.
 
+### Reference-reweighted chi_eff selection (`chieff_reference`)
+
+gwcat (from commit `8f9e2f1`, GW-38) refuses the substituting `chieff`
+selection basis for any injection campaign whose spins were not drawn
+uniform-magnitude/isotropic: that swap would replace the real spin-draw density
+with the analytic isotropic `chi_eff` marginal, an O(1) `chi_eff`-dependent
+error. The GWTC-5 O4ab injections are such a campaign.
+
+The exact alternative is gwcat's `chieff_reference` selection basis. It keeps
+each campaign's exact component spin draw and reweights it to a declared
+isotropic uniform-magnitude reference prior with ceiling `a_ref`:
+
+```text
+pdraw = pdraw_component * p_iso(chi_eff | q, a_ref) / p_ref(a1, a2, cos t1, cos t2)
+p_ref = 1 / (4 a_ref^2)
+```
+
+This is a density in the same `(m1det, q, dL, ra, dec, chi_eff)` measure as a
+`chieff` PE export, and its Monte-Carlo weight averages the non-`chi_eff` spin
+content over the same reference prior the PE side divides out. It is therefore
+loaded in the `gwcat_v2_chieff` basis and is valid **only** paired with a
+`chieff` PE export whose divided-out prior has the same ceiling:
+
+- every PE `chi_eff_amax_1/2_per_event` must equal `spin_reference_amax`;
+- every PE ceiling must be the event's own sampling-prior ceiling
+  (`chi_eff_amax_source_per_event == "analytic"`, not a fallback or override),
+  with no unrecognized spin-prior kinds;
+- the selection must carry the reviewed gwcat reference `pdraw_state`, a
+  finite `spin_reference_amax`, `spin_reference_coverage_ok = True`, and
+  `a1/a2`.
+
+Rows outside the reference support (`a1 > a_ref`, `a2 > a_ref` or
+`|chi_eff| > a_ref`) carry exactly zero reference weight and are encoded by
+gwcat with a declared sentinel `pdraw`. The adapter identifies them by BOTH the
+recorded sentinel value and that support rule, requires the count to equal the
+recorded `spin_reference_excluded_rows`, and removes them. This is exact for
+the estimator-ready sum `A = sum p_pop / pdraw`; `ndraw` is unchanged because
+they are genuine draws.
+
+Canonicalize the pair with an explicit selection-basis requirement:
+
+```bash
+gwpop-search canonicalize-gwcat-v2 \
+  --pe-export /path/to/gwcat_pe_chieff.h5 \
+  --selection-export /path/to/gwcat_selection_chieff_reference.h5 \
+  --spin-basis chieff \
+  --selection-spin-basis chieff_reference \
+  --output-dir /frozen/canonical
+```
+
+The canonicalization report (format `gwpop-search-gwcat-canonicalization-1.1`)
+records `required_selection_spin_basis`, the verified
+`selection_reference_pairing` (reference ceiling and removed zero-weight rows),
+and the corresponding denominator contract.
+
 ## Pair validation
 
 `validate_pair(pe, selection, required_coordinates=...)` checks:

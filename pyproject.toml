@@ -23,13 +23,19 @@ inference = [
     "jax",
     "numpyro",
     "arviz",
+    "dynesty>=3.1",
+]
+# Posteriors and evidences of the production ladder: dynesty pinned to the
+# exact release whose plateau bookkeeping and checkpoint format were validated.
+nested = [
+    "gwpop-search[inference]",
+    "dynesty==3.1.0",
 ]
 evidence = [
-    "gwpop-search[inference]",
-    "jaxns>=2.6.9",
+    "gwpop-search[nested]",
 ]
 dev = [
-    "gwpop-search[evidence]",
+    "gwpop-search[nested]",
     "pytest>=8",
     "pytest-cov>=5",
     "ruff",

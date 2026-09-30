@@ -80,7 +80,7 @@ def test_nearby_baseline_suite_spec_roundtrip(tmp_path):
 
     assert restored == spec
     payload = json.loads(path.read_text())
-    assert payload["format_version"] == "gwpop-search-nearby-baseline-suite-1.0"
+    assert payload["format_version"] == "gwpop-search-nearby-baseline-suite-1.1"
     assert payload["scenarios"][0]["root_spec"]["blocks"]["mass"]["family"] == "broken_powerlaw"
 
 
@@ -136,3 +136,14 @@ def test_nearby_baseline_scenario_rejects_unsafe_id():
 
     with pytest.raises(ValueError, match="scenario_id"):
         NearbyBaselineScenario("../bad", baseline_model_spec())
+
+
+def test_nearby_baseline_requires_an_evidence_rung_of_ladder_v2():
+    import pytest
+
+    from gwpop_search.search import Fidelity
+    from gwpop_search.validation import NearbyBaselineConfig
+
+    with pytest.raises(ValueError, match="F3 or F4"):
+        NearbyBaselineConfig(stop_fidelity=Fidelity.F2_INFERENCE)
+    assert NearbyBaselineConfig().stop_fidelity is Fidelity.F3_EVIDENCE

@@ -1,19 +1,33 @@
 """Deterministic model scoring and later search scheduling."""
 
 from .executor import (
+    COMPLETION_EXECUTOR_VERSION,
+    EXECUTOR_VERSION,
+    V2_EXECUTORS,
+    FidelityConfigMismatchError,
+    LegacyStateError,
     SearchBudgetExceeded,
     SearchExecutionConfig,
     SearchExecutionSummary,
+    evaluation_run_config,
     evaluation_run_id,
     evaluation_seed,
     execute_search,
+    require_fidelity_config_identity,
+    require_v2_state,
+    row_executor,
+    row_fidelity_config_sha256,
 )
 from .scheduler import (
+    DEFAULT_LADDER,
+    SCHEDULER_VERSION,
     EvaluationRecord,
     Fidelity,
     PromotionDecision,
     SchedulerConfig,
     decide_promotions,
+    next_in_ladder,
+    validate_ladder,
 )
 from .scoring import (
     ComplexityModelPrior,
@@ -28,6 +42,20 @@ from .scoring import (
 )
 
 __all__ = [
+    "COMPLETION_EXECUTOR_VERSION",
+    "DEFAULT_LADDER",
+    "EXECUTOR_VERSION",
+    "FidelityConfigMismatchError",
+    "LegacyStateError",
+    "SCHEDULER_VERSION",
+    "V2_EXECUTORS",
+    "evaluation_run_config",
+    "next_in_ladder",
+    "require_fidelity_config_identity",
+    "require_v2_state",
+    "row_executor",
+    "row_fidelity_config_sha256",
+    "validate_ladder",
     "ComplexityModelPrior",
     "EvaluationRecord",
     "Fidelity",

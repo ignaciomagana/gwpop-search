@@ -47,27 +47,49 @@ def _campaign(max_nulls=20, max_f3_models=10):
     return graph, campaign
 
 
+def _noisy_survey(**kwargs):
+    return SyntheticSurveyConfig(observation_model="noisy_observation", **kwargs)
+
+
 def test_exact_null_campaign_config_roundtrip(tmp_path):
     config = ExactNullCampaignConfig(
         n_nulls=12,
         root_seed=9,
-        survey=SyntheticSurveyConfig(
+        survey=_noisy_survey(
             n_events=20,
             posterior_samples_per_event=64,
             n_injections=2000,
         ),
+        max_gpu_hours_per_null=7.5,
     )
     path = tmp_path / "nulls.json"
     save_exact_null_campaign_config(path, config)
     restored = load_exact_null_campaign_config(path)
     assert restored == config
     payload = json.loads(path.read_text())
-    assert payload["format_version"] == "gwpop-search-exact-null-campaign-1.3"
+    assert payload["format_version"] == "gwpop-search-exact-null-campaign-1.5"
     assert payload["data_mode"] == "frozen_selection_resample"
     assert payload["min_resampling_ess"] == 200.0
-    assert payload["max_gpu_hours_per_null"] == 12.0
+    assert payload["max_gpu_hours_per_null"] == 7.5
+    assert payload["statistic"] == "f3_completion"
+    assert payload["survey"]["observation_model"] == "noisy_observation"
     assert "stop_fidelity" not in payload
     assert payload["truth_hyperparameters"]["mmin"] == config.truth_hyperparameters["mmin"]
+
+
+def test_exact_null_config_refuses_truth_centred_pe_and_unknown_statistics():
+    with pytest.raises(ValueError, match="noisy_observation"):
+        ExactNullCampaignConfig(survey=SyntheticSurveyConfig())
+    with pytest.raises(ValueError, match="noisy_observation"):
+        ExactNullCampaignConfig(survey=SyntheticSurveyConfig(), data_mode="synthetic_survey")
+    with pytest.raises(ValueError, match="unsupported null statistic"):
+        ExactNullCampaignConfig(statistic="full_ladder")
+    # The default survey is the noisy observation model; the ceiling is unset.
+    default = ExactNullCampaignConfig()
+    assert default.survey.observation_model == "noisy_observation"
+    assert default.max_gpu_hours_per_null is None
+    with pytest.raises(ValueError, match="must be frozen explicitly"):
+        default.require_compute_ceiling()
 
 
 def test_null_data_and_search_seeds_are_independent_and_deterministic():
@@ -83,25 +105,43 @@ def test_exact_null_plan_enforces_frozen_null_budget():
         build_exact_null_campaign_plan(
             graph,
             campaign,
-            ExactNullCampaignConfig(n_nulls=4),
+            ExactNullCampaignConfig(n_nulls=4, max_gpu_hours_per_null=2.0),
         )
 
 
-def test_exact_null_plan_pins_search_and_seed_policy():
+def test_exact_null_plan_requires_an_explicit_per_null_ceiling():
+    graph, campaign = _campaign(max_nulls=10)
+    with pytest.raises(ValueError, match="must be frozen explicitly"):
+        build_exact_null_campaign_plan(graph, campaign, ExactNullCampaignConfig(n_nulls=2))
+
+
+def test_exact_null_plan_pins_search_statistic_and_seed_policy():
+    from gwpop_search.inference.fidelity import fidelity_config_sha256
+
     graph, campaign = _campaign(max_nulls=10)
     config = ExactNullCampaignConfig(
         n_nulls=3,
         root_seed=123,
+        max_gpu_hours_per_null=6.0,
     )
     plan = build_exact_null_campaign_plan(graph, campaign, config)
 
+    assert plan["format_version"] == "gwpop-search-exact-null-plan-1.3"
     assert plan["graph_root_hash"] == graph.root_hash
     assert plan["null_config"]["n_nulls"] == 3
     assert len(plan["seed_policy"]) == 3
     assert plan["seed_policy"][0]["data_seed"] != plan["seed_policy"][0]["search_seed"]
+    statistic = plan["statistic"]
+    assert statistic["mode"] == "f3_completion"
+    assert statistic["evidence_fidelities"] == ["F3"]
+    assert statistic["replay_ladder_stop"] == "F3"
+    assert plan["sampler_backend"] == {"name": "dynesty", "version": "3.1.0"}
+    assert plan["fidelity_config_sha256"] == fidelity_config_sha256(campaign.fidelity)
     replayed = plan["replayed_production_search"]
-    assert replayed["stop_fidelity"] == "F4"
-    assert replayed["max_gpu_hours"] == config.max_gpu_hours_per_null
+    assert replayed["stop_fidelity"] == "F3"
+    assert replayed["production_ladder"] == ["F0", "F3", "F4"]
+    assert replayed["null_ladder"] == ["F0", "F3"]
+    assert replayed["max_gpu_hours"] == 6.0
     assert (
         replayed["source_production_max_gpu_hours"]
         == campaign.budget.max_gpu_hours
@@ -126,16 +166,22 @@ def test_exact_null_plan_requires_production_full_graph_f3_budget():
         build_exact_null_campaign_plan(
             graph,
             campaign,
-            ExactNullCampaignConfig(n_nulls=2),
+            ExactNullCampaignConfig(n_nulls=2, max_gpu_hours_per_null=2.0),
         )
 
 
 def test_old_null_campaign_format_is_rejected():
-    config = ExactNullCampaignConfig()
+    config = ExactNullCampaignConfig(max_gpu_hours_per_null=2.0)
     payload = config.to_dict()
-    payload["format_version"] = "gwpop-search-exact-null-campaign-1.2"
-    with pytest.raises(ValueError, match="unsupported exact null"):
-        ExactNullCampaignConfig.from_dict(payload)
+    for legacy in (
+        "gwpop-search-exact-null-campaign-1.2",
+        "gwpop-search-exact-null-campaign-1.3",
+    ):
+        payload["format_version"] = legacy
+        with pytest.raises(ValueError, match="unsupported exact null"):
+            ExactNullCampaignConfig.from_dict(payload)
+    with pytest.raises(ValueError, match="re-freeze"):
+        ExactNullCampaignConfig(format_version="gwpop-search-exact-null-campaign-1.3")
 
 
 
@@ -143,6 +189,8 @@ def test_exact_null_config_can_explicitly_select_engineering_synthetic_mode():
     config = ExactNullCampaignConfig(
         n_nulls=2,
         data_mode="synthetic_survey",
+        pe_scale_policy="declared_fixed",
+        survey=_noisy_survey(injection_draw="population_proxy"),
     )
     assert config.data_mode == "synthetic_survey"
 
@@ -157,7 +205,7 @@ def test_exact_null_plan_pins_production_dataset_for_frozen_selection_mode():
     plan = build_exact_null_campaign_plan(
         graph,
         campaign,
-        ExactNullCampaignConfig(n_nulls=2),
+        ExactNullCampaignConfig(n_nulls=2, max_gpu_hours_per_null=2.0),
     )
     assert (
         plan["production_dataset_manifest_hash"]
@@ -173,6 +221,8 @@ def test_synthetic_null_plan_does_not_claim_production_dataset_resampling():
         ExactNullCampaignConfig(
             n_nulls=2,
             data_mode="synthetic_survey",
+        pe_scale_policy="declared_fixed",
+            max_gpu_hours_per_null=2.0,
         ),
     )
     assert plan["production_dataset_manifest_hash"] is None
@@ -191,6 +241,215 @@ def test_exact_null_plan_records_per_null_compute_cap():
         max_gpu_hours_per_null=3.5,
     )
     plan = build_exact_null_campaign_plan(graph, campaign, config)
-    assert plan["format_version"] == "gwpop-search-exact-null-plan-1.1"
+    assert plan["format_version"] == "gwpop-search-exact-null-plan-1.3"
     assert plan["null_config"]["max_gpu_hours_per_null"] == 3.5
     assert plan["replayed_production_search"]["max_gpu_hours"] == 3.5
+
+
+def test_exact_null_plan_accepts_and_records_any_registered_root_profile():
+    from gwpop_search.grammar import HYPERPRIOR_PROFILES
+
+    for profile in HYPERPRIOR_PROFILES:
+        graph = enumerate_model_graph(
+            baseline_model_spec(profile), max_depth=1, max_models=5
+        )
+        campaign = ProductionCampaignConfig(
+            campaign_id="null-profile",
+            dataset_manifest_hash="a" * 64,
+            model_graph_hash="b" * 64,
+            model_graph_root_hash=graph.root_hash,
+            git_commit="d" * 40,
+            model_prior={"version": "axis-complexity-v1", "penalty_per_axis": 0.5},
+            fidelity=FidelityRunConfig(),
+            scheduler=SchedulerConfig(),
+            seed_policy=SeedPolicy(root_seed=7),
+            budget=SearchBudget(100.0, 10, 4, 20),
+            artifact_root="runs",
+            state_database="runs/state.sqlite",
+        )
+        plan = build_exact_null_campaign_plan(
+            graph,
+            campaign,
+            ExactNullCampaignConfig(
+                n_nulls=2,
+                root_seed=5,
+                survey=_noisy_survey(),
+                data_mode="synthetic_survey",
+        pe_scale_policy="declared_fixed",
+                max_gpu_hours_per_null=1.0,
+            ),
+        )
+        assert plan["root_hyperprior_profile"] == profile
+        assert plan["graph_root_hash"] == graph.root_hash
+
+
+def test_exact_null_plan_refuses_an_unregistered_root():
+    from dataclasses import replace
+
+    from gwpop_search.grammar import PriorConfig
+
+    root = baseline_model_spec()
+    drifted = replace(
+        root,
+        priors={**root.priors, "mmax": PriorConfig("uniform", {"low": 60.0, "high": 90.0})},
+    )
+    graph = enumerate_model_graph(drifted, max_depth=1, max_models=5)
+    _, campaign = _campaign()
+    campaign = replace(campaign, model_graph_root_hash=graph.root_hash)
+    with pytest.raises(ValueError, match="registered hyperprior profile"):
+        build_exact_null_campaign_plan(
+            graph,
+            campaign,
+            ExactNullCampaignConfig(
+                n_nulls=2,
+                root_seed=5,
+                survey=_noisy_survey(),
+                data_mode="synthetic_survey",
+        pe_scale_policy="declared_fixed",
+                max_gpu_hours_per_null=1.0,
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# PE precision and truth-pool prechecks (review findings 1 and 2)
+# ---------------------------------------------------------------------------
+
+
+def _frozen_fixture(n_events=6, samples_per_event=12):
+    import numpy as np
+
+    from gwpop_search.data import Campaign, SelectionCatalog, SelectionMode
+    from gwpop_search.inference.synthetic import generate_baseline_synthetic_dataset
+
+    dataset = generate_baseline_synthetic_dataset(
+        seed=5,
+        config=SyntheticSurveyConfig(
+            n_events=n_events,
+            posterior_samples_per_event=samples_per_event,
+            n_injections=2000,
+            population_batch_size=128,
+            redshift_sampling_grid=512,
+        ),
+    )
+    raw = dataset.selection
+    selection = SelectionCatalog(
+        samples=raw.samples,
+        log_draw_density=raw.log_draw_density,
+        campaign_id=np.asarray(["combined"] * raw.n_selected),
+        campaigns=(
+            Campaign(
+                "combined",
+                n_draw=sum(c.n_draw for c in raw.campaigns),
+                observing_time_yr=sum(c.observing_time_yr for c in raw.campaigns),
+            ),
+        ),
+        basis=raw.basis,
+        mode=SelectionMode.ESTIMATOR_READY,
+        estimator_semantics="test estimator-ready denominator",
+        metadata={"fixture": "exact-null-precheck"},
+    )
+    return dataset.posterior, selection
+
+
+def test_match_observed_requires_the_observed_pe_sample_count():
+    from gwpop_search.nulls.campaign import _validate_exact_null_inputs
+
+    _, campaign = _campaign()
+    posterior, selection = _frozen_fixture(n_events=6, samples_per_event=12)
+    config = ExactNullCampaignConfig(
+        n_nulls=2,
+        survey=_noisy_survey(n_events=6, posterior_samples_per_event=256),
+        max_gpu_hours_per_null=1.0,
+    )
+    assert config.pe_scale_policy == "match_observed"
+    with pytest.raises(ValueError, match="posterior_samples_per_event=12"):
+        _validate_exact_null_inputs(
+            campaign,
+            config,
+            production_posterior=posterior,
+            production_selection=selection,
+            production_dataset_identity=campaign.dataset_manifest_hash,
+        )
+
+
+def test_prepare_reports_the_truth_pool_and_pe_precision_before_any_replay(tmp_path):
+    from gwpop_search.nulls import prepare_exact_null_campaign
+
+    graph, campaign = _campaign()
+    posterior, selection = _frozen_fixture(n_events=6, samples_per_event=12)
+    config = ExactNullCampaignConfig(
+        n_nulls=2,
+        survey=_noisy_survey(n_events=6, posterior_samples_per_event=12),
+        min_resampling_ess=1.0,
+        min_resampling_ess_per_event=1.0,
+        max_gpu_hours_per_null=1.0,
+    )
+    prepare_exact_null_campaign(
+        tmp_path,
+        graph,
+        campaign,
+        config,
+        production_posterior=posterior,
+        production_selection=selection,
+        production_dataset_identity=campaign.dataset_manifest_hash,
+    )
+    precheck = json.loads((tmp_path / "null_data_precheck.json").read_text())
+    assert precheck["format_version"] == "gwpop-search-exact-null-precheck-1.0"
+    assert precheck["n_events"] == 6
+    assert precheck["resampling"]["required_resampling_ess"] == 6.0
+    assert precheck["resampling"]["passes_gate"]
+    assert precheck["resampling"]["resampling_ess_per_event"] > 1.0
+    assert precheck["pe_scale_policy"] == "match_observed"
+    widths = precheck["pe_scales"]["posterior_width"]
+    assert set(widths) == {
+        "log_m1_detector",
+        "q",
+        "log_luminosity_distance",
+        "chi_eff",
+    }
+    assert widths["q"]["ratio_observed_over_declared"] > 0.0
+
+
+def test_prepare_refuses_a_selection_that_cannot_support_the_catalogs(tmp_path):
+    from gwpop_search.nulls import prepare_exact_null_campaign
+
+    graph, campaign = _campaign()
+    posterior, selection = _frozen_fixture(n_events=6, samples_per_event=12)
+    config = ExactNullCampaignConfig(
+        n_nulls=2,
+        survey=_noisy_survey(n_events=6, posterior_samples_per_event=12),
+        min_resampling_ess=1.0,
+        min_resampling_ess_per_event=10.0,
+        max_gpu_hours_per_null=1.0,
+    )
+    with pytest.raises(ValueError, match="cannot support the requested null catalogs"):
+        prepare_exact_null_campaign(
+            tmp_path,
+            graph,
+            campaign,
+            config,
+            production_posterior=posterior,
+            production_selection=selection,
+            production_dataset_identity=campaign.dataset_manifest_hash,
+        )
+
+
+def test_null_config_records_the_pe_policy_and_scaled_ess_gate(tmp_path):
+    config = ExactNullCampaignConfig(
+        n_nulls=3,
+        survey=_noisy_survey(n_events=8, posterior_samples_per_event=16),
+        max_gpu_hours_per_null=1.0,
+    )
+    path = tmp_path / "null.json"
+    save_exact_null_campaign_config(path, config)
+    payload = json.loads(path.read_text())
+    assert payload["pe_scale_policy"] == "match_observed"
+    assert payload["min_resampling_ess_per_event"] == 10.0
+    assert load_exact_null_campaign_config(path) == config
+    with pytest.raises(ValueError, match="match_observed"):
+        ExactNullCampaignConfig(
+            data_mode="synthetic_survey",
+            survey=_noisy_survey(),
+            max_gpu_hours_per_null=1.0,
+        )

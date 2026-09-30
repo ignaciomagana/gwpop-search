@@ -1,8 +1,17 @@
-"""Frozen production-campaign configuration."""
+"""Frozen production-campaign configuration (format 2.0, dynesty ladder).
+
+A campaign freezes the dataset manifest hash, the model graph (hash and
+root), the code revision, the explicit model prior, the fidelity ladder v2
+configuration (F0 -> F3 -> F4 on dynesty), the scheduler (with its ladder),
+the seed policy, the budgets and the sampler backend pin
+(``sampler_backend = {"name": "dynesty", "version": "3.1.0"}``; evidences and
+checkpoints depend on that exact release). NUTS/JAXNS-era campaigns (1.x)
+are refused: re-freeze them.
+"""
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import math
@@ -15,6 +24,44 @@ from gwpop_search.inference.fidelity import (
     fidelity_run_config_to_dict,
 )
 from gwpop_search.search import SchedulerConfig
+
+PRODUCTION_CAMPAIGN_FORMAT_VERSION = "gwpop-search-production-campaign-2.0"
+LEGACY_PRODUCTION_CAMPAIGN_FORMATS = (
+    "gwpop-search-production-campaign-1.0",
+    "gwpop-search-production-campaign-1.1",
+)
+SUPPORTED_SAMPLER_BACKENDS = {"dynesty": ("3.1.0",)}
+
+
+class LegacyCampaignError(ValueError):
+    """A NUTS/JAXNS-era production campaign was presented to the dynesty pipeline."""
+
+
+def validate_sampler_backend(payload: Mapping[str, object]) -> dict[str, str]:
+    """Return a validated ``{"name", "version"}`` sampler-backend pin."""
+    payload = dict(payload)
+    if set(payload) != {"name", "version"}:
+        raise ValueError("sampler_backend must have exactly the keys 'name' and 'version'")
+    name, version = str(payload["name"]), str(payload["version"])
+    if name not in SUPPORTED_SAMPLER_BACKENDS:
+        raise ValueError(f"unsupported sampler backend {name!r}")
+    if version not in SUPPORTED_SAMPLER_BACKENDS[name]:
+        raise ValueError(
+            f"{name} {version} is not a supported pin {SUPPORTED_SAMPLER_BACKENDS[name]}; "
+            "evidences and checkpoints depend on the exact release"
+        )
+    return {"name": name, "version": version}
+
+
+def installed_sampler_backend() -> dict[str, str]:
+    """The installed dynesty as a sampler-backend pin (validated)."""
+    from gwpop_search.inference.evidence import sampler_backend_identity
+
+    return validate_sampler_backend(sampler_backend_identity())
+
+
+def _default_sampler_backend() -> dict[str, str]:
+    return {"name": "dynesty", "version": SUPPORTED_SAMPLER_BACKENDS["dynesty"][0]}
 
 
 @dataclass(frozen=True)
@@ -57,11 +104,26 @@ class ProductionCampaignConfig:
     artifact_root: str
     state_database: str
     agents_enabled: bool = False
-    format_version: str = "gwpop-search-production-campaign-1.1"
+    sampler_backend: Mapping[str, str] = field(default_factory=_default_sampler_backend)
+    format_version: str = PRODUCTION_CAMPAIGN_FORMAT_VERSION
 
     def __post_init__(self) -> None:
-        if self.format_version != "gwpop-search-production-campaign-1.1":
-            raise ValueError("unsupported production campaign format")
+        if self.format_version in LEGACY_PRODUCTION_CAMPAIGN_FORMATS:
+            raise LegacyCampaignError(
+                f"unsupported production campaign format {self.format_version!r}: "
+                "NUTS/JAXNS-era campaign; re-freeze with the dynesty fidelity ladder"
+            )
+        if self.format_version != PRODUCTION_CAMPAIGN_FORMAT_VERSION:
+            raise ValueError(
+                f"unsupported production campaign format {self.format_version!r}"
+            )
+        if not isinstance(self.fidelity, FidelityRunConfig):
+            raise TypeError("fidelity must be a FidelityRunConfig (format 2.0)")
+        if not isinstance(self.scheduler, SchedulerConfig):
+            raise TypeError("scheduler must be a SchedulerConfig")
+        object.__setattr__(
+            self, "sampler_backend", validate_sampler_backend(self.sampler_backend)
+        )
         if not self.campaign_id:
             raise ValueError("campaign_id cannot be empty")
         for name in (
@@ -93,6 +155,7 @@ class ProductionCampaignConfig:
             "artifact_root": self.artifact_root,
             "state_database": self.state_database,
             "agents_enabled": bool(self.agents_enabled),
+            "sampler_backend": dict(self.sampler_backend),
         }
 
     def canonical_json(self) -> str:
@@ -108,6 +171,14 @@ class ProductionCampaignConfig:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "ProductionCampaignConfig":
+        version = payload.get("format_version")
+        if version != PRODUCTION_CAMPAIGN_FORMAT_VERSION:
+            found = "no format_version" if version is None else repr(version)
+            raise LegacyCampaignError(
+                f"unsupported production campaign format ({found}): NUTS/JAXNS-era "
+                f"campaign; re-freeze as {PRODUCTION_CAMPAIGN_FORMAT_VERSION} with the "
+                "dynesty fidelity ladder"
+            )
         return cls(
             campaign_id=str(payload["campaign_id"]),
             dataset_manifest_hash=str(payload["dataset_manifest_hash"]),
@@ -122,12 +193,8 @@ class ProductionCampaignConfig:
             artifact_root=str(payload["artifact_root"]),
             state_database=str(payload["state_database"]),
             agents_enabled=bool(payload.get("agents_enabled", False)),
-            format_version=str(
-                payload.get(
-                    "format_version",
-                    "gwpop-search-production-campaign-1.1",
-                )
-            ),
+            sampler_backend=dict(payload["sampler_backend"]),
+            format_version=str(version),
         )
 
 

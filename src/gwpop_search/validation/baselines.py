@@ -34,6 +34,10 @@ from .stress import edge_log_bayes_factors
 
 
 _ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+SUITE_FORMAT = "gwpop-search-nearby-baseline-suite-1.1"
+_READABLE_SUITE_FORMATS = ("gwpop-search-nearby-baseline-suite-1.0", SUITE_FORMAT)
+PLAN_FORMAT = "gwpop-search-nearby-baseline-plan-1.1"
+SUMMARY_FORMAT = "gwpop-search-nearby-baseline-summary-1.1"
 
 
 @dataclass(frozen=True)
@@ -90,8 +94,11 @@ class NearbyBaselineConfig:
             "stop_fidelity",
             Fidelity(self.stop_fidelity),
         )
-        if self.stop_fidelity.rank < Fidelity.F2_INFERENCE.rank:
-            raise ValueError("nearby-baseline suite must reach at least F2")
+        if self.stop_fidelity not in (Fidelity.F3_EVIDENCE, Fidelity.F4_PRODUCTION):
+            raise ValueError(
+                "nearby-baseline suite must stop at an evidence rung of fidelity ladder v2 "
+                f"(F3 or F4); got {self.stop_fidelity.value} (F2 is not in the ladder)"
+            )
         if (
             not math.isfinite(self.max_gpu_hours_per_scenario)
             or self.max_gpu_hours_per_scenario <= 0.0
@@ -105,11 +112,13 @@ class NearbyBaselineConfig:
 class NearbyBaselineSuiteSpec:
     scenarios: tuple[NearbyBaselineScenario, ...]
     config: NearbyBaselineConfig
-    format_version: str = "gwpop-search-nearby-baseline-suite-1.0"
+    format_version: str = SUITE_FORMAT
 
     def __post_init__(self) -> None:
-        if self.format_version != "gwpop-search-nearby-baseline-suite-1.0":
+        if self.format_version not in _READABLE_SUITE_FORMATS:
             raise ValueError("unsupported nearby-baseline suite format")
+        # 1.0 specs are read (their stop fidelity is re-validated) and written as 1.1
+        object.__setattr__(self, "format_version", SUITE_FORMAT)
         scenarios = tuple(self.scenarios)
         if not scenarios:
             raise ValueError("nearby-baseline suite requires scenarios")
@@ -261,9 +270,12 @@ def build_nearby_baseline_plan(
     reference_graph: ModelGraph,
     suite: NearbyBaselineSuiteSpec,
 ) -> dict[str, object]:
+    ladder = getattr(campaign.scheduler, "ladder", None)
     return {
-        "format_version": "gwpop-search-nearby-baseline-plan-1.0",
+        "format_version": PLAN_FORMAT,
         "code": _code_identity(),
+        "sampler_backend": "dynesty",
+        "ladder": None if ladder is None else [Fidelity(item).value for item in ladder],
         "campaign_hash": campaign.campaign_hash,
         "base_dataset_identity": str(base_dataset_identity),
         "reference_graph_root_hash": reference_graph.root_hash,
@@ -392,7 +404,7 @@ def run_nearby_baseline_suite(
         )
     ]
     summary = {
-        "format_version": "gwpop-search-nearby-baseline-summary-1.0",
+        "format_version": SUMMARY_FORMAT,
         "n_scenarios": len(results),
         "reference_evidence_available": bool(reference_support),
         "max_abs_delta_log_bayes_factor_across_scenarios": (

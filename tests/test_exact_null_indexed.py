@@ -60,10 +60,15 @@ def _config():
             n_events=4,
             posterior_samples_per_event=8,
             n_injections=200,
+            observation_model="noisy_observation",
         ),
         data_mode="synthetic_survey",
+        pe_scale_policy="declared_fixed",
         max_gpu_hours_per_null=3.0,
     )
+
+
+replay_kwargs = {}
 
 
 def _fake_replay_factory(calls):
@@ -72,6 +77,8 @@ def _fake_replay_factory(calls):
         seed,
         **kwargs,
     ):
+        replay_kwargs.clear()
+        replay_kwargs.update(kwargs)
         calls.append((int(null_index), int(seed)))
         return SearchReplayResult(
             null_index=int(null_index),
@@ -142,6 +149,12 @@ def test_indexed_null_replay_is_deterministic_and_resumable(
     assert first == second
     assert first.seed == expected_seed
     assert calls == [(1, expected_seed)]
+    assert replay_kwargs["statistic"] == "f3_completion"
+    execution = replay_kwargs["execution_config"]
+    assert execution.stop_fidelity.value == "F3"
+    assert execution.max_total_compute_cost == 3.0
+    assert "F4" not in execution.max_models_by_fidelity
+    assert replay_kwargs["completion_campaign"].budget.max_gpu_hours == 3.0
     payload = json.loads((tmp_path / "null_00001.json").read_text())
     assert payload["null_index"] == 1
     assert payload["seed"] == expected_seed
@@ -242,6 +255,8 @@ def test_indexed_and_serial_null_campaigns_finalize_identically(
 
     assert indexed["calibration"] == serial["calibration"]
     assert indexed["format_version"] == serial["format_version"]
+    assert indexed["format_version"] == "gwpop-search-exact-null-summary-1.3"
+    assert indexed["statistic"]["mode"] == "f3_completion"
     assert indexed["calibration"]["n_null_replays"] == 2
     assert indexed_calls == serial_calls
 
@@ -253,6 +268,7 @@ def test_frozen_selection_finalize_requires_matching_dataset_identity(tmp_path):
     config = ExactNullCampaignConfig(
         n_nulls=1,
         data_mode="frozen_selection_resample",
+        max_gpu_hours_per_null=1.0,
     )
     with pytest.raises(ValueError, match="dataset identity"):
         finalize_exact_null_campaign(
@@ -262,3 +278,45 @@ def test_frozen_selection_finalize_requires_matching_dataset_identity(tmp_path):
             config,
             production_dataset_identity="wrong-dataset",
         )
+
+
+def test_finalize_refuses_an_observed_state_without_any_valid_f3(
+    monkeypatch,
+    tmp_path,
+):
+    """An empty observed evidence set must not yield an uncalibrated summary.
+
+    A partially complete observed state already raised; a state with *no* valid
+    F3 row fell through the guard and wrote a summary that looked complete but
+    carried ``observed_search_statistics: null`` and no p-value.
+    """
+    from gwpop_search.store import ResultStore
+
+    graph = _graph()
+    campaign = _campaign(graph)
+    config = _config()
+    prepare_exact_null_campaign(tmp_path, graph, campaign, config)
+    monkeypatch.setattr(
+        "gwpop_search.nulls.campaign.run_baseline_null_search_replay",
+        _fake_replay_factory([]),
+    )
+    for index in range(config.n_nulls):
+        run_exact_null_index(tmp_path, graph, campaign, config, null_index=index)
+
+    empty_state = tmp_path / "observed_state.sqlite"
+    ResultStore(empty_state)  # a valid, empty v2 state database
+    with pytest.raises(ValueError, match="lacks complete valid F3 evidence"):
+        finalize_exact_null_campaign(
+            tmp_path,
+            graph,
+            campaign,
+            config,
+            observed_state_database=empty_state,
+        )
+    assert not (tmp_path / "exact_null_summary.json").exists()
+
+    # Without an observed state database a null-only summary is still written.
+    summary = finalize_exact_null_campaign(tmp_path, graph, campaign, config)
+    assert summary["observed_search_statistics"] is None
+    assert summary["pe_scale_policy"] == config.pe_scale_policy
+    assert summary["null_data_diagnostics"]["n_nulls"] == config.n_nulls

@@ -5,18 +5,45 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from . import __version__
 
+_LEGACY_DEFAULT_N_INJECTIONS = 20_000
+
 
 def _survey_config(args: argparse.Namespace):
-    from .inference.synthetic import SyntheticSurveyConfig
+    from .inference.synthetic import (
+        INJECTION_DRAW_POPULATION_PROXY,
+        RECOMMENDED_POPULATION_PROXY_N_INJECTIONS,
+        SyntheticSurveyConfig,
+    )
 
+    proxy = args.injection_draw == INJECTION_DRAW_POPULATION_PROXY
+    n_injections = args.n_injections
+    if n_injections is None:
+        # The legacy box keeps its historical default so existing campaign
+        # plans reproduce; population_proxy defaults to the recommended size.
+        n_injections = (
+            RECOMMENDED_POPULATION_PROXY_N_INJECTIONS
+            if proxy
+            else _LEGACY_DEFAULT_N_INJECTIONS
+        )
+    elif proxy and n_injections < RECOMMENDED_POPULATION_PROXY_N_INJECTIONS:
+        print(
+            "warning: --n-injections "
+            f"{n_injections} is below the recommended "
+            f"{RECOMMENDED_POPULATION_PROXY_N_INJECTIONS} for population_proxy "
+            "(see docs/phase3_recovery.md)",
+            file=sys.stderr,
+        )
     return SyntheticSurveyConfig(
         n_events=args.n_events,
         posterior_samples_per_event=args.pe_samples,
-        n_injections=args.n_injections,
+        n_injections=n_injections,
+        injection_draw=args.injection_draw,
+        observation_model=args.observation_model,
     )
 
 
@@ -103,10 +130,235 @@ def _assess_synthetic_campaign(args: argparse.Namespace) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase-3 v2 (dynesty) recovery campaign and Phase-3c evidence check
+# ---------------------------------------------------------------------------
+
+
+def _ns_survey_config(args: argparse.Namespace):
+    from .inference.synthetic import SyntheticSurveyConfig
+
+    return SyntheticSurveyConfig(
+        n_events=args.n_events,
+        posterior_samples_per_event=args.pe_samples,
+        n_injections=args.n_injections,
+        injection_draw=args.injection_draw,
+        observation_model=args.observation_model,
+    )
+
+
+def _ns_dynesty_config(args: argparse.Namespace, *, slices: int | None):
+    from .inference.dynesty_backend import DynestyConfig
+
+    return DynestyConfig(
+        nlive=args.nlive,
+        bound=args.bound,
+        sample=args.sample,
+        slices=slices,
+        dlogz=args.dlogz,
+        batch_size=args.batch_size,
+        maxiter=args.maxiter,
+        maxcall=args.maxcall,
+        checkpoint_every=args.checkpoint_every,
+        num_posterior_samples=args.num_posterior_samples,
+    )
+
+
+def _add_ns_arguments(parser: argparse.ArgumentParser) -> None:
+    """Survey-v2 and dynesty options; defaults are the Phase-3 v2 plan."""
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--root-seed", type=int, default=20260917)
+    parser.add_argument("--n-events", type=int, default=48)
+    parser.add_argument("--pe-samples", type=int, default=1024)
+    parser.add_argument("--n-injections", type=int, default=100_000)
+    parser.add_argument(
+        "--injection-draw",
+        choices=("uniform_detector_box", "population_proxy"),
+        default="population_proxy",
+    )
+    parser.add_argument(
+        "--observation-model",
+        choices=("truth_centered", "noisy_observation"),
+        default="noisy_observation",
+    )
+    parser.add_argument("--nlive", type=int, default=1000)
+    parser.add_argument(
+        "--bound", choices=("none", "single", "multi", "balls", "cubes"), default="multi"
+    )
+    parser.add_argument(
+        "--sample", choices=("unif", "rwalk", "slice", "rslice"), default="rslice"
+    )
+    parser.add_argument(
+        "--slices",
+        type=int,
+        default=None,
+        help="slice-sampler slices (default: 2*(3+ndim) of each model)",
+    )
+    parser.add_argument("--dlogz", type=float, default=0.1)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="dynesty queue size and fixed device batch",
+    )
+    parser.add_argument("--maxiter", type=int, default=None)
+    parser.add_argument("--maxcall", type=int, default=None)
+    parser.add_argument("--num-posterior-samples", type=int, default=4000)
+    parser.add_argument(
+        "--checkpoint-every",
+        type=float,
+        default=300.0,
+        help="seconds between dynesty checkpoints (I/O only; not part of the plan)",
+    )
+    parser.add_argument(
+        "--importance-draws",
+        type=int,
+        default=16384,
+        help=(
+            "pooled posterior draws the importance diagnostics evaluate; the default is at "
+            "least the pooled draw count of every planned fit, so the gated quantiles carry "
+            "no subsample Monte-Carlo noise"
+        ),
+    )
+    parser.add_argument("--rhat-draws-per-run", type=int, default=2000)
+
+
+def _run_synthetic_campaign_ns(args: argparse.Namespace) -> None:
+    from .inference.phase3_ns import (
+        NSRecoveryAcceptanceCriteria,
+        phase3_hbi_config,
+        run_ns_recovery_campaign,
+        slices_for_ndim,
+    )
+    from .inference.priors import BASELINE_SYNTHETIC_PRIORS
+
+    slices = args.slices
+    if slices is None and args.sample in ("slice", "rslice"):
+        slices = slices_for_ndim(len(BASELINE_SYNTHETIC_PRIORS))
+    summary = run_ns_recovery_campaign(
+        Path(args.root),
+        n_runs=args.n_runs,
+        root_seed=args.root_seed,
+        repeats=args.repeats,
+        survey_config=_ns_survey_config(args),
+        dynesty_config=_ns_dynesty_config(args, slices=slices),
+        hbi_config=phase3_hbi_config(),
+        criteria=NSRecoveryAcceptanceCriteria(
+            min_runs=args.min_runs, min_repeats=args.min_repeats
+        ),
+        importance_draws=args.importance_draws,
+        rhat_draws_per_run=args.rhat_draws_per_run,
+    )
+    print(
+        "dynesty synthetic campaign complete: "
+        f"runs={summary['n_runs']} "
+        f"numerical_pass={summary['n_numerical_pass']} "
+        f"gate={summary['phase3_numerical_gate_passed']}"
+    )
+
+
+def _assess_synthetic_campaign_ns(args: argparse.Namespace) -> None:
+    from dataclasses import replace
+
+    from .inference.phase3_ns import (
+        CAMPAIGN_PLAN_NAME,
+        NSRecoveryAcceptanceCriteria,
+        assess_ns_recovery_campaign,
+    )
+
+    root = Path(args.root)
+    criteria = None
+    if args.min_runs is not None or args.min_repeats is not None:
+        plan_path = root / CAMPAIGN_PLAN_NAME
+        criteria = (
+            NSRecoveryAcceptanceCriteria.from_dict(json.loads(plan_path.read_text())["criteria"])
+            if plan_path.exists()
+            else NSRecoveryAcceptanceCriteria()
+        )
+        overrides = {}
+        if args.min_runs is not None:
+            overrides["min_runs"] = args.min_runs
+        if args.min_repeats is not None:
+            overrides["min_repeats"] = args.min_repeats
+        criteria = replace(criteria, **overrides)
+    summary = assess_ns_recovery_campaign(root, criteria=criteria)
+    print(
+        "dynesty synthetic campaign assessment: "
+        f"runs={summary['n_runs']} "
+        f"numerical_pass={summary['n_numerical_pass']} "
+        f"gate={summary['phase3_numerical_gate_passed']}"
+    )
+
+
+def _fingerprint_ns_run(args: argparse.Namespace) -> None:
+    from .inference.phase3_ns import compare_ns_fingerprints, ns_fingerprint_report
+
+    report = ns_fingerprint_report(Path(args.run_dir))
+    comparison = None
+    if args.compare_to:
+        before = json.loads(Path(args.compare_to).read_text())
+        comparison = compare_ns_fingerprints(
+            before.get("fingerprints", before), report["fingerprints"]
+        )
+        report["comparison"] = comparison
+    text = json.dumps(report, sort_keys=True, indent=2)
+    if args.output:
+        Path(args.output).write_text(text + "\n")
+    print(text)
+    if comparison is not None and not comparison["passed"]:
+        raise SystemExit(1)
+
+
+def _evidence_check_dynesty(args: argparse.Namespace):
+    """Dynesty base configuration and slices rule of the evidence check.
+
+    Without ``--slices`` a slice sampler uses ``2*(3+ndim)`` of each model.
+    """
+    from .inference.phase3_evidence import SLICES_RULE_FIXED, SLICES_RULE_PER_MODEL
+
+    per_model = args.slices is None and args.sample in ("slice", "rslice")
+    rule = SLICES_RULE_PER_MODEL if per_model else SLICES_RULE_FIXED
+    return _ns_dynesty_config(args, slices=args.slices), rule
+
+
+def _run_synthetic_evidence_check(args: argparse.Namespace) -> None:
+    from .inference.phase3_evidence import default_injection_strengths, run_evidence_check
+    from .inference.phase3_ns import phase3_hbi_config
+
+    strengths = default_injection_strengths()
+    if args.chi_mu_q_slope is not None:
+        strengths["chieff.mean.linear_q"] = args.chi_mu_q_slope
+    if args.beta_q_m1_slope is not None:
+        strengths["pairing.beta.linear_m1"] = args.beta_q_m1_slope
+    dynesty_config, slices_rule = _evidence_check_dynesty(args)
+    summary = run_evidence_check(
+        Path(args.root),
+        n_catalogs=args.n_catalogs,
+        root_seed=args.root_seed,
+        repeats=args.repeats,
+        survey_config=_ns_survey_config(args),
+        dynesty_config=dynesty_config,
+        slices_rule=slices_rule,
+        hbi_config=phase3_hbi_config(),
+        injection_strengths=strengths,
+        importance_draws=args.importance_draws,
+        rhat_draws_per_run=args.rhat_draws_per_run,
+        sddr_bootstrap=args.sddr_bootstrap,
+    )
+    for case in [*summary["null_cases"], *summary["injected_cases"]]:
+        print(
+            f"{case['kind']:8s} {case['catalog']:34s} {case['atom']:24s} "
+            f"lnBF={case['ln_bf']:+.3f} sigma={case['ln_bf_sigma']} "
+            f"sddr={case['sddr']['ln_bf']}"
+        )
+    print(f"evidence check passed={summary['evidence_check_passed']}")
+
+
 def _add_stress_arguments(parser: argparse.ArgumentParser) -> None:
+    # fidelity ladder v2: suites stop at an evidence rung (F2 is not in the ladder)
     parser.add_argument(
         "--stop-fidelity",
-        choices=("F2", "F3", "F4"),
+        choices=("F3", "F4"),
         default="F3",
     )
     parser.add_argument(
@@ -121,7 +373,37 @@ def _add_stress_arguments(parser: argparse.ArgumentParser) -> None:
 def _add_common_recovery_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--n-events", type=int, default=48)
     parser.add_argument("--pe-samples", type=int, default=256)
-    parser.add_argument("--n-injections", type=int, default=20_000)
+    parser.add_argument(
+        "--n-injections",
+        type=int,
+        default=None,
+        help=(
+            "selection draws N_draw (default: 20000 for uniform_detector_box, "
+            "the recommended 100000 for population_proxy)"
+        ),
+    )
+    parser.add_argument(
+        "--injection-draw",
+        choices=("uniform_detector_box", "population_proxy"),
+        default="uniform_detector_box",
+        help=(
+            "selection-injection distribution: the legacy uniform detector-frame "
+            "box, or draws from the baseline population at the default proxy "
+            "hyperparameters mixed with a defensive q -> 1 pairing component "
+            "(stored draw density = that exact mixture density)"
+        ),
+    )
+    parser.add_argument(
+        "--observation-model",
+        choices=("truth_centered", "noisy_observation"),
+        default="truth_centered",
+        help=(
+            "truth_centered: legacy zero-noise PE and detection on true "
+            "parameters; noisy_observation: one noise realisation per event and "
+            "injection, detection on the observed data and PE drawn from the "
+            "posterior given those data (DAG-consistent)"
+        ),
+    )
     parser.add_argument("--num-warmup", type=int, default=1000)
     parser.add_argument("--num-samples", type=int, default=1000)
     parser.add_argument("--num-chains", type=int, default=4)
@@ -182,7 +464,7 @@ def _enumerate_models(args: argparse.Namespace) -> None:
     )
 
     graph = enumerate_model_graph(
-        baseline_model_spec(),
+        baseline_model_spec(args.hyperprior_profile),
         max_depth=args.max_depth,
         max_models=args.max_models,
     )
@@ -248,6 +530,9 @@ def _run_holdout_validation(args: argparse.Namespace) -> None:
         manifest,
         data_base_dir=Path(args.base_dir),
     )
+    from .analysis.posterior_gates import PosteriorGateCriteria
+    from .inference.dynesty_backend import DynestyConfig
+
     summary = run_holdout_campaign(
         Path(args.root),
         posterior,
@@ -258,6 +543,22 @@ def _run_holdout_validation(args: argparse.Namespace) -> None:
         config=HoldoutCampaignConfig(
             n_folds=args.n_folds,
             seed=args.fold_seed,
+            repeats=args.posterior_repeats,
+            posterior_config=DynestyConfig(
+                nlive=args.posterior_nlive,
+                bound="multi",
+                sample="rslice",
+                slices=args.posterior_slices,
+                dlogz=args.posterior_dlogz,
+                maxcall=args.posterior_maxcall,
+                batch_size=args.posterior_batch_size,
+            ),
+            criteria=(
+                PosteriorGateCriteria.f4()
+                if args.gate_profile == "f4"
+                else PosteriorGateCriteria.f3()
+            ),
+            predictive_draws=args.predictive_draws,
         ),
     )
     print(json.dumps(summary, sort_keys=True, indent=2))
@@ -298,10 +599,13 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
     from .inference.synthetic import SyntheticSurveyConfig
     from .models import DEFAULT_BASELINE_HYPERPARAMETERS
     from .nulls import (
+        PE_SCALE_POLICY_DECLARED_FIXED,
+        PE_SCALE_POLICY_MATCH_OBSERVED,
         ExactNullCampaignConfig,
+        measure_observed_pe_scales,
         save_exact_null_campaign_config,
     )
-    from .production import load_dataset_manifest
+    from .production import load_dataset_manifest, load_frozen_dataset
 
     truth = (
         dict(DEFAULT_BASELINE_HYPERPARAMETERS)
@@ -313,6 +617,14 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
             ).items()
         }
     )
+    pe_samples = args.pe_samples
+    pe_scale_policy = args.pe_scale_policy
+    if pe_scale_policy is None:
+        pe_scale_policy = (
+            PE_SCALE_POLICY_MATCH_OBSERVED
+            if args.data_mode == "frozen_selection_resample"
+            else PE_SCALE_POLICY_DECLARED_FIXED
+        )
     if args.data_mode == "frozen_selection_resample":
         if args.manifest is None:
             raise ValueError(
@@ -324,26 +636,60 @@ def _write_exact_null_config(args: argparse.Namespace) -> None:
             raise ValueError(
                 "--n-events disagrees with the frozen dataset manifest"
             )
+        if pe_scale_policy == PE_SCALE_POLICY_MATCH_OBSERVED:
+            # The null PE sample count is the observed one (D4: identical F3
+            # Monte-Carlo regime), so it is read from the frozen catalog and
+            # frozen into the configuration rather than chosen.
+            if args.base_dir is None:
+                raise ValueError(
+                    "--base-dir is required with --pe-scale-policy match_observed: "
+                    "the null PE sample count is read from the frozen catalog"
+                )
+            posterior, _ = load_frozen_dataset(
+                manifest,
+                data_base_dir=Path(args.base_dir),
+            )
+            observed_samples = measure_observed_pe_scales(
+                posterior
+            ).uniform_samples_per_event()
+            if pe_samples is not None and int(pe_samples) != observed_samples:
+                raise ValueError(
+                    f"--pe-samples {int(pe_samples)} disagrees with the frozen "
+                    f"catalog's {observed_samples} samples per event; "
+                    "--pe-scale-policy match_observed requires the observed count"
+                )
+            pe_samples = observed_samples
     else:
         n_events = 64 if args.n_events is None else args.n_events
+    if pe_samples is None:
+        pe_samples = 256
 
     config = ExactNullCampaignConfig(
         n_nulls=args.n_nulls,
         root_seed=args.root_seed,
         survey=SyntheticSurveyConfig(
             n_events=n_events,
-            posterior_samples_per_event=args.pe_samples,
+            posterior_samples_per_event=int(pe_samples),
             n_injections=args.n_injections,
+            observation_model="noisy_observation",
         ),
         truth_hyperparameters=truth,
         data_mode=args.data_mode,
         min_resampling_ess=args.min_resampling_ess,
+        min_resampling_ess_per_event=args.min_resampling_ess_per_event,
+        pe_scale_policy=pe_scale_policy,
         max_gpu_hours_per_null=args.max_gpu_hours_per_null,
+        statistic=args.statistic,
     )
     save_exact_null_campaign_config(Path(args.output), config)
     print(
         "exact null calibration config written: "
-        f"{args.output} n_nulls={config.n_nulls}"
+        f"{args.output} n_nulls={config.n_nulls} statistic={config.statistic} "
+        f"pe_scale_policy={config.pe_scale_policy} "
+        f"pe_samples={config.survey.posterior_samples_per_event} "
+        f"min_resampling_ess>=max({config.min_resampling_ess:g}, "
+        f"{config.min_resampling_ess_per_event:g}x{config.survey.n_events}) "
+        f"max_gpu_hours_per_null={config.max_gpu_hours_per_null}"
     )
 
 
@@ -418,6 +764,20 @@ def _prepare_exact_null_calibration(args: argparse.Namespace) -> None:
         production_dataset_identity=dataset_identity,
     )
     print(json.dumps(plan, sort_keys=True, indent=2))
+    precheck_path = Path(args.root) / "null_data_precheck.json"
+    if precheck_path.is_file():
+        precheck = json.loads(precheck_path.read_text())
+        resampling = precheck["resampling"]
+        print(
+            "null data precheck: "
+            f"resampling_ess={resampling['resampling_ess']:.6g} "
+            f"(required {resampling['required_resampling_ess']:.6g} for "
+            f"{precheck['n_events']} events, "
+            f"{resampling['resampling_ess_per_event']:.4g} per event) "
+            f"pe_scale_policy={precheck['pe_scale_policy']} "
+            f"max_observed/declared_pe_width_ratio="
+            f"{precheck['pe_scales']['max_width_ratio']:.4g} -> {precheck_path}"
+        )
 
 
 def _run_exact_null_index(args: argparse.Namespace) -> None:
@@ -969,6 +1329,7 @@ def _canonicalize_gwcat_v2(args: argparse.Namespace) -> None:
         Path(args.selection_export),
         Path(args.output_dir),
         required_spin_basis=args.spin_basis,
+        required_selection_spin_basis=args.selection_spin_basis,
     )
     print(json.dumps(report, sort_keys=True, indent=2))
 
@@ -1006,13 +1367,54 @@ def _freeze_dataset(args: argparse.Namespace) -> None:
 
 
 def _write_default_fidelity_config(args: argparse.Namespace) -> None:
+    from dataclasses import replace
+
     from .inference.fidelity import (
         FidelityRunConfig,
+        fidelity_config_sha256,
         save_fidelity_run_config,
     )
 
-    save_fidelity_run_config(Path(args.output), FidelityRunConfig())
-    print(f"default fidelity config written: {args.output}")
+    default = FidelityRunConfig()
+
+    def rung(evidence, *, nlive, repeats, maxcall):
+        dynesty = evidence.dynesty
+        updates = {"batch_size": args.batch_size}
+        if nlive is not None:
+            updates["nlive"] = nlive
+        if maxcall is not None:
+            updates["maxcall"] = maxcall
+        return replace(
+            evidence,
+            repeats=evidence.repeats if repeats is None else repeats,
+            dynesty=replace(dynesty, **updates),
+        )
+
+    config = replace(
+        default,
+        f0=replace(
+            default.f0,
+            prior_draws=args.f0_prior_draws,
+            batch_size=args.batch_size,
+        ),
+        f3_evidence=rung(
+            default.f3_evidence,
+            nlive=args.f3_nlive,
+            repeats=args.f3_repeats,
+            maxcall=args.f3_maxcall,
+        ),
+        f4_evidence=rung(
+            default.f4_evidence,
+            nlive=args.f4_nlive,
+            repeats=args.f4_repeats,
+            maxcall=args.f4_maxcall,
+        ),
+    )
+    save_fidelity_run_config(Path(args.output), config)
+    print(
+        f"fidelity config 2.0 written: {args.output} "
+        f"sha256={fidelity_config_sha256(config)}"
+    )
 
 
 def _freeze_production_campaign(args: argparse.Namespace) -> None:
@@ -1056,6 +1458,9 @@ def _freeze_production_campaign(args: argparse.Namespace) -> None:
             beam_width=args.beam_width,
             exploration_quota=args.exploration_quota,
             seed=args.scheduler_seed,
+            ladder=tuple(
+                item.strip() for item in args.ladder.split(",") if item.strip()
+            ),
         ),
         seed_policy=SeedPolicy(root_seed=args.root_seed),
         budget=SearchBudget(
@@ -1067,11 +1472,18 @@ def _freeze_production_campaign(args: argparse.Namespace) -> None:
         artifact_root=args.artifact_root,
         state_database=args.state_database,
         agents_enabled=False,
+        require_root_profile=args.require_root_profile,
     )
     save_production_campaign(Path(args.output), campaign)
+    from .production.validate import root_hyperprior_profile_for_hash
+
+    profile = root_hyperprior_profile_for_hash(campaign.model_graph_root_hash)
     print(
         f"production campaign frozen: {args.output} "
-        f"sha256={campaign.campaign_hash}"
+        f"sha256={campaign.campaign_hash} "
+        f"ladder={','.join(campaign.scheduler.ladder)} "
+        f"root_hyperprior_profile={profile} "
+        f"sampler={campaign.sampler_backend['name']}=={campaign.sampler_backend['version']}"
     )
 
 
@@ -1175,7 +1587,147 @@ def _validate_production_freeze(args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
+# ---------------------------------------------------------------------------
+# Track B: fidelity ladder v2 (dynesty) diagnostics subcommands
+# ---------------------------------------------------------------------------
+
+
+def _run_fidelity_evaluation(args: argparse.Namespace) -> None:
+    """Evaluate graph models at one ladder rung outside the state database.
+
+    Preflight/diagnosis only: the records are printed, never written to a
+    production state database. The default seed is the production seed
+    ``evaluation_seed(campaign root seed, model, fidelity)``.
+    """
+    from .grammar import load_model_graph
+    from .inference.fidelity import DeterministicHBIEvaluator
+    from .production import (
+        load_dataset_manifest,
+        load_frozen_dataset,
+        load_production_campaign,
+        validate_production_freeze,
+    )
+    from .search import Fidelity, evaluation_seed
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    freeze = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    if not freeze["valid"]:
+        raise ValueError("production freeze validation failed")
+    graph = load_model_graph(Path(args.graph))
+    if args.all_models:
+        if args.model_hash:
+            raise ValueError("--all-models and --model-hash are mutually exclusive")
+        hashes = [model.model_hash for model in graph.nodes]
+    else:
+        if not args.model_hash:
+            raise ValueError("pass --model-hash (repeatable) or --all-models")
+        hashes = list(args.model_hash)
+    unknown = [item for item in hashes if item not in graph.by_hash]
+    if unknown:
+        raise ValueError(f"unknown graph model hash(es) {unknown}")
+
+    posterior, selection = load_frozen_dataset(
+        manifest,
+        data_base_dir=Path(args.base_dir),
+    )
+    evaluator = DeterministicHBIEvaluator(
+        posterior,
+        selection,
+        config=campaign.fidelity,
+        dataset_identity=manifest.manifest_hash,
+    )
+    fidelity = Fidelity(args.fidelity)
+    rows = []
+    for model_hash in hashes:
+        seed = (
+            evaluation_seed(campaign.seed_policy.root_seed, model_hash, fidelity)
+            if args.seed is None
+            else int(args.seed)
+        )
+        run_dir = Path(args.output_root) / fidelity.value / model_hash
+        record = evaluator.evaluate(
+            graph.by_hash[model_hash],
+            fidelity,
+            seed=seed,
+            run_dir=run_dir,
+        )
+        rows.append(
+            {
+                "model_hash": model_hash,
+                "fidelity": fidelity.value,
+                "seed": seed,
+                "diagnostics_pass": record.diagnostics_pass,
+                "screen_value": record.screen_value,
+                "compute_cost_hours": record.compute_cost,
+                "evaluation": str(run_dir / "evaluation.json"),
+            }
+        )
+    print(
+        json.dumps(
+            {
+                "format_version": "gwpop-search-fidelity-preflight-1.0",
+                "state_database_written": False,
+                "evaluations": rows,
+            },
+            sort_keys=True,
+            indent=2,
+        )
+    )
+
+
+def _summarize_fidelity_evaluation(args: argparse.Namespace) -> None:
+    from .inference.fidelity import read_evaluation
+
+    payload = read_evaluation(Path(args.evaluation))
+    diagnostics = payload["diagnostics"]
+    checks = diagnostics.get("checks", [])
+    summary = {
+        "model_hash": payload["model_hash"],
+        "fidelity": payload["fidelity"],
+        "passed": diagnostics.get("passed"),
+        "screen_value": payload.get("screen_value"),
+        "screen_value_semantics": payload.get("screen_value_semantics"),
+        "failure": diagnostics.get("failure"),
+        "failed_gates": [
+            item
+            for item in checks
+            if item.get("stage", "gate") == "gate" and not item.get("passed")
+        ],
+        "n_gates": sum(1 for item in checks if item.get("stage", "gate") == "gate"),
+        # Advisory diagnostics the backend could not produce (e.g. the F4
+        # insertion-index test, which needs dynesty birth iterations): reported
+        # explicitly so an operator never reads a missing advisory as a pass.
+        "unavailable_advisories": [
+            {
+                "name": item.get("name"),
+                "reason_code": item.get("reason_code"),
+                "note": item.get("note"),
+            }
+            for item in checks
+            if item.get("stage") == "advisory" and item.get("available") is False
+        ],
+        "evidence": diagnostics.get("evidence"),
+        "posterior_median": diagnostics.get("posterior_median"),
+    }
+    if args.all_checks:
+        summary["checks"] = checks
+    print(json.dumps(summary, sort_keys=True, indent=2))
+
+
 def build_parser() -> argparse.ArgumentParser:
+    from .grammar import HYPERPRIOR_PROFILES
+    from .nulls import (
+        DEFAULT_MIN_RESAMPLING_ESS_PER_EVENT,
+        PE_SCALE_POLICIES,
+    )
+
     parser = argparse.ArgumentParser(
         prog="gwpop-search",
         description="Systematic gravitational-wave population-model search.",
@@ -1218,6 +1770,73 @@ def build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--min-runs", type=int, default=4)
     assess.set_defaults(func=_assess_synthetic_campaign)
 
+    # -- Phase-3 v2 on dynesty (NS recovery campaign, fingerprints, 3c evidence check) --
+    campaign_ns = subparsers.add_parser(
+        "synthetic-campaign-ns",
+        help="run/resume the Phase-3 v2 multi-catalog recovery campaign on dynesty",
+    )
+    _add_ns_arguments(campaign_ns)
+    campaign_ns.add_argument("--n-runs", type=int, default=4, help="number of catalogs")
+    campaign_ns.add_argument(
+        "--repeats", type=int, default=4, help="independent dynesty runs per catalog"
+    )
+    campaign_ns.add_argument("--min-runs", type=int, default=4)
+    campaign_ns.add_argument("--min-repeats", type=int, default=4)
+    campaign_ns.set_defaults(func=_run_synthetic_campaign_ns)
+
+    assess_ns = subparsers.add_parser(
+        "assess-synthetic-campaign-ns",
+        help="assess a Phase-3 v2 dynesty campaign without launching inference",
+    )
+    assess_ns.add_argument("--root", required=True)
+    assess_ns.add_argument(
+        "--min-runs", type=int, default=None, help="override the plan's min_runs"
+    )
+    assess_ns.add_argument(
+        "--min-repeats", type=int, default=None, help="override the plan's min_repeats"
+    )
+    assess_ns.set_defaults(func=_assess_synthetic_campaign_ns)
+
+    fingerprint_ns = subparsers.add_parser(
+        "fingerprint-ns-run",
+        help="hash completed dynesty run artifacts (manifest, result) for resume review",
+    )
+    fingerprint_ns.add_argument(
+        "--run-dir", required=True, help="a dynesty run directory or any directory above them"
+    )
+    fingerprint_ns.add_argument("--output", default=None, help="also write the JSON here")
+    fingerprint_ns.add_argument(
+        "--compare-to",
+        default=None,
+        help="earlier fingerprint JSON; exit 1 if any earlier file changed or disappeared",
+    )
+    fingerprint_ns.set_defaults(func=_fingerprint_ns_run)
+
+    evidence_check = subparsers.add_parser(
+        "synthetic-evidence-check",
+        help="Phase-3c Bayes-factor sanity mini-campaign (nested atoms, SDDR cross-check)",
+    )
+    _add_ns_arguments(evidence_check)
+    evidence_check.add_argument("--n-catalogs", type=int, default=4)
+    evidence_check.add_argument(
+        "--repeats", type=int, default=2, help="independent dynesty runs per model"
+    )
+    evidence_check.add_argument(
+        "--chi-mu-q-slope",
+        type=float,
+        default=None,
+        help="injected chieff.mean.linear_q slope (default 0.9 x prior upper bound = 0.54)",
+    )
+    evidence_check.add_argument(
+        "--beta-q-m1-slope",
+        type=float,
+        default=None,
+        help="injected pairing.beta.linear_m1 slope (default 0.9 x prior upper bound = 0.27)",
+    )
+    evidence_check.add_argument("--sddr-bootstrap", type=int, default=200)
+    evidence_check.set_defaults(func=_run_synthetic_evidence_check)
+    # -- end of the Phase-3 v2 dynesty block --
+
     inspect_graph = subparsers.add_parser(
         "inspect-model-graph",
         help="print a concise structural inventory of a frozen model graph",
@@ -1241,6 +1860,14 @@ def build_parser() -> argparse.ArgumentParser:
     enumerate_parser.add_argument("--output", required=True)
     enumerate_parser.add_argument("--max-depth", type=int, default=2)
     enumerate_parser.add_argument("--max-models", type=int, default=40)
+    enumerate_parser.add_argument(
+        "--hyperprior-profile",
+        default="phase3",
+        help=(
+            "registered root hyperprior profile (grammar.HYPERPRIOR_PROFILES); "
+            "'phase3' reproduces the original graph, 'gwtc5-v1' is GWTC-5 production"
+        ),
+    )
     enumerate_parser.set_defaults(func=_enumerate_models)
 
     validate_parser = subparsers.add_parser(
@@ -1265,6 +1892,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     holdout.add_argument("--n-folds", type=int, default=5)
     holdout.add_argument("--fold-seed", type=int)
+    holdout.add_argument("--posterior-repeats", type=int, default=2)
+    holdout.add_argument("--posterior-nlive", type=int, default=1000)
+    holdout.add_argument(
+        "--posterior-slices",
+        type=int,
+        help="rslice slices (default: 2*(3+ndim) per model)",
+    )
+    holdout.add_argument("--posterior-dlogz", type=float, default=0.1)
+    holdout.add_argument("--posterior-maxcall", type=int)
+    holdout.add_argument("--posterior-batch-size", type=int, default=64)
+    holdout.add_argument(
+        "--gate-profile",
+        choices=("f4", "f3"),
+        default="f4",
+        help="posterior + importance thresholds of decision D3 (evidence precision off)",
+    )
+    holdout.add_argument(
+        "--predictive-draws",
+        type=int,
+        help="score with this many pooled draws (default: every weighted point)",
+    )
     holdout.add_argument("--root", required=True)
     holdout.add_argument("--base-dir", default=".")
     holdout.add_argument("--ignore-current-commit", action="store_true")
@@ -1287,10 +1935,38 @@ def build_parser() -> argparse.ArgumentParser:
     null_template.add_argument("--n-nulls", type=int, default=100)
     null_template.add_argument("--root-seed", type=int, default=20260918)
     null_template.add_argument("--n-events", type=int)
-    null_template.add_argument("--pe-samples", type=int, default=256)
+    null_template.add_argument(
+        "--pe-samples",
+        type=int,
+        help=(
+            "PE samples per null event; read from the frozen catalog under "
+            "--pe-scale-policy match_observed (default 256 otherwise)"
+        ),
+    )
     null_template.add_argument("--n-injections", type=int, default=20_000)
     null_template.add_argument("--truth-hyperparameters-json")
     null_template.add_argument("--manifest")
+    null_template.add_argument(
+        "--base-dir",
+        help=(
+            "frozen data base directory; required by --pe-scale-policy "
+            "match_observed, which measures the observed PE precision"
+        ),
+    )
+    null_template.add_argument(
+        "--pe-scale-policy",
+        choices=PE_SCALE_POLICIES,
+        default=None,
+        help=(
+            "match_observed: null PE precision and sample count come from the "
+            "frozen catalog (per-event widths rank-matched on the detection "
+            "statistic proxy), so nulls and the observed run share the F3 "
+            "Monte-Carlo regime; declared_fixed: keep the configured scalars "
+            "and record the measured mismatch (the default is match_observed "
+            "for frozen_selection_resample and declared_fixed for the "
+            "engineering synthetic_survey mode, which has no frozen catalog)"
+        ),
+    )
     null_template.add_argument(
         "--data-mode",
         choices=("frozen_selection_resample", "synthetic_survey"),
@@ -1300,11 +1976,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-resampling-ess",
         type=float,
         default=200.0,
+        help="absolute floor on the frozen-selection resampling ESS",
+    )
+    null_template.add_argument(
+        "--min-resampling-ess-per-event",
+        type=float,
+        default=DEFAULT_MIN_RESAMPLING_ESS_PER_EVENT,
+        help=(
+            "resampling ESS required per event; the gate is "
+            "max(--min-resampling-ess, this x n_events), so a null catalog is "
+            "drawn from an effective pool much larger than itself"
+        ),
     )
     null_template.add_argument(
         "--max-gpu-hours-per-null",
         type=float,
-        default=12.0,
+        required=True,
+        help=(
+            "per-null compute ceiling (wall-clock hours of the replay's "
+            "evaluations); freeze it from cost calibration"
+        ),
+    )
+    null_template.add_argument(
+        "--statistic",
+        choices=("f3_completion",),
+        default="f3_completion",
+        help=(
+            "calibrated statistic: max edge ln BF / ln posterior odds from F3 "
+            "evidence after full-graph completion (nulls run F0 + F3 only)"
+        ),
     )
     null_template.add_argument("--output", required=True)
     null_template.set_defaults(func=_write_exact_null_config)
@@ -1573,6 +2273,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("chieff", "chieff_chip", "component"),
         required=True,
     )
+    canonicalize.add_argument(
+        "--selection-spin-basis",
+        choices=("chieff", "chieff_chip", "component", "chieff_reference"),
+        default=None,
+        help=(
+            "explicit selection-export basis (default: same as --spin-basis); "
+            "chieff_reference is accepted only with --spin-basis chieff and a PE "
+            "export whose chi_eff prior ceilings all equal the reference ceiling"
+        ),
+    )
     canonicalize.add_argument("--output-dir", required=True)
     canonicalize.set_defaults(func=_canonicalize_gwcat_v2)
 
@@ -1591,9 +2301,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     fidelity_template = subparsers.add_parser(
         "write-default-fidelity-config",
-        help="write the explicit default F0-F4 numerical configuration for review",
+        help=(
+            "write the fidelity ladder v2 (F0 -> F3 -> F4, dynesty) configuration "
+            "(format 2.0) for review"
+        ),
     )
     fidelity_template.add_argument("--output", required=True)
+    fidelity_template.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="dynesty queue size = fixed device batch of the likelihood (F0/F3/F4)",
+    )
+    fidelity_template.add_argument("--f0-prior-draws", type=int, default=4096)
+    fidelity_template.add_argument("--f3-nlive", type=int)
+    fidelity_template.add_argument("--f3-repeats", type=int)
+    fidelity_template.add_argument(
+        "--f3-maxcall",
+        type=int,
+        help="per-run dynesty maxcall at F3 (default: none; a budget stop fails the gate)",
+    )
+    fidelity_template.add_argument("--f4-nlive", type=int)
+    fidelity_template.add_argument("--f4-repeats", type=int)
+    fidelity_template.add_argument("--f4-maxcall", type=int)
     fidelity_template.set_defaults(func=_write_default_fidelity_config)
 
     freeze_campaign = subparsers.add_parser(
@@ -1604,11 +2334,18 @@ def build_parser() -> argparse.ArgumentParser:
     freeze_campaign.add_argument("--graph", required=True)
     freeze_campaign.add_argument("--fidelity-config", required=True)
     freeze_campaign.add_argument("--campaign-id", required=True)
-    freeze_campaign.add_argument("--model-prior", choices=("axis-complexity", "uniform"), required=True)
+    freeze_campaign.add_argument(
+        "--model-prior", choices=("axis-complexity", "uniform"), required=True
+    )
     freeze_campaign.add_argument("--model-prior-penalty", type=float)
     freeze_campaign.add_argument("--beam-width", type=int, required=True)
     freeze_campaign.add_argument("--exploration-quota", type=int, required=True)
     freeze_campaign.add_argument("--scheduler-seed", type=int, required=True)
+    freeze_campaign.add_argument(
+        "--ladder",
+        default="F0,F3,F4",
+        help="comma-separated fidelity ladder (default F0,F3,F4)",
+    )
     freeze_campaign.add_argument("--root-seed", type=int, required=True)
     freeze_campaign.add_argument("--max-gpu-hours", type=float, required=True)
     freeze_campaign.add_argument("--max-f3-models", type=int, required=True)
@@ -1616,6 +2353,14 @@ def build_parser() -> argparse.ArgumentParser:
     freeze_campaign.add_argument("--max-null-replays", type=int, required=True)
     freeze_campaign.add_argument("--artifact-root", required=True)
     freeze_campaign.add_argument("--state-database", required=True)
+    freeze_campaign.add_argument(
+        "--require-root-profile",
+        choices=HYPERPRIOR_PROFILES,
+        help=(
+            "refuse the freeze unless the graph root is this registered root "
+            "hyperprior profile (GWTC-5 production: gwtc5-v1)"
+        ),
+    )
     freeze_campaign.add_argument("--git-commit")
     freeze_campaign.add_argument("--output", required=True)
     freeze_campaign.set_defaults(func=_freeze_production_campaign)
@@ -1637,7 +2382,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_production = subparsers.add_parser(
         "run-production-search",
-        help="validate and run/resume the frozen deterministic F0-F4 search",
+        help="validate and run/resume the frozen deterministic ladder search (F0 -> F3 -> F4)",
     )
     run_production.add_argument("--manifest", required=True)
     run_production.add_argument("--graph", required=True)
@@ -1657,7 +2402,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     production_freeze = subparsers.add_parser(
         "validate-production-freeze",
-        help="cross-check frozen data, model graph, campaign config, and code revision",
+        help=(
+            "cross-check frozen data, model graph, campaign config, code revision and "
+            "the dynesty version pin"
+        ),
     )
     production_freeze.add_argument("--manifest", required=True)
     production_freeze.add_argument("--graph", required=True)
@@ -1665,6 +2413,43 @@ def build_parser() -> argparse.ArgumentParser:
     production_freeze.add_argument("--base-dir", default=".")
     production_freeze.add_argument("--ignore-current-commit", action="store_true")
     production_freeze.set_defaults(func=_validate_production_freeze)
+
+    # --- Track B: fidelity ladder v2 (dynesty) diagnostics subcommands ---
+    fidelity_eval = subparsers.add_parser(
+        "run-fidelity-evaluation",
+        help=(
+            "evaluate graph models at one ladder rung (F0/F3/F4) outside the state "
+            "database (preflight/diagnosis; nothing is recorded as production state)"
+        ),
+    )
+    fidelity_eval.add_argument("--manifest", required=True)
+    fidelity_eval.add_argument("--graph", required=True)
+    fidelity_eval.add_argument("--campaign", required=True)
+    fidelity_eval.add_argument("--fidelity", choices=("F0", "F3", "F4"), required=True)
+    fidelity_eval.add_argument("--model-hash", action="append", default=[])
+    fidelity_eval.add_argument("--all-models", action="store_true")
+    fidelity_eval.add_argument(
+        "--seed",
+        type=int,
+        help="override the production evaluation seed (default: campaign seed policy)",
+    )
+    fidelity_eval.add_argument("--output-root", required=True)
+    fidelity_eval.add_argument("--base-dir", default=".")
+    fidelity_eval.add_argument("--ignore-current-commit", action="store_true")
+    fidelity_eval.set_defaults(func=_run_fidelity_evaluation)
+
+    fidelity_summary = subparsers.add_parser(
+        "summarize-fidelity-evaluation",
+        help="print the gate outcome of one evaluation.json (format 2.0)",
+    )
+    fidelity_summary.add_argument("--evaluation", required=True)
+    fidelity_summary.add_argument("--all-checks", action="store_true")
+    fidelity_summary.set_defaults(func=_summarize_fidelity_evaluation)
+    # --- Track C: robustness and model-comparison analyses (gwpop_search.analysis.cli) ---
+    from .analysis.cli import register_analysis_subcommands
+
+    register_analysis_subcommands(subparsers)
+    # --- end Track C ---
 
     return parser
 

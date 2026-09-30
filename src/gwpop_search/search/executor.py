@@ -1,4 +1,24 @@
-"""Deterministic end-to-end multi-fidelity search execution."""
+"""Deterministic end-to-end multi-fidelity search execution (ladder v2).
+
+The executor steps through ``SearchExecutionConfig.scheduler.ladder`` (default
+F0 -> F3 -> F4), evaluates each cohort with a :class:`FidelityEvaluator`,
+records every evaluation durably in the SQLite state store and promotes with
+the deterministic beam scheduler. Evaluation seeds are
+``evaluation_seed(root_seed, model_hash, fidelity)``: identical whether a
+rung is reached by the search or by evidence completion, so F3 evidence is
+path independent.
+
+Every stored evaluation row carries ``run_config = {"executor":
+"deterministic-fidelity-v2", "backend": "dynesty", "fidelity": F,
+"fidelity_config_sha256": H}`` (evidence completion writes
+``"evidence-completion-v2"``). A state database holding rows of any other
+executor (NUTS/JAXNS-era 1.x rows, whose run ids and seeds coincide with the
+new ones) is refused with :class:`LegacyStateError` instead of being silently
+reused, and a row produced under a different frozen numerical configuration
+``H`` is refused with :class:`FidelityConfigMismatchError`: evaluation seeds
+do not depend on the fidelity configuration, so re-freezing the numerics
+against an existing state database would otherwise reuse stale evaluations.
+"""
 
 from __future__ import annotations
 
@@ -13,16 +33,120 @@ from gwpop_search.grammar import ModelGraph, ModelSpec
 from gwpop_search.store import ResultStore
 
 from .scheduler import (
+    DEFAULT_LADDER,
+    SCHEDULER_VERSION,
     EvaluationRecord,
     Fidelity,
     PromotionDecision,
     SchedulerConfig,
     decide_promotions,
+    next_in_ladder,
 )
+
+EXECUTOR_VERSION = "deterministic-fidelity-v2"
+COMPLETION_EXECUTOR_VERSION = "evidence-completion-v2"
+V2_EXECUTORS = (EXECUTOR_VERSION, COMPLETION_EXECUTOR_VERSION)
+SAMPLER_BACKEND = "dynesty"
+EXECUTION_SUMMARY_FORMAT_VERSION = "gwpop-search-execution-summary-1.1"
 
 
 class SearchBudgetExceeded(RuntimeError):
     """Raised before a deterministic search exceeds a frozen compute/model budget."""
+
+
+class LegacyStateError(RuntimeError):
+    """The state database holds evaluations of a retired (NUTS/JAXNS-era) executor."""
+
+
+class FidelityConfigMismatchError(RuntimeError):
+    """A stored evaluation was produced under a different frozen fidelity config."""
+
+
+def evaluation_run_config(
+    fidelity,
+    *,
+    executor: str = EXECUTOR_VERSION,
+    fidelity_config_sha256: str | None = None,
+) -> dict[str, str]:
+    """The ``run_config`` stored with every v2 evaluation row.
+
+    ``fidelity_config_sha256`` pins the frozen numerical configuration the row
+    was produced under; rows written without it cannot be reused by a run that
+    knows its own configuration hash.
+    """
+    if executor not in V2_EXECUTORS:
+        raise ValueError(f"unknown executor {executor!r}")
+    payload = {
+        "executor": executor,
+        "backend": SAMPLER_BACKEND,
+        "fidelity": Fidelity(fidelity).value,
+    }
+    if fidelity_config_sha256 is not None:
+        payload["fidelity_config_sha256"] = str(fidelity_config_sha256)
+    return payload
+
+
+def _row_run_config(row: Mapping[str, object]) -> dict[str, object] | None:
+    try:
+        payload = json.loads(str(row["run_config_json"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def row_executor(row: Mapping[str, object]) -> str | None:
+    """The executor recorded in a state-store row (``None`` if absent)."""
+    payload = _row_run_config(row)
+    return None if payload is None else payload.get("executor")
+
+
+def row_fidelity_config_sha256(row: Mapping[str, object]) -> str | None:
+    """The frozen fidelity-config hash recorded in a row (``None`` if absent)."""
+    payload = _row_run_config(row)
+    if payload is None:
+        return None
+    value = payload.get("fidelity_config_sha256")
+    return None if value is None else str(value)
+
+
+def require_fidelity_config_identity(
+    row: Mapping[str, object],
+    expected: str | None,
+) -> None:
+    """Refuse reuse of a row produced under a different frozen numerical config.
+
+    ``expected is None`` means the caller does not know its own configuration
+    hash (e.g. a stub evaluator) and no check is possible.
+    """
+    if expected is None:
+        return
+    stored = row_fidelity_config_sha256(row)
+    if stored == str(expected):
+        return
+    raise FidelityConfigMismatchError(
+        f"stored evaluation {row['run_id']} was produced under fidelity config "
+        f"{stored!r}, not the frozen {str(expected)!r}; evaluation seeds do not "
+        "depend on the numerical configuration, so reusing it would silently mix "
+        "two freezes. Re-run against a new state database, or restore the "
+        "configuration the rows were produced with."
+    )
+
+
+def require_v2_state(store: ResultStore) -> None:
+    """Refuse a state database that holds rows of a retired executor."""
+    legacy = [
+        (str(row["run_id"]), row_executor(row))
+        for row in store.evaluations()
+        if row_executor(row) not in V2_EXECUTORS
+    ]
+    if legacy:
+        preview = ", ".join(f"{run_id} ({executor})" for run_id, executor in legacy[:4])
+        raise LegacyStateError(
+            f"state database {store.path} holds {len(legacy)} evaluation row(s) of a retired "
+            f"executor (NUTS/JAXNS-era 1.x or unknown): {preview}. Run IDs and seeds of the "
+            "dynesty ladder coincide with those rows, so they would be reused silently; "
+            "use a new state database."
+        )
 
 
 class FidelityEvaluator(Protocol):
@@ -40,6 +164,13 @@ class FidelityEvaluator(Protocol):
 
 @dataclass(frozen=True)
 class SearchExecutionConfig:
+    """Seeds, ladder window and frozen budgets of one search execution.
+
+    ``start_fidelity`` and ``stop_fidelity`` must be rungs of
+    ``scheduler.ladder``. ``max_total_compute_cost`` is in the evaluator's
+    ``compute_cost`` units (wall-clock hours).
+    """
+
     root_seed: int = 20260917
     scheduler: SchedulerConfig = SchedulerConfig()
     start_fidelity: Fidelity = Fidelity.F0_SANITY
@@ -50,6 +181,13 @@ class SearchExecutionConfig:
     def __post_init__(self) -> None:
         object.__setattr__(self, "start_fidelity", Fidelity(self.start_fidelity))
         object.__setattr__(self, "stop_fidelity", Fidelity(self.stop_fidelity))
+        ladder = self.scheduler.ladder
+        for name in ("start_fidelity", "stop_fidelity"):
+            value = getattr(self, name).value
+            if value not in ladder:
+                raise ValueError(
+                    f"{name} {value} is not a rung of the scheduler ladder {list(ladder)}"
+                )
         if self.stop_fidelity.rank < self.start_fidelity.rank:
             raise ValueError("stop_fidelity cannot precede start_fidelity")
         limits = {str(key): int(value) for key, value in self.max_models_by_fidelity.items()}
@@ -74,10 +212,16 @@ class SearchExecutionSummary:
     pruned_by_fidelity: Mapping[str, int]
     completed_fidelity: str
     total_compute_cost: float
+    ladder: tuple[str, ...] = DEFAULT_LADDER
+    scheduler_version: str = SCHEDULER_VERSION
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "format_version": "gwpop-search-execution-summary-1.0",
+            "format_version": EXECUTION_SUMMARY_FORMAT_VERSION,
+            "executor": EXECUTOR_VERSION,
+            "sampler_backend": SAMPLER_BACKEND,
+            "ladder": list(self.ladder),
+            "scheduler_version": self.scheduler_version,
             "root_hash": self.root_hash,
             "n_models_registered": self.n_models_registered,
             "evaluations_by_fidelity": dict(self.evaluations_by_fidelity),
@@ -133,6 +277,7 @@ def _existing_evaluation(
     model_hash: str,
     fidelity: Fidelity,
     seed: int,
+    fidelity_config_sha256: str | None = None,
 ) -> EvaluationRecord | None:
     rows = store.evaluations(model_hash=model_hash, fidelity=fidelity.value)
     matching = [row for row in rows if int(row["seed"]) == int(seed)]
@@ -140,7 +285,16 @@ def _existing_evaluation(
         raise RuntimeError(
             f"multiple stored evaluations for {model_hash} {fidelity.value} seed={seed}"
         )
-    return None if not matching else _record_from_row(matching[0])
+    if not matching:
+        return None
+    executor = row_executor(matching[0])
+    if executor not in V2_EXECUTORS:
+        raise LegacyStateError(
+            f"stored evaluation {matching[0]['run_id']} was written by executor "
+            f"{executor!r}, not by the dynesty ladder; refusing to reuse it"
+        )
+    require_fidelity_config_identity(matching[0], fidelity_config_sha256)
+    return _record_from_row(matching[0])
 
 
 def execute_search(
@@ -154,8 +308,21 @@ def execute_search(
     """Run/resume a deterministic finite search with durable evaluation state."""
     config = SearchExecutionConfig() if config is None else config
     store = ResultStore(state_database)
+    require_v2_state(store)
+    supported = getattr(evaluator, "supported_fidelities", None)
+    if supported is not None:
+        missing = [item for item in config.scheduler.ladder if item not in tuple(supported)]
+        if missing:
+            raise ValueError(
+                f"evaluator does not support ladder rung(s) {missing}; supported: "
+                f"{list(supported)}"
+            )
     artifact_root = Path(artifact_root)
     artifact_root.mkdir(parents=True, exist_ok=True)
+    # Evaluators that carry a frozen numerical configuration expose its hash;
+    # every row this run writes records it, and every row it reuses must match.
+    config_sha256 = getattr(evaluator, "fidelity_config_sha256", None)
+    config_sha256 = None if config_sha256 is None else str(config_sha256)
 
     for model in graph.nodes:
         store.register_model(model)
@@ -186,6 +353,7 @@ def execute_search(
                 model_hash=model_hash,
                 fidelity=fidelity,
                 seed=seed,
+                fidelity_config_sha256=config_sha256,
             )
             if existing is None:
                 if (
@@ -211,10 +379,10 @@ def execute_search(
                     run_id,
                     record,
                     seed=seed,
-                    run_config={
-                        "executor": "deterministic-fidelity-v1",
-                        "fidelity": fidelity.value,
-                    },
+                    run_config=evaluation_run_config(
+                        fidelity,
+                        fidelity_config_sha256=config_sha256,
+                    ),
                     artifact_path=str(run_dir),
                 )
                 total_compute_cost = _total_compute_cost(store)
@@ -265,7 +433,7 @@ def execute_search(
         if fidelity is config.stop_fidelity or not promoted:
             break
 
-        next_fidelity = fidelity.next()
+        next_fidelity = next_in_ladder(fidelity, config.scheduler.ladder)
         if next_fidelity is None:
             break
         active_hashes = promoted
@@ -279,6 +447,8 @@ def execute_search(
         pruned_by_fidelity=pruned_by_fidelity,
         completed_fidelity=fidelity.value,
         total_compute_cost=total_compute_cost,
+        ladder=tuple(config.scheduler.ladder),
+        scheduler_version=config.scheduler.version,
     )
     (artifact_root / "search_execution_summary.json").write_text(
         json.dumps(summary.to_dict(), sort_keys=True, indent=2)

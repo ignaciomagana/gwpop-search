@@ -67,7 +67,10 @@ The current repository includes:
 - held-out detected-event prediction;
 - event-drop and nearby-baseline search stress suites;
 - exact-search null replay calibration, with production nulls resampled from
-  the frozen estimator-ready selection and an explicit resampling-ESS gate;
+  the frozen estimator-ready selection under a catalog-scaled resampling-ESS
+  gate, and a null PE precision (per-event measurement scales and PE sample
+  count) matched to the frozen observed catalog so the calibrated statistic is
+  computed in the observed run's Monte-Carlo regime;
 - typed non-executable agent proposal contracts;
 - frozen production manifests/configuration and an H100/Fable runner.
 
