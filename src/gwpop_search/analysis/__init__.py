@@ -17,7 +17,11 @@ results (the likelihood, data semantics and priors are never changed):
 * :mod:`.psis_loo` — PSIS leave-one-out influence on the exact factorization
   ``L = prod_i ell_i / A`` from weighted nested-sampling points;
 * :mod:`.posterior_gates` — cross-run R-hat, Kish and importance gates of
-  repeated dynesty runs (used by the holdout refits).
+  repeated dynesty runs (used by the holdout refits);
+* :mod:`.ppc` — v2 D6 posterior predictive checks with selection effects;
+* :mod:`.data_variants` — importance reweighting to the 249-event / SNR 9 /
+  SNR 11 data variants with ESS and an operator-gated rerun flag;
+* :mod:`.claims_v2` — the v2 claim table (criteria D1-D6).
 
 Imports are lazy: the JAX-dependent modules load on first use.
 """
@@ -95,6 +99,22 @@ _EXPORTS = {
     "cross_run_rhat": ".posterior_gates",
     "evaluate_posterior_gates": ".posterior_gates",
     "rank_normalized_split_rhat": ".posterior_gates",
+    # PPC (v2 D6)
+    "PPCConfig": ".ppc",
+    "PREDECLARED_STATISTICS": ".ppc",
+    "posterior_predictive_check": ".ppc",
+    "ppc_criterion": ".ppc",
+    "ppc_report": ".ppc",
+    # data variants (OD-3b)
+    "DataVariant": ".data_variants",
+    "ReweightCriteria": ".data_variants",
+    "make_data_variant": ".data_variants",
+    "reweight_to_variant": ".data_variants",
+    "subset_selection_rows": ".data_variants",
+    "variant_edge_log_bayes_factor": ".data_variants",
+    # v2 claims
+    "build_claim_table": ".claims_v2",
+    "render_claims_markdown": ".claims_v2",
 }
 
 __all__ = sorted(_EXPORTS)
