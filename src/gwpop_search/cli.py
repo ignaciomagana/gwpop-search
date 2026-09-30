@@ -1593,14 +1593,19 @@ def _run_hsgp_scout(args: argparse.Namespace) -> None:
 
 
 def _canonicalize_gwcat_v2(args: argparse.Namespace) -> None:
-    from .data import canonicalize_gwcat_v2_pair
+    from .data import GwcatV2DataPolicy, canonicalize_gwcat_v2_pair
 
+    policy = (
+        None if args.v2_policy is None else GwcatV2DataPolicy.from_json(args.v2_policy)
+    )
     report = canonicalize_gwcat_v2_pair(
         Path(args.pe_export),
         Path(args.selection_export),
         Path(args.output_dir),
         required_spin_basis=args.spin_basis,
         required_selection_spin_basis=args.selection_spin_basis,
+        policy=policy,
+        spin_prior_allow_list=args.spin_prior_allow_list,
     )
     print(json.dumps(report, sort_keys=True, indent=2))
 
@@ -2632,6 +2637,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     canonicalize.add_argument("--output-dir", required=True)
+    canonicalize.add_argument(
+        "--v2-policy",
+        default=None,
+        help=(
+            "JSON GwcatV2DataPolicy (OD-7 spin-prior allow-list, z_max and G17 "
+            "allow-list, exact priors, sky-marginal cumulative mixture); every "
+            "check must pass and the policy hash is recorded in the report"
+        ),
+    )
+    canonicalize.add_argument(
+        "--spin-prior-allow-list",
+        default=None,
+        help=(
+            "without --v2-policy: a .json {event: kind} or text 'NAME [KIND]' file "
+            "of events allowed a non-own_analytic spin prior in a reference pair"
+        ),
+    )
     canonicalize.set_defaults(func=_canonicalize_gwcat_v2)
 
     freeze_dataset = subparsers.add_parser(
