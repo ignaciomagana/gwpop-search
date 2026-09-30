@@ -18,6 +18,13 @@ same event terms and selection exposure as
 tests), vectorized over a fixed ``[batch_size, ndim]`` block of
 hyperparameter vectors with ``jax.jit(jax.vmap(...))``.
 
+* With ``HBIConfig.variance_taper`` set, the target is the *tapered* shape
+  likelihood ``log L + ln T(sigma^2_lnL)`` of :mod:`gwpop_search.hbi.taper`
+  (GWTC-5 / Callister & Farr 2024), with ``sigma^2_lnL`` computed in the same
+  device pass; the evidence is then ``ln int L T pi``. The taper is part of
+  the HBI configuration and therefore of the likelihood identity.
+  :func:`posterior_taper_mass` reports the posterior fraction inside the
+  taper region.
 * ``-inf`` is genuine zero population support and is handed to dynesty
   unchanged; dynesty's own initial-volume/plateau machinery accounts for the
   zero-likelihood part of the prior. (dynesty internally stores such points
@@ -469,7 +476,12 @@ def build_likelihood_identity(
 def _hbi_config_from_dict(payload: Mapping[str, object]):
     from gwpop_search.hbi import HBIConfig
 
-    known = {"rate_treatment", "raw_selection_use_observing_time", "selection_chunk_size"}
+    known = {
+        "rate_treatment",
+        "raw_selection_use_observing_time",
+        "selection_chunk_size",
+        "variance_taper",
+    }
     unknown = sorted(set(payload) - known)
     if unknown:
         raise ValueError(f"unknown HBI configuration field(s) {unknown}")
@@ -477,6 +489,7 @@ def _hbi_config_from_dict(payload: Mapping[str, object]):
         rate_treatment=payload["rate_treatment"],
         raw_selection_use_observing_time=bool(payload["raw_selection_use_observing_time"]),
         selection_chunk_size=payload["selection_chunk_size"],
+        variance_taper=payload.get("variance_taper"),
     )
 
 
@@ -799,6 +812,19 @@ class BatchedShapeLogLikelihood:
     :meth:`likelihood_identity` (names, HBI config, model, data digests) and
     :meth:`runtime_identity` (device and software runtime) are recorded by
     :func:`run_dynesty` in checkpoints and results.
+
+    Variance taper: with ``hbi_config.variance_taper`` set, every row is the
+    *tapered* shape likelihood ``ln L + ln T(sigma^2)`` of
+    :func:`gwpop_search.hbi.jax_backend.build_shape_log_likelihood_components`
+    (the same value as ``build_jax_shape_log_likelihood`` with that
+    configuration), so dynesty samples and integrates ``L T`` and the
+    evidence is ``int L T pi``. Per evaluation the variance ``sigma^2`` and
+    ``ln T`` are computed in the same device pass; :meth:`stats` tallies the
+    evaluations inside the taper region (``n_in_taper_region``), above the
+    threshold (``n_above_taper_threshold``) and the largest finite
+    ``sigma^2`` seen, and :meth:`components` returns the per-row
+    ``(ln L T, ln L, sigma^2, ln T)``. ``with_variance=True`` computes
+    ``sigma^2`` without a taper (``ln T = 0``; values equal up to rounding).
     """
 
     def __init__(
@@ -810,10 +836,15 @@ class BatchedShapeLogLikelihood:
         *,
         hbi_config=None,
         batch_size: int = 64,
+        with_variance: bool | None = None,
     ):
         jax, jnp = _require_jax()
         from gwpop_search.hbi import HBIConfig, RateTreatment
-        from gwpop_search.hbi.jax_backend import build_terms_function
+        from gwpop_search.hbi.jax_backend import (
+            build_terms_and_variance_function,
+            build_terms_function,
+            tapered_shape_value,
+        )
 
         cfg = HBIConfig() if hbi_config is None else hbi_config
         if cfg.rate_treatment is not RateTreatment.SHAPE:
@@ -823,14 +854,49 @@ class BatchedShapeLogLikelihood:
         self.batch_size = _as_int("batch_size", batch_size, minimum=1)
         self.n_events = int(posterior.n_events)
         self.hbi_config = cfg
+        self.variance_taper = cfg.variance_taper
+        self.with_variance = (
+            cfg.variance_taper is not None if with_variance is None else bool(with_variance)
+        )
+        if cfg.variance_taper is not None and not self.with_variance:
+            raise ValueError("a variance taper needs the variance (with_variance=True)")
         self._identity_inputs = (posterior, selection, population_model)
         self._likelihood_identity: dict | None = None
+        names_ = self.names
+        n_events = self.n_events
+        taper = cfg.variance_taper
+        self._variance_fn = None
+
+        if self.with_variance:
+            vterms = build_terms_and_variance_function(
+                posterior, selection, population_model, config=cfg, jit=False
+            )
+
+            def single_variance(x):
+                hyperparameters = {name: x[k] for k, name in enumerate(names_)}
+                event_terms, log_exposure, event_var, sel_var = vterms(hyperparameters)
+                tapered, value, variance, log_t = tapered_shape_value(
+                    event_terms,
+                    log_exposure,
+                    event_var,
+                    sel_var,
+                    n_events=n_events,
+                    taper=taper,
+                )
+                invalid = (
+                    jnp.any(jnp.isnan(event_terms) | (event_terms == jnp.inf))
+                    | jnp.isnan(log_exposure)
+                    | (log_exposure == jnp.inf)
+                )
+                events_finite = jnp.all(jnp.isfinite(event_terms))
+                selection_unsupported = events_finite & (log_exposure == -jnp.inf)
+                return tapered, invalid, selection_unsupported, value, variance, log_t
+
+            self._variance_fn = jax.jit(jax.vmap(single_variance))
 
         terms = build_terms_function(
             posterior, selection, population_model, config=cfg, jit=False
         )
-        names_ = self.names
-        n_events = self.n_events
 
         def single(x):
             hyperparameters = {name: x[k] for k, name in enumerate(names_)}
@@ -852,7 +918,9 @@ class BatchedShapeLogLikelihood:
             selection_unsupported = events_finite & (log_exposure == -jnp.inf)
             return value, invalid, selection_unsupported
 
-        self._device_fn = jax.jit(jax.vmap(single))
+        self._device_fn = (
+            self._variance_fn if self._variance_fn is not None else jax.jit(jax.vmap(single))
+        )
         self._jax = jax
         self._jnp = jnp
         self._stats_lock = threading.Lock()
@@ -865,8 +933,16 @@ class BatchedShapeLogLikelihood:
             "n_zero_support": 0,
             "n_selection_unsupported": 0,
         }
+        if self.with_variance:
+            self._stats.update(
+                {
+                    "n_in_taper_region": 0,
+                    "n_above_taper_threshold": 0,
+                    "max_finite_variance": 0.0,
+                }
+            )
 
-    def __call__(self, X) -> np.ndarray:
+    def _evaluate(self, X) -> tuple[np.ndarray, dict[str, np.ndarray] | None]:
         X = np.asarray(X, dtype=np.float64)
         if X.ndim != 2 or X.shape[1] != self.ndim:
             raise ValueError(
@@ -875,7 +951,7 @@ class BatchedShapeLogLikelihood:
             )
         m = X.shape[0]
         if m == 0:
-            return np.empty(0, dtype=np.float64)
+            return np.empty(0, dtype=np.float64), None
         bad_input = ~np.all(np.isfinite(X), axis=1)
         if bad_input.any():
             rows = np.flatnonzero(bad_input)
@@ -887,6 +963,12 @@ class BatchedShapeLogLikelihood:
         values = np.empty(padded.shape[0], dtype=np.float64)
         invalid = np.empty(padded.shape[0], dtype=bool)
         unsupported = np.empty(padded.shape[0], dtype=bool)
+        extra = None
+        if self.with_variance:
+            extra = {
+                key: np.empty(padded.shape[0], dtype=np.float64)
+                for key in ("log_likelihood_untapered", "variance", "log_taper")
+            }
         start = time.perf_counter()
         for block in range(n_blocks):
             sl = slice(block * self.batch_size, (block + 1) * self.batch_size)
@@ -894,8 +976,14 @@ class BatchedShapeLogLikelihood:
             values[sl] = np.asarray(out[0], dtype=np.float64)
             invalid[sl] = np.asarray(out[1], dtype=bool)
             unsupported[sl] = np.asarray(out[2], dtype=bool)
+            if extra is not None:
+                extra["log_likelihood_untapered"][sl] = np.asarray(out[3], dtype=np.float64)
+                extra["variance"][sl] = np.asarray(out[4], dtype=np.float64)
+                extra["log_taper"][sl] = np.asarray(out[5], dtype=np.float64)
         elapsed = time.perf_counter() - start
         values = values[:m]
+        if extra is not None:
+            extra = {key: value[:m] for key, value in extra.items()}
         invalid = invalid[:m] | np.isnan(values) | np.isposinf(values)
         if invalid.any():
             rows = np.flatnonzero(invalid)
@@ -913,7 +1001,42 @@ class BatchedShapeLogLikelihood:
             stats["device_seconds"] += elapsed
             stats["n_zero_support"] += int(np.count_nonzero(np.isneginf(values)))
             stats["n_selection_unsupported"] += int(np.count_nonzero(unsupported[:m]))
-        return values
+            if extra is not None:
+                variance = extra["variance"]
+                supported = np.isfinite(extra["log_likelihood_untapered"])
+                taper = self.variance_taper
+                if taper is not None:
+                    stats["n_in_taper_region"] += int(
+                        np.count_nonzero(supported & taper.in_region(variance))
+                    )
+                    stats["n_above_taper_threshold"] += int(
+                        np.count_nonzero(supported & ~(variance <= taper.threshold))
+                    )
+                finite = variance[supported & np.isfinite(variance)]
+                if finite.size:
+                    stats["max_finite_variance"] = max(
+                        float(stats["max_finite_variance"]), float(np.max(finite))
+                    )
+        return values, extra
+
+    def __call__(self, X) -> np.ndarray:
+        return self._evaluate(X)[0]
+
+    def components(self, X) -> dict[str, np.ndarray]:
+        """Per row: ``log_likelihood`` (tapered), ``log_likelihood_untapered``,
+        ``variance`` (``sigma^2_lnL``) and ``log_taper`` (needs the variance)."""
+        if not self.with_variance:
+            raise ValueError("components() needs a likelihood built with the variance")
+        values, extra = self._evaluate(X)
+        if extra is None:  # m == 0
+            empty = np.empty(0, dtype=np.float64)
+            return {
+                "log_likelihood": empty,
+                "log_likelihood_untapered": empty,
+                "variance": empty,
+                "log_taper": empty,
+            }
+        return {"log_likelihood": values, **extra}
 
     def stats(self) -> dict[str, object]:
         with self._stats_lock:
@@ -941,12 +1064,15 @@ def build_batched_log_likelihood(
     *,
     hbi_config=None,
     batch_size: int = 64,
+    with_variance: bool | None = None,
 ) -> BatchedShapeLogLikelihood:
     """Build ``f(X [m, ndim]) -> log L [m]`` for the standardized shape likelihood.
 
     Use ``HBIConfig(selection_chunk_size=None)`` (or a chunk at least as large
     as the selection) on GPUs: the chunked ``lax.scan`` is sequential and was
     measured ~40x slower at ``chunk=4096`` on the GWTC-5 candidate data.
+    With ``hbi_config.variance_taper`` the rows are the tapered likelihood
+    (see :class:`BatchedShapeLogLikelihood`).
     """
     return BatchedShapeLogLikelihood(
         posterior,
@@ -955,6 +1081,7 @@ def build_batched_log_likelihood(
         names,
         hbi_config=hbi_config,
         batch_size=batch_size,
+        with_variance=with_variance,
     )
 
 
@@ -1751,11 +1878,14 @@ class _RunTally:
     killed session made after its last checkpoint are lost with it and are
     repeated by the resume, so the totals equal those of an uninterrupted
     run. A counter a session cannot measure (a likelihood without ``stats()``)
-    becomes ``None`` for the whole run.
+    becomes ``None`` for the whole run. The variance-taper counters
+    (``_TAPER_KEYS``: likelihood evaluations inside the taper region and
+    above its threshold) are recorded only when the likelihood reports them.
     """
 
     _POOL_KEYS = ("n_evaluations", "n_zero_likelihood")
     _LIKELIHOOD_KEYS = ("n_selection_unsupported",)
+    _TAPER_KEYS = ("n_in_taper_region", "n_above_taper_threshold")
 
     def __init__(self):
         self.base: dict[str, object] = {
@@ -1792,6 +1922,16 @@ class _RunTally:
             else:
                 totals[key] = _add_delta(
                     self.base.get(key), like_now.get(key), start["likelihood"].get(key)
+                )
+        for key in self._TAPER_KEYS:
+            if (
+                like_now is not None
+                and start["likelihood"] is not None
+                and key in like_now
+                and key in start["likelihood"]
+            ):
+                totals[key] = _add_delta(
+                    self.base.get(key, 0), like_now[key], start["likelihood"][key]
                 )
         totals["elapsed_seconds"] = float(self.base["elapsed_seconds"]) + (
             time.perf_counter() - start["clock"]
@@ -2014,6 +2154,85 @@ def _result_from_sampler(
         n_selection_unsupported=_optional_int(totals.get("n_selection_unsupported")),
         provenance=copy.deepcopy(dict(provenance)),
     )
+
+
+def posterior_taper_mass(
+    results: Sequence[DynestyResult],
+    loglike: BatchedShapeLogLikelihood,
+    *,
+    log_likelihood_rtol: float = 1.0e-9,
+) -> dict[str, object]:
+    """Posterior fraction inside the variance-taper region, per run and pooled.
+
+    ``sigma^2_lnL`` is re-evaluated with ``loglike`` (a tapered
+    :class:`BatchedShapeLogLikelihood` of exactly the estimator the runs
+    sampled; the likelihood identity is verified, ``selection_chunk_size``
+    aside) at every weighted point of each run (dead points and final live
+    points) and summarised with the run's importance weights by
+    :func:`gwpop_search.hbi.taper.taper_region_summary`. The pooled block is
+    the equal-weight mixture of the separately normalised runs. The
+    re-evaluated tapered ``ln L`` must reproduce the stored one
+    (``|d ln L| <= rtol max(1, |ln L|)`` on finite points); the largest
+    deviation is reported and a larger one raises.
+    """
+    from gwpop_search.hbi.taper import taper_region_summary
+
+    results = tuple(results)
+    if not results:
+        raise ValueError("at least one dynesty result is required")
+    taper = getattr(loglike, "variance_taper", None)
+    if taper is None:
+        raise ValueError("posterior_taper_mass needs a likelihood with a variance taper")
+    names = tuple(loglike.names)
+    requested = _without_chunk_size(loglike.likelihood_identity())
+    variances, weights, runs = [], [], []
+    worst = 0.0
+    for index, result in enumerate(results):
+        if tuple(result.names) != names:
+            raise ValueError(f"run {index} has different parameter names than the likelihood")
+        stored = result.likelihood_identity
+        if stored is None:
+            raise ValueError(f"run {index} carries no likelihood identity")
+        diffs = _manifest_differences(_without_chunk_size(stored), requested)
+        if diffs:
+            raise ValueError(
+                f"run {index} sampled a different likelihood than the one supplied; "
+                f"differing keys: {diffs}"
+            )
+        comps = loglike.components(result.samples)
+        stored_logl = np.asarray(result.log_likelihoods, dtype=float)
+        finite = np.isfinite(stored_logl) & np.isfinite(comps["log_likelihood"])
+        if np.any(np.isfinite(stored_logl) != np.isfinite(comps["log_likelihood"])):
+            raise ValueError(f"run {index}: re-evaluated likelihood support differs from the run")
+        if finite.any():
+            dev = np.abs(comps["log_likelihood"][finite] - stored_logl[finite]) / np.maximum(
+                1.0, np.abs(stored_logl[finite])
+            )
+            run_worst = float(np.max(dev))
+            worst = max(worst, run_worst)
+            if run_worst > log_likelihood_rtol:
+                raise ValueError(
+                    f"run {index}: re-evaluated tapered log-likelihood deviates from the "
+                    f"sampled one by {run_worst:.3g} (relative)"
+                )
+        w = result.weights
+        summary = taper_region_summary(comps["variance"], w, taper)
+        summary["repeat"] = index
+        runs.append(summary)
+        variances.append(comps["variance"])
+        weights.append(w / len(results))
+    pooled = taper_region_summary(np.concatenate(variances), np.concatenate(weights), taper)
+    return {
+        "taper": taper.to_dict(),
+        "definition": (
+            "posterior (importance-weighted dead + live points) fraction with "
+            f"T(sigma^2) < {1.0 - taper.region_suppression:g}, i.e. sigma^2 > "
+            f"{taper.region_onset:.6g}; sigma^2 = sum_i Var[ln I_i] + N^2 Var[xi]/xi^2"
+        ),
+        "runs": runs,
+        "pooled": pooled,
+        "max_relative_log_likelihood_mismatch": worst,
+    }
 
 
 def _warn_selection_unsupported(result: DynestyResult, *, stacklevel: int = 3) -> None:
@@ -2414,6 +2633,15 @@ class ImportanceDiagnosticsBatch:
     campaigns with squared exposure fractions (NaN when a campaign variance is
     infinite, as in the reference); and
     ``Var[log L] ~= sum_i Var[log ell_i] + N^2 Var[log A]``.
+
+    Variance taper: ``taper_variance`` is the ``sigma^2`` the likelihood's
+    taper sees (as ``shape_log_likelihood_variance``, except that a campaign
+    without population support contributes zero instead of making the
+    selection variance NaN; the two agree whenever every campaign has
+    support), ``log_taper`` is ``ln T(taper_variance)`` (0 without a taper),
+    ``log_likelihood`` is the likelihood that was sampled (tapered when the
+    HBI configuration has a taper) and ``log_likelihood_untapered`` is
+    ``ln L`` without it.
     """
 
     names: tuple[str, ...]
@@ -2439,6 +2667,9 @@ class ImportanceDiagnosticsBatch:
     selection_variance: np.ndarray
     event_variance_total: np.ndarray
     shape_log_likelihood_variance: np.ndarray
+    log_likelihood_untapered: np.ndarray | None = None
+    taper_variance: np.ndarray | None = None
+    log_taper: np.ndarray | None = None
 
     @property
     def n_events(self) -> int:
@@ -2456,6 +2687,15 @@ class ImportanceDiagnosticsBatch:
             "selection_ess": self.selection_ess,
             "selection_ess_fraction": self.selection_ess_fraction,
             "selection_max_weight": self.selection_max_weight,
+            **(
+                {}
+                if self.taper_variance is None
+                else {
+                    "log_likelihood_untapered": self.log_likelihood_untapered,
+                    "taper_variance": self.taper_variance,
+                    "log_taper": self.log_taper,
+                }
+            ),
         }
 
 
@@ -2556,6 +2796,7 @@ class ImportanceDiagnosticsFunction:
             else selection.n_selected
         )
         names_ = self.names
+        taper = cfg.variance_taper
 
         def single(x):
             hyperparameters = {name: x[k] for k, name in enumerate(names_)}
@@ -2633,6 +2874,18 @@ class ImportanceDiagnosticsFunction:
                 - n_events * jnp.where(jnp.isfinite(log_exposure), log_exposure, 0.0),
                 -jnp.inf,
             )
+            supported = jnp.isfinite(c_logexp)
+            taper_sel_var = jnp.sum(
+                jnp.where(supported, fractions**2 * jnp.where(supported, c_var, 0.0), 0.0)
+            )
+            taper_variance = event_var_total + n_events**2 * taper_sel_var
+            taper_variance = jnp.where(jnp.isnan(taper_variance), jnp.inf, taper_variance)
+            if taper is None:
+                log_t = jnp.zeros_like(taper_variance)
+                tapered = log_like
+            else:
+                log_t = taper.log_taper_jax(taper_variance)
+                tapered = jnp.where(jnp.isfinite(log_like), log_like + log_t, -jnp.inf)
             out.update(
                 {
                     "log_exposure": log_exposure,
@@ -2647,7 +2900,10 @@ class ImportanceDiagnosticsFunction:
                     "selection_variance": sel_var,
                     "event_variance_total": event_var_total,
                     "shape_log_likelihood_variance": event_var_total + n_events**2 * sel_var,
-                    "log_likelihood": log_like,
+                    "log_likelihood": tapered,
+                    "log_likelihood_untapered": log_like,
+                    "taper_variance": taper_variance,
+                    "log_taper": log_t,
                     "invalid": invalid,
                 }
             )
@@ -2684,6 +2940,10 @@ class ImportanceDiagnosticsFunction:
             chunks.append(self._jax.device_get(self._device_fn(self._jnp.asarray(padded[sl]))))
         out = {key: np.concatenate([np.asarray(c[key]) for c in chunks])[:m] for key in chunks[0]}
         invalid = out.pop("invalid").astype(bool)
+        if self.hbi_config.variance_taper is None:
+            # Untapered estimator: the batch keeps its pre-taper shape.
+            for key in ("log_likelihood_untapered", "taper_variance", "log_taper"):
+                out.pop(key)
         if invalid.any():
             rows = np.flatnonzero(invalid)
             raise PopulationDensityError(

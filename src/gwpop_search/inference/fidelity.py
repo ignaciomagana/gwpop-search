@@ -144,6 +144,36 @@ def _as_float(name: str, value) -> float:
 
 _LEGACY_CRITERIA_FIELDS = ("max_r_hat", "min_mcmc_n_eff", "max_divergences")
 
+# Check families of a repeated dynesty fit (:func:`summarize_dynesty_fit`).
+# A check's family is its name without the ``.point``/``.draw_median``/
+# ``.draw_tail`` suffix; ``NumericalCriteria.binding`` sets, per family,
+# whether a failing check fails the evaluation (``stage == "gate"``) or is
+# recorded as advisory only.
+CHECK_FAMILIES = (
+    "nested_sampling.all_runs_terminated_by_dlogz",
+    "nested_sampling.selection_unsupported_evaluations",
+    "nested_sampling.min_kish_ess_per_run",
+    "nested_sampling.cross_run_r_hat",
+    "evidence.conservative_error",
+    "evidence.repeat_std",
+    "evidence.max_pairwise_z",
+    "importance.min_event_ess",
+    "importance.selection_ess",
+    "importance.max_event_weight_fraction",
+    "importance.selection_max_weight_fraction",
+    "importance.shape_log_likelihood_variance",
+    "taper.posterior_mass_in_taper_region",
+)
+_CHECK_SUFFIXES = (".point", ".draw_median", ".draw_tail")
+
+
+def check_family(name: str) -> str:
+    """The binding family of a check name (suffixes ``.point``/``.draw_*`` removed)."""
+    for suffix in _CHECK_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
 
 @dataclass(frozen=True)
 class NumericalCriteria:
@@ -167,6 +197,23 @@ class NumericalCriteria:
     (:func:`gwpop_search.inference.ns_diagnostics.insertion_index_ranks`,
     :func:`~gwpop_search.inference.ns_diagnostics.insertion_index_test`) and
     becomes live as soon as the backend persists the birth iterations.
+
+    ``binding`` (per-check binding flags) maps a check family
+    (:data:`CHECK_FAMILIES`) to ``True`` (binding: a failure fails the
+    evaluation) or ``False`` (recorded with ``stage="advisory"`` and
+    ``binding=False``; never fails the evaluation). Families not listed are
+    binding. With the likelihood variance taper inside the likelihood (v2),
+    the ``importance.*`` variance/ESS families are typically non-binding: the
+    taper, not a post-hoc gate, handles an unreliable estimate.
+
+    ``max_posterior_taper_mass`` (``None``: report only) limits the posterior
+    fraction inside the variance-taper region
+    (``taper.posterior_mass_in_taper_region``); it needs a tapered HBI
+    configuration.
+
+    Serialization omits ``binding`` when empty and
+    ``max_posterior_taper_mass`` when ``None``, so the hashes of configurations
+    written before these fields existed are unchanged.
     """
 
     max_cross_run_r_hat: float | None = None
@@ -184,9 +231,28 @@ class NumericalCriteria:
     importance_tail_quantile: float = 0.1
     gate_importance_over_posterior: bool = True
     insertion_index_advisory: bool = False
+    binding: Mapping[str, bool] = field(default_factory=dict)
+    max_posterior_taper_mass: float | None = None
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
+        if not isinstance(self.binding, Mapping):
+            raise TypeError("binding must be a mapping of check family -> bool")
+        binding = {str(key): value for key, value in self.binding.items()}
+        unknown = sorted(set(binding) - set(CHECK_FAMILIES))
+        if unknown:
+            raise ValueError(
+                f"unknown check families in binding: {unknown}; known: {list(CHECK_FAMILIES)}"
+            )
+        for key, value in binding.items():
+            if not isinstance(value, bool):
+                raise TypeError(f"binding[{key!r}] must be a bool")
+        set_(self, "binding", dict(sorted(binding.items())))
+        if self.max_posterior_taper_mass is not None:
+            mass = _as_float("max_posterior_taper_mass", self.max_posterior_taper_mass)
+            if not 0.0 <= mass <= 1.0:
+                raise ValueError("max_posterior_taper_mass must lie in [0, 1]")
+            set_(self, "max_posterior_taper_mass", mass)
         if self.max_cross_run_r_hat is not None:
             value = _as_float("max_cross_run_r_hat", self.max_cross_run_r_hat)
             if not value > 1.0:
@@ -245,8 +311,18 @@ class NumericalCriteria:
             )
         )
 
+    def is_binding(self, name: str) -> bool:
+        """Whether the check ``name`` (or its family) is binding."""
+        return bool(self.binding.get(check_family(name), True))
+
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["binding"] = dict(self.binding)
+        if not payload["binding"]:
+            payload.pop("binding")
+        if payload["max_posterior_taper_mass"] is None:
+            payload.pop("max_posterior_taper_mass")
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "NumericalCriteria":
@@ -370,24 +446,13 @@ class F0SanityConfig:
 
 
 def _hbi_to_dict(hbi: HBIConfig) -> dict[str, object]:
-    return {
-        "rate_treatment": hbi.rate_treatment.value,
-        "raw_selection_use_observing_time": bool(hbi.raw_selection_use_observing_time),
-        "selection_chunk_size": (
-            None if hbi.selection_chunk_size is None else int(hbi.selection_chunk_size)
-        ),
-    }
+    # ``variance_taper`` appears only when configured, so pre-v2 configuration
+    # hashes are unchanged.
+    return hbi.to_dict()
 
 
 def _hbi_from_dict(payload: Mapping[str, object]) -> HBIConfig:
-    payload = dict(payload)
-    unknown = sorted(
-        set(payload)
-        - {"rate_treatment", "raw_selection_use_observing_time", "selection_chunk_size"}
-    )
-    if unknown:
-        raise ValueError(f"unknown HBI configuration field(s): {unknown}")
-    return HBIConfig(**payload)
+    return HBIConfig.from_dict(payload)
 
 
 @dataclass(frozen=True)
@@ -642,6 +707,27 @@ def _bool_check(name: str, passed: bool, *, value=None, stage: str = "gate", not
     if note is not None:
         payload["note"] = str(note)
     return payload
+
+
+def apply_binding(
+    checks: Sequence[Mapping[str, object]], criteria: "NumericalCriteria"
+) -> list[dict[str, object]]:
+    """Copies of ``checks`` with the per-family binding flags applied.
+
+    Every check gets ``binding`` (``True``/``False``). A ``stage == "gate"``
+    check of a non-binding family becomes ``stage = "advisory"``; advisory
+    checks stay advisory (and non-binding).
+    """
+    out = []
+    for check in checks:
+        item = dict(check)
+        stage = item.get("stage", "gate")
+        binding = stage == "gate" and criteria.is_binding(str(item["name"]))
+        if stage == "gate" and not binding:
+            item["stage"] = "advisory"
+        item["binding"] = bool(binding)
+        out.append(item)
+    return out
 
 
 def _gates_passed(checks: Sequence[Mapping[str, object]]) -> bool:
@@ -955,6 +1041,8 @@ def summarize_dynesty_fit(
     rhat_draws_per_run: int = 2000,
     diagnostics_batch_size: int = 16,
     diagnostics_fn=None,
+    taper_loglike=None,
+    taper_batch_size: int = 64,
 ) -> dict[str, object]:
     """All numerical gates of a repeated dynesty fit.
 
@@ -966,6 +1054,20 @@ def summarize_dynesty_fit(
     ``importance``. ``diagnostics_fn`` optionally supplies an already
     compiled :func:`~gwpop_search.inference.dynesty_backend.build_importance_diagnostics`
     function (its likelihood identity is still verified against every run).
+
+    Variance taper (``hbi_config.variance_taper``): the ``taper`` block is the
+    posterior taper-mass diagnostic of
+    :func:`~gwpop_search.inference.dynesty_backend.posterior_taper_mass`
+    (per run and pooled; the fraction of posterior mass inside the taper
+    region), evaluated with ``taper_loglike`` (a tapered batched likelihood
+    of the same estimator; built here with ``taper_batch_size`` rows per
+    call when omitted). It is always reported; the check
+    ``taper.posterior_mass_in_taper_region`` is added only when
+    ``criteria.max_posterior_taper_mass`` is set. Without a taper the block
+    is ``None``.
+
+    Binding: ``criteria.binding`` is applied to every check (each carries
+    ``binding``; non-binding families are recorded as advisory).
     """
     results = tuple(results)
     if not results:
@@ -1076,6 +1178,37 @@ def summarize_dynesty_fit(
     )
     checks.extend(importance_checks)
 
+    taper_block = None
+    taper = hbi_config.variance_taper
+    if taper is None:
+        if criteria.max_posterior_taper_mass is not None:
+            raise ValueError(
+                "max_posterior_taper_mass is set but the HBI configuration has no variance taper"
+            )
+    else:
+        from .dynesty_backend import posterior_taper_mass
+
+        loglike = taper_loglike
+        if loglike is None:
+            loglike = build_batched_log_likelihood(
+                posterior,
+                selection,
+                population_model,
+                names,
+                hbi_config=hbi_config,
+                batch_size=taper_batch_size,
+            )
+        taper_block = posterior_taper_mass(results, loglike)
+        if criteria.max_posterior_taper_mass is not None:
+            checks.append(
+                _check(
+                    "taper.posterior_mass_in_taper_region",
+                    taper_block["pooled"]["posterior_mass_in_taper_region"],
+                    criteria.max_posterior_taper_mass,
+                    comparison="le",
+                )
+            )
+
     insertion = {
         "available": False,
         "reason_code": INSERTION_INDEX_UNAVAILABLE_REASON,
@@ -1106,7 +1239,8 @@ def summarize_dynesty_fit(
             }
         )
 
-    return {
+    checks = apply_binding(checks, criteria)
+    summary = {
         "passed": _gates_passed(checks),
         "checks": checks,
         "nested_sampling": {
@@ -1122,6 +1256,9 @@ def summarize_dynesty_fit(
         "posterior_median": dict(posterior_block["median"]),
         "importance": importance,
     }
+    if taper_block is not None:
+        summary["taper"] = taper_block
+    return summary
 
 
 def save_pooled_posterior(path: str | Path, results: Sequence[object]) -> dict[str, object]:

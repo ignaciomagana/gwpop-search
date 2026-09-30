@@ -56,6 +56,20 @@ def _require_jax():
     return jax, jnp
 
 
+def _refuse_variance_taper(cfg) -> None:
+    """The analysis evaluators compute the untapered likelihood terms.
+
+    A run sampled under a variance taper (``HBIConfig.variance_taper``) has a
+    different likelihood; reusing these evaluators on it would silently drop
+    the taper, so they refuse until taper-aware analysis is implemented.
+    """
+    if getattr(cfg, "variance_taper", None) is not None:
+        raise NotImplementedError(
+            "analysis evaluators compute the untapered likelihood; taper-aware analysis "
+            "(HBIConfig.variance_taper) is not implemented"
+        )
+
+
 def _pad_rows(X: np.ndarray, batch_size: int) -> tuple[np.ndarray, int]:
     m = X.shape[0]
     n_blocks = -(-m // batch_size)
@@ -116,6 +130,7 @@ class BatchedCatalogTerms:
         cfg = HBIConfig(selection_chunk_size=None) if hbi_config is None else hbi_config
         if cfg.rate_treatment is not RateTreatment.SHAPE:
             raise ValueError("analysis evaluators support the shape likelihood only")
+        _refuse_variance_taper(cfg)
         self.names = tuple(str(name) for name in names)
         if not self.names or len(set(self.names)) != len(self.names):
             raise ValueError("hyperparameter names must be unique and non-empty")
@@ -268,6 +283,7 @@ def pad_catalog(
     from gwpop_search.hbi.common import density_required_fields, selection_log_factors
 
     cfg = HBIConfig(selection_chunk_size=None) if hbi_config is None else hbi_config
+    _refuse_variance_taper(cfg)
     fields = density_required_fields(population_model, posterior.basis)
     validate_pair(posterior, selection, fields)
     counts = np.diff(posterior.offsets).astype(np.int64)

@@ -208,17 +208,9 @@ def _hbi_config_dict(hbi_config) -> dict[str, object]:
     from gwpop_search.hbi import HBIConfig
 
     cfg = HBIConfig() if hbi_config is None else hbi_config
-    return {
-        "rate_treatment": cfg.rate_treatment.value,
-        "raw_selection_use_observing_time": bool(
-            cfg.raw_selection_use_observing_time
-        ),
-        "selection_chunk_size": (
-            None
-            if cfg.selection_chunk_size is None
-            else int(cfg.selection_chunk_size)
-        ),
-    }
+    # ``variance_taper`` is included only when configured (pre-v2 identities
+    # are unchanged).
+    return cfg.to_dict()
 
 
 def _model_config(population_model) -> dict[str, object]:

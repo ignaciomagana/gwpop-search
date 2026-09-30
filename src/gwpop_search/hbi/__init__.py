@@ -20,6 +20,7 @@ from .types import (
     RateTreatment,
     SelectionResult,
 )
+from .taper import VarianceTaper
 
 def build_jax_shape_log_likelihood(*args, **kwargs):
     from .jax_backend import build_shape_log_likelihood
@@ -34,5 +35,6 @@ __all__ = [
     'ImportanceDiagnostics','EventLikelihoodResult','SelectionResult','CampaignSelectionResult',
     'LikelihoodVarianceDiagnostics','CatalogTerms','CatalogLikelihoodResult','PopulationLogDensity',
     'evaluate_events','evaluate_selection','evaluate_catalog_terms','catalog_log_likelihood','shape_log_likelihood',
-    'poisson_log_likelihood','build_jax_shape_log_likelihood','build_jax_poisson_log_likelihood'
+    'poisson_log_likelihood','build_jax_shape_log_likelihood','build_jax_poisson_log_likelihood',
+    'VarianceTaper'
 ]

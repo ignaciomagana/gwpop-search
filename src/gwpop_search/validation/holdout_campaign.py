@@ -159,6 +159,7 @@ def _hbi_config(campaign) -> HBIConfig:
         rate_treatment=base.rate_treatment,
         raw_selection_use_observing_time=bool(base.raw_selection_use_observing_time),
         selection_chunk_size=None,
+        variance_taper=base.variance_taper,
     )
 
 
@@ -215,11 +216,7 @@ def run_holdout_campaign(
         "fold_assignment": folds,
         "holdout_config": config.to_dict(),
         "sampler_backend": "dynesty",
-        "hbi_config": {
-            "rate_treatment": hbi.rate_treatment.value,
-            "raw_selection_use_observing_time": bool(hbi.raw_selection_use_observing_time),
-            "selection_chunk_size": hbi.selection_chunk_size,
-        },
+        "hbi_config": hbi.to_dict(),
     }
     _write_manifest_once(root / "manifest.json", manifest)
 
