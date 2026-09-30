@@ -299,6 +299,9 @@ class PPCResult:
     bands: dict[str, dict[str, object]]
     identity_verified: bool
     derived_columns: Mapping[str, list] = field(default_factory=dict)
+    #: ``None`` for an untapered likelihood, else the recorded treatment
+    #: (always ``"weights_only"``: the check uses the population weights only)
+    taper_treatment: str | None = None
 
     def p_values(self) -> dict[str, dict[str, float]]:
         return {name: two_sided_ppp(self.t_obs[name], self.t_pred[name]) for name in PREDECLARED_STATISTICS}
@@ -358,6 +361,7 @@ class PPCResult:
             "model_hash": self.model_hash,
             "identity_verified": bool(self.identity_verified),
             "derived_columns": dict(self.derived_columns),
+            "taper_treatment": self.taper_treatment,
             "config": self.config.to_dict(),
             "n_events": int(self.n_events),
             "n_catalog": int(self.n_catalog),
@@ -421,7 +425,12 @@ def posterior_predictive_check(
     columns = dict(config.columns)
     pe_columns, pe_derived = observable_samples(posterior, columns, population_model, what="PE")
     sel_columns, sel_derived = observable_samples(selection, columns, population_model, what="selection")
-    catalog = pad_catalog(posterior, selection, population_model, hbi_config=hbi_config)
+    # The predicted and observed catalogs use the population weights only, which
+    # do not depend on a variance taper; the posterior draws already carry it.
+    taper_treatment = "weights_only" if getattr(hbi_config, "variance_taper", None) is not None else None
+    catalog = pad_catalog(
+        posterior, selection, population_model, hbi_config=hbi_config, taper_treatment=taper_treatment
+    )
     n_events = catalog.n_events
     n_catalog = n_events if config.n_catalog is None else int(config.n_catalog)
     n_sel = int(catalog.n_selected)
@@ -506,6 +515,7 @@ def posterior_predictive_check(
         bands=bands,
         identity_verified=bool(verify_identity),
         derived_columns={"pe": pe_derived, "selection": sel_derived},
+        taper_treatment=taper_treatment,
     )
 
 

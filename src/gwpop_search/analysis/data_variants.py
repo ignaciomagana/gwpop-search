@@ -207,8 +207,12 @@ def make_data_variant(
 
 
 def _taper_declared(identity: Mapping[str, object] | None) -> bool:
-    """Whether the sampled likelihood's identity names a variance taper anywhere
-    outside its data block (the key spelling of the v2 taper is not fixed yet)."""
+    """Whether the sampled likelihood's identity declares a variance taper.
+
+    The v2 taper is ``identity["hbi_config"]["variance_taper"]``
+    (:class:`gwpop_search.hbi.types.HBIConfig`); any other key naming a taper
+    outside the data block is also treated as a declaration (conservative).
+    """
 
     def walk(node) -> bool:
         if isinstance(node, Mapping):
@@ -223,11 +227,16 @@ def _taper_declared(identity: Mapping[str, object] | None) -> bool:
 
     if not identity:
         return False
+    hbi = identity.get("hbi_config") if isinstance(identity, Mapping) else None
+    if isinstance(hbi, Mapping) and hbi.get("variance_taper") not in (None, False):
+        return True
     return walk({k: v for k, v in identity.items() if k != "data"})
 
 
 def _log_likelihood_and_variance(sample, posterior, selection, model, hbi_config, *, batch_size, backend, require_support):
-    catalog = pad_catalog(posterior, selection, model, hbi_config=hbi_config)
+    # untapered ln L and sigma^2_lnL; the caller adds ln T(sigma^2) of each dataset
+    treatment = "weights_only" if getattr(hbi_config, "variance_taper", None) is not None else None
+    catalog = pad_catalog(posterior, selection, model, hbi_config=hbi_config, taper_treatment=treatment)
     evaluator = CatalogWeightEvaluator(catalog, model, sample.names, batch_size=batch_size, backend=backend)
     # with zero weights the evaluator does not refuse unsupported points: a variant
     # may legitimately give a primary-posterior point zero likelihood (r = 0)
@@ -286,6 +295,10 @@ def reweight_to_variant(
             identity, posterior, selection, population_model, sample.names, hbi_config,
             what=f"data-variant reweighting of {label or 'model'}",
         )
+    configured = getattr(hbi_config, "variance_taper", None)
+    if log_taper is None and configured is not None:
+        # the sampled likelihood's own taper, each dataset with its own sigma^2_lnL
+        log_taper = configured.log_taper
     if _taper_declared(identity) and log_taper is None:
         raise AnalysisInputError(
             "the sampled likelihood declares a variance taper; pass log_taper so that the primary "
@@ -361,6 +374,7 @@ def reweight_to_variant(
         "n_posterior_points": int(sample.n_points),
         "identity_verified": bool(verify_identity),
         "taper_applied": log_taper is not None,
+        "taper": None if configured is None else configured.to_dict(),
         "delta_log_evidence": delta_ln_z,
         "delta_log_evidence_mc_se": se_ln_z,
         "ess_primary": ess_root,

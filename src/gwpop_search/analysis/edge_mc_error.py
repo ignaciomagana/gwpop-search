@@ -295,6 +295,20 @@ def edge_mc_error(a: ModelMCWeights, b: ModelMCWeights) -> EdgeMCError:
     )
 
 
+def mc_taper_treatment(hbi_config) -> str | None:
+    """The recorded treatment of a variance-tapered likelihood (v2) in this module.
+
+    The formulas and the bootstrap describe the Monte-Carlo error and bias of
+    the untapered estimator ``ln Lhat`` averaged over the (tapered) posterior;
+    the fluctuation of ``ln T(sigma^2_hat)`` itself is neglected (first order,
+    see :data:`gwpop_search.analysis.terms.TAPER_TREATMENTS`). ``None`` without
+    a taper.
+    """
+    if getattr(hbi_config, "variance_taper", None) is None:
+        return None
+    return "first_order_untapered_mc"
+
+
 def compute_model_mc_weights(
     sample: WeightedPosterior,
     posterior,
@@ -324,7 +338,10 @@ def compute_model_mc_weights(
             what=f"MC weights of {label or 'model'}",
         )
     if catalog is None:
-        catalog = pad_catalog(posterior, selection, population_model, hbi_config=hbi_config)
+        catalog = pad_catalog(
+            posterior, selection, population_model, hbi_config=hbi_config,
+            taper_treatment=mc_taper_treatment(hbi_config),
+        )
     elif bool(catalog.raw_selection_use_observing_time) != bool(hbi_config.raw_selection_use_observing_time):
         # the identity check above cannot catch this: the mismatch is in the
         # supplied catalog, whose sel_log_factor carries (or omits) the
@@ -635,8 +652,10 @@ def bootstrap_edge_mc_error(
             )
     if catalogs is None:
         catalogs = (
-            pad_catalog(posterior, selection, model_a, hbi_config=hbi_config),
-            pad_catalog(posterior, selection, model_b, hbi_config=hbi_config),
+            pad_catalog(posterior, selection, model_a, hbi_config=hbi_config,
+                        taper_treatment=mc_taper_treatment(hbi_config)),
+            pad_catalog(posterior, selection, model_b, hbi_config=hbi_config,
+                        taper_treatment=mc_taper_treatment(hbi_config)),
         )
     cat_a, cat_b = catalogs
     if (cat_a.n_max, cat_a.m_pad) != (cat_b.n_max, cat_b.m_pad):
