@@ -13,14 +13,60 @@ class RateTreatment(str, Enum):
 
 @dataclass(frozen=True)
 class HBIConfig:
+    """Likelihood configuration.
+
+    ``variance_taper`` (a :class:`gwpop_search.hbi.taper.VarianceTaper`, a
+    mapping of its fields, or ``None``) multiplies the rate-marginalised shape
+    likelihood by a taper on its Monte-Carlo variance ``sigma^2_lnL``
+    (GWTC-5 / Callister & Farr 2024). ``None`` (the default) is the untapered
+    likelihood of every pre-v2 run; serializers omit the key then, so older
+    likelihood identities and configuration hashes are unchanged.
+    """
+
     rate_treatment: RateTreatment = RateTreatment.SHAPE
     raw_selection_use_observing_time: bool = True
     selection_chunk_size: int | None = None
+    variance_taper: Any = None
 
     def __post_init__(self) -> None:
+        from .taper import VarianceTaper
+
         object.__setattr__(self, "rate_treatment", RateTreatment(self.rate_treatment))
         if self.selection_chunk_size is not None and int(self.selection_chunk_size) <= 0:
             raise ValueError("selection_chunk_size must be positive when supplied")
+        taper = VarianceTaper.coerce(self.variance_taper)
+        if taper is not None and self.rate_treatment is not RateTreatment.SHAPE:
+            raise ValueError(
+                "the variance taper is defined for the rate-marginalised shape likelihood only"
+            )
+        object.__setattr__(self, "variance_taper", taper)
+
+    def to_dict(self) -> dict[str, object]:
+        """JSON form; ``variance_taper`` appears only when a taper is configured."""
+        payload: dict[str, object] = {
+            "rate_treatment": self.rate_treatment.value,
+            "raw_selection_use_observing_time": bool(self.raw_selection_use_observing_time),
+            "selection_chunk_size": (
+                None if self.selection_chunk_size is None else int(self.selection_chunk_size)
+            ),
+        }
+        if self.variance_taper is not None:
+            payload["variance_taper"] = self.variance_taper.to_dict()
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "HBIConfig":
+        payload = dict(payload)
+        known = {
+            "rate_treatment",
+            "raw_selection_use_observing_time",
+            "selection_chunk_size",
+            "variance_taper",
+        }
+        unknown = sorted(set(payload) - known)
+        if unknown:
+            raise ValueError(f"unknown HBI configuration field(s): {unknown}")
+        return cls(**payload)
 
 @dataclass(frozen=True)
 class ImportanceDiagnostics:
@@ -78,7 +124,13 @@ class CatalogTerms:
 
 @dataclass(frozen=True)
 class CatalogLikelihoodResult:
+    """``log_likelihood`` is the (tapered, when a variance taper is configured)
+    likelihood; the taper fields are ``None`` without a taper."""
+
     log_likelihood: float
     terms: CatalogTerms
     rate_treatment: RateTreatment
     rate: float | None = None
+    log_likelihood_untapered: float | None = None
+    taper_variance: float | None = None
+    log_taper: float | None = None

@@ -220,11 +220,43 @@ def shape_log_likelihood(
         terms.events.log_likelihood
         - posterior.n_events * terms.selection.log_exposure
      )
+    taper = cfg.variance_taper
+    if taper is None:
+        return CatalogLikelihoodResult(
+            log_likelihood=float(value),
+            terms=terms,
+            rate_treatment=RateTreatment.SHAPE,
+        )
+    variance = taper_variance(terms, n_events=posterior.n_events)
+    log_t = float(taper.log_taper(variance))
+    tapered = float(value) + log_t if np.isfinite(value) else float(value)
     return CatalogLikelihoodResult(
-        log_likelihood=float(value),
+        log_likelihood=float(tapered),
         terms=terms,
         rate_treatment=RateTreatment.SHAPE,
+        log_likelihood_untapered=float(value),
+        taper_variance=float(variance),
+        log_taper=log_t,
     )
+
+
+def taper_variance(terms: CatalogTerms, *, n_events: int) -> float:
+    """``sigma^2 = sum_i Var[ln I_i] + N^2 sum_k (xi_k/xi)^2 Var[ln xi_k]``.
+
+    As ``terms.variance.shape_log_likelihood_variance`` except that a
+    campaign without population support contributes zero (the diagnostic
+    reports NaN there); this is the variance the likelihood taper sees
+    (:mod:`gwpop_search.hbi.taper`).
+    """
+    log_exposure = terms.selection.log_exposure
+    selection_variance = 0.0
+    for campaign in terms.selection.campaigns:
+        if not np.isfinite(campaign.log_exposure):
+            continue
+        fraction = float(np.exp(campaign.log_exposure - log_exposure))
+        selection_variance += fraction**2 * float(campaign.diagnostics.variance_log_estimate)
+    value = float(terms.variance.event_variance) + n_events**2 * selection_variance
+    return float("inf") if np.isnan(value) else value
 
 
 def poisson_log_likelihood(
