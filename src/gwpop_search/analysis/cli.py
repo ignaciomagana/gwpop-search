@@ -14,6 +14,10 @@ Markdown for the model-comparison report).
 * ``analyze-sddr``               — Savage–Dickey cross-checks of eligible edges
 * ``analyze-model-comparison``   — the full report with claim criteria
 * ``run-psis-loo-influence``     — PSIS-LOO influence, optional exact-refit config
+* ``run-ppc``                    — v2 D6 posterior predictive checks with selection
+* ``reweight-data-variants``     — importance reweighting to the 249-event / SNR 9 / SNR 11
+  variants with ESS and the (operator-gated) rerun flag; never runs a sampler
+* ``v2-claim-table``             — the v2 claim table, criteria D1-D6
 """
 
 from __future__ import annotations
@@ -462,6 +466,180 @@ def _run_psis_loo_influence(args) -> None:
         print(f"written: {args.write_exact_refit_config} ({len(scenarios)} exact-refit scenario(s))")
 
 
+def _parse_columns(items) -> dict[str, str]:
+    from .ppc import DEFAULT_COLUMNS
+
+    columns = dict(DEFAULT_COLUMNS)
+    for item in items or []:
+        name, sep, column = str(item).partition("=")
+        if not sep or name not in columns or not column:
+            raise ValueError(f"--column expects OBSERVABLE=COLUMN with OBSERVABLE in {sorted(columns)}; got {item!r}")
+        columns[name] = column
+    return columns
+
+
+def _run_ppc(args) -> None:
+    _enable_x64()
+    from gwpop_search.models import compile_model_spec
+
+    from ._common import pool_dynesty_results
+    from .ppc import PPCConfig, posterior_predictive_check, ppc_report
+
+    posterior, selection = _load_data(args)
+    graph, grouped = _load_graph_and_results(args)
+    config = PPCConfig(
+        n_draws=args.n_draws, seed=args.seed, columns=_parse_columns(args.column),
+        batch_size=args.batch_size,
+    )
+    results = []
+    for model_hash, runs in sorted(grouped.items()):
+        sample = pool_dynesty_results(runs)
+        results.append(
+            posterior_predictive_check(
+                sample, posterior, selection, compile_model_spec(graph.by_hash[model_hash]),
+                config=config, label=model_hash,
+            )
+        )
+        summary = results[-1].summary()
+        print(f"{model_hash[:16]}: {summary['status']} failed={summary['failed_statistics']}")
+    _write(args.output, ppc_report(results, include_draws=not args.no_draws))
+
+
+def _import_callable(spec: str):
+    import importlib
+
+    module, sep, attr = str(spec).partition(":")
+    if not sep:
+        raise ValueError(f"--log-taper expects module:function; got {spec!r}")
+    return getattr(importlib.import_module(module), attr)
+
+
+def _run_reweight_data_variants(args) -> None:
+    _enable_x64()
+    import numpy as np
+
+    from gwpop_search.data import SelectionCatalog
+    from gwpop_search.models import compile_model_spec
+
+    from ._common import pool_dynesty_results, read_json
+    from .data_variants import (
+        RERUN_POLICY,
+        VARIANT_FORMAT,
+        make_data_variant,
+        reweight_to_variant,
+        variant_edge_log_bayes_factor,
+    )
+
+    posterior, selection = _load_data(args)
+    graph, grouped = _load_graph_and_results(args)
+    spec_path = Path(args.variants)
+    spec = read_json(spec_path)
+    base = spec_path.parent
+
+    def _path(value):
+        path = Path(value)
+        return path if path.is_absolute() else base / path
+
+    variants = []
+    for row in spec["variants"]:
+        override = None if not row.get("selection") else SelectionCatalog.from_hdf5(_path(row["selection"]))
+        mask = None if not row.get("selection_row_mask") else np.load(_path(row["selection_row_mask"]))
+        variants.append(
+            make_data_variant(
+                str(row["variant_id"]), posterior, selection,
+                drop_events=row.get("drop_events", ()), drop_o1o2_events=bool(row.get("drop_o1o2_events")),
+                selection_override=override, selection_row_mask=mask, description=str(row.get("description", "")),
+            )
+        )
+    log_taper = None if not args.log_taper else _import_callable(args.log_taper)
+    rows: dict[str, dict[str, dict]] = {}
+    for model_hash, runs in sorted(grouped.items()):
+        sample = pool_dynesty_results(runs)
+        model = compile_model_spec(graph.by_hash[model_hash])
+        for variant in variants:
+            out = reweight_to_variant(
+                sample, posterior, selection, model, variant, log_taper=log_taper,
+                label=model_hash, batch_size=args.batch_size, seed=args.seed,
+            )
+            rows.setdefault(model_hash, {})[variant.variant_id] = out
+            print(
+                f"{model_hash[:16]} {variant.variant_id}: ESS={out['ess_variant']:.0f} "
+                f"khat={out['pareto_khat']:.2f} dlnZ={out['delta_log_evidence']:+.3f} {out['status']}"
+            )
+    edges = []
+    for edge in spec.get("edges", []):
+        p, c = edge["parent_hash"], edge["child_hash"]
+        if p not in rows or c not in rows:
+            continue
+        for variant in variants:
+            edges.append({
+                "mutation_id": edge.get("mutation_id"),
+                **variant_edge_log_bayes_factor(
+                    rows[c][variant.variant_id], rows[p][variant.variant_id], float(edge["log_bayes_factor"])
+                ),
+            })
+    flagged = sorted(
+        {f"{h[:16]}:{v}" for h, per in rows.items() for v, r in per.items() if r["rerun_recommended"]}
+        | {f"edge {e['parent_hash'][:8]}->{e['child_hash'][:8]}:{e['variant_id']}" for e in edges if e["rerun_recommended"]}
+    )
+    _write(args.output, {
+        "format_version": VARIANT_FORMAT + "-report",
+        "graph_root_hash": graph.root_hash,
+        "rerun_policy": RERUN_POLICY,
+        "reruns_launched": 0,
+        "rerun_recommended_for": flagged,
+        "models": rows,
+        "edges": edges,
+    })
+    if flagged:
+        print("RERUN RECOMMENDED (operator-gated; nothing was launched): " + ", ".join(flagged))
+
+
+def _v2_claim_table(args) -> None:
+    from ._common import read_json
+    from .claims_v2 import build_claim_table, render_claims_markdown
+
+    report = read_json(args.report)
+    sddr = read_json(args.sddr) if args.sddr else None
+    prior = read_json(args.prior_sensitivity) if args.prior_sensitivity else None
+    reruns = read_json(args.d3_reruns)["rows"] if args.d3_reruns else []
+    taper2 = read_json(args.taper2)["rows"] if args.taper2 else []
+    alt = {}
+    for item in args.alt_root or []:
+        name, sep, path = str(item).partition("=")
+        if not sep:
+            raise ValueError(f"--alt-root expects NAME=PATH; got {item!r}")
+        alt[name] = read_json(path)
+    ppc = {}
+    for path in args.ppc or []:
+        payload = read_json(path)
+        models = payload.get("models", {payload.get("model_hash"): payload})
+        ppc.update(models)
+    loo = read_json(args.loo) if args.loo else None
+    taper_mass = None
+    if args.taper_mass:
+        taper_mass = {str(k): float(v) for k, v in read_json(args.taper_mass).items() if k != "format_version"}
+    labels = None
+    if args.atom_labels:
+        labels = {str(k): str(v) for k, v in read_json(args.atom_labels).items()}
+    graph = None
+    if args.graph:
+        from gwpop_search.grammar import load_model_graph
+
+        graph = load_model_graph(Path(args.graph))
+    table = build_claim_table(
+        report, sddr=sddr, prior_sensitivity=prior, d3_reruns=reruns, taper2=taper2, alt_roots=alt,
+        ppc=ppc, loo=loo, taper_mass=taper_mass, graph=graph, n_atoms_tried=args.n_atoms_tried,
+        atom_labels=labels,
+    )
+    _write(args.output, table)
+    markdown = render_claims_markdown(table)
+    if args.markdown:
+        Path(args.markdown).write_text(markdown)
+        print(f"written: {args.markdown}")
+    print(markdown)
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -576,3 +754,51 @@ def register_analysis_subcommands(subparsers) -> None:
     loo.add_argument("--refit-stop-fidelity", choices=("F3", "F4"), default="F3")
     loo.add_argument("--output", required=True)
     loo.set_defaults(func=_run_psis_loo_influence)
+
+    ppc = subparsers.add_parser(
+        "run-ppc",
+        help="v2 D6 posterior predictive checks (selection-aware, pre-declared statistics)",
+    )
+    _add_data_arguments(ppc)
+    _add_results_arguments(ppc)
+    ppc.add_argument("--n-draws", type=int, default=2000)
+    ppc.add_argument("--seed", type=int, default=0)
+    ppc.add_argument("--batch-size", type=int, default=16)
+    ppc.add_argument("--column", action="append",
+                     help="OBSERVABLE=COLUMN override (observables m1, q, chi_eff, z)")
+    ppc.add_argument("--no-draws", action="store_true", help="omit the per-draw statistics from the output")
+    ppc.add_argument("--output", required=True)
+    ppc.set_defaults(func=_run_ppc)
+
+    variants = subparsers.add_parser(
+        "reweight-data-variants",
+        help="importance-reweight posteriors to the 249-event / SNR 9 / SNR 11 variants "
+        "(ESS + rerun flag; never launches a rerun)",
+    )
+    _add_data_arguments(variants)
+    _add_results_arguments(variants)
+    variants.add_argument("--variants", required=True,
+                          help="JSON {variants: [{variant_id, drop_o1o2_events?, drop_events?, selection? "
+                          "| selection_row_mask?}], edges?: [{parent_hash, child_hash, log_bayes_factor}]}")
+    variants.add_argument("--log-taper", help="module:function of the likelihood's log variance taper")
+    variants.add_argument("--batch-size", type=int, default=16)
+    variants.add_argument("--seed", type=int, default=0)
+    variants.add_argument("--output", required=True)
+    variants.set_defaults(func=_run_reweight_data_variants)
+
+    claims = subparsers.add_parser("v2-claim-table", help="the v2 claim table (criteria D1-D6)")
+    claims.add_argument("--report", required=True, help="analyze-model-comparison JSON")
+    claims.add_argument("--graph", help="model graph JSON (keys depth-2 edges for D5)")
+    claims.add_argument("--sddr", help="analyze-sddr JSON")
+    claims.add_argument("--prior-sensitivity", help="analyze-prior-sensitivity JSON (checks the factor 2)")
+    claims.add_argument("--d3-reruns", help="JSON {rows: [...]} of halved/doubled-prior reruns")
+    claims.add_argument("--taper2", help="JSON {rows: [{parent_hash, child_hash, log_bayes_factor, valid}]}")
+    claims.add_argument("--alt-root", action="append", help="A1=<summary.json> / A2=<summary.json>")
+    claims.add_argument("--ppc", action="append", help="run-ppc output; repeatable")
+    claims.add_argument("--loo", help="run-psis-loo-influence output (reported, not binding)")
+    claims.add_argument("--taper-mass", help="JSON {model_hash: posterior mass fraction inside the taper}")
+    claims.add_argument("--atom-labels", help="JSON {mutation_id: plan atom label}")
+    claims.add_argument("--n-atoms-tried", type=int, help="override the trials count (default: evaluated edges)")
+    claims.add_argument("--output", required=True)
+    claims.add_argument("--markdown")
+    claims.set_defaults(func=_v2_claim_table)

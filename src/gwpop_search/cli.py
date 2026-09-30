@@ -1203,6 +1203,43 @@ def _write_nearby_baseline_config(args: argparse.Namespace) -> None:
     )
 
 
+def _write_v2_alt_root_config(args: argparse.Namespace) -> None:
+    from .grammar import load_model_spec
+    from .validation import (
+        NearbyBaselineSuiteSpec,
+        save_nearby_baseline_suite_spec,
+        v2_alt_root_scenario,
+    )
+
+    chi_eff = {}
+    for item in args.chi_eff_atom or []:
+        label, sep, mutation_id = str(item).partition("=")
+        if not sep or not label or not mutation_id:
+            raise ValueError(f"--chi-eff-atom expects LABEL=MUTATION_ID; got {item!r}")
+        if label in chi_eff:
+            raise ValueError(f"--chi-eff-atom {label} given twice")
+        chi_eff[label] = tuple(x for x in mutation_id.split(",") if x) if "," in mutation_id else mutation_id
+    candidates = [tuple(x for x in str(item).split(",") if x) for item in args.candidate or []]
+    scenario = v2_alt_root_scenario(
+        args.scenario_id,
+        load_model_spec(Path(args.root_model)),
+        candidate_paths=candidates,
+        chi_eff_mutation_ids=chi_eff,
+        mutation_catalogue_name=args.mutation_catalogue,
+        note=args.note or "",
+    )
+    spec = NearbyBaselineSuiteSpec(
+        scenarios=(scenario,),
+        config=_nearby_baseline_config_from_args(args),
+    )
+    save_nearby_baseline_suite_spec(Path(args.output), spec)
+    print(
+        "v2 D5 alternative-root config written: "
+        f"{args.output} scenario={args.scenario_id} paths={len(scenario.mutation_paths)} "
+        f"models<={scenario.max_models}"
+    )
+
+
 def _run_nearby_baseline_suite(args: argparse.Namespace) -> None:
     from .grammar import load_model_graph
     from .production import (
@@ -2375,6 +2412,32 @@ def build_parser() -> argparse.ArgumentParser:
     nearby_template.add_argument("--output", required=True)
     _add_stress_arguments(nearby_template)
     nearby_template.set_defaults(func=_write_nearby_baseline_config)
+
+    v2_alt = subparsers.add_parser(
+        "write-v2-alt-root-config",
+        help=(
+            "write a v2 D5 alternative-root scenario restricted to the root, the "
+            "candidate edges and all 10 chi_eff atoms (writes a config only; runs nothing)"
+        ),
+    )
+    v2_alt.add_argument("--scenario-id", required=True)
+    v2_alt.add_argument("--root-model", required=True, help="alternative root model spec JSON")
+    v2_alt.add_argument(
+        "--candidate",
+        action="append",
+        help="candidate mutation path: 'ID' (depth 1) or 'A,B' (B applied to root+A); repeatable",
+    )
+    v2_alt.add_argument(
+        "--chi-eff-atom",
+        action="append",
+        help="LABEL=MUTATION_ID (or LABEL=A,B for a two-step atom) for each of C1-C6, "
+        "S1-S4 (all ten required)",
+    )
+    v2_alt.add_argument("--mutation-catalogue", default="default")
+    v2_alt.add_argument("--note")
+    v2_alt.add_argument("--output", required=True)
+    _add_stress_arguments(v2_alt)
+    v2_alt.set_defaults(func=_write_v2_alt_root_config)
 
     nearby_run = subparsers.add_parser(
         "run-nearby-baseline-suite",

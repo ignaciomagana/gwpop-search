@@ -583,6 +583,33 @@ class CatalogWeightEvaluator:
 
     # -- public -------------------------------------------------------------
 
+    def log_weights(self, X) -> tuple[np.ndarray, np.ndarray]:
+        """Raw per-sample log weights at ``X`` ``[K, ndim]``.
+
+        Returns ``(log w_ij [K, N, n_max], log u_m [K, M_pad])`` as NumPy
+        arrays: ``log w_ij = log p_pop(theta_ij) - log pi_ij`` (``-inf`` on
+        padding) and ``log u_m = log p_pop(theta_m) - log p_draw(theta_m) +
+        log(T_k/N_k)`` (``-inf`` on padding). NaN/+inf raises
+        :class:`~gwpop_search.hbi.PopulationDensityError`. Used by the
+        posterior predictive checks, which resample both.
+        """
+        X = _check_block(X, self.ndim, self.names)
+        if self.backend == "numpy":
+            lw_e, lu, invalid = self._numpy_log_weights(X)
+            self._raise_invalid(X, invalid)
+            return np.asarray(lw_e, dtype=np.float64), np.asarray(lu, dtype=np.float64)
+        fn = self._jitted("log_weights")
+        padded, n_blocks = _pad_rows(X, self.batch_size)
+        lw_out, lu_out = [], []
+        for b in range(n_blocks):
+            Xb = padded[b * self.batch_size : (b + 1) * self.batch_size]
+            lw_e, lu, invalid = self._jax.device_get(fn(self._jnp.asarray(Xb), self._data))
+            self._raise_invalid(Xb, invalid)
+            lw_out.append(np.asarray(lw_e, dtype=np.float64))
+            lu_out.append(np.asarray(lu, dtype=np.float64))
+        m = X.shape[0]
+        return np.concatenate(lw_out)[:m], np.concatenate(lu_out)[:m]
+
     def moments(self, X, W) -> dict[str, np.ndarray]:
         """Sum :func:`weight_moments` over ``X`` ``[K, ndim]`` with weights ``W`` ``[K]``.
 
