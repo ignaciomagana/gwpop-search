@@ -11,10 +11,19 @@ import re
 from typing import Mapping
 
 from gwpop_search.grammar import (
+    DEFAULT_MUTATIONS,
+    FOLLOWUP_MUTATIONS,
     ModelGraph,
     ModelSpec,
     enumerate_model_graph,
 )
+from gwpop_search.grammar.enumerate import ModelEdge
+from gwpop_search.grammar.mutations import (
+    InapplicableMutation,
+    MutationSpec,
+    apply_mutation,
+)
+from gwpop_search.grammar.paths import graph_edge_keys, path_edge_key
 from gwpop_search.inference.fidelity import DeterministicHBIEvaluator
 from gwpop_search.inference.numpyro import _code_identity
 from gwpop_search.production import ProductionCampaignConfig
@@ -36,7 +45,51 @@ from .stress import edge_log_bayes_factors
 
 _ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 SUITE_FORMAT = "gwpop-search-nearby-baseline-suite-1.1"
-_READABLE_SUITE_FORMATS = ("gwpop-search-nearby-baseline-suite-1.0", SUITE_FORMAT)
+#: written when any scenario is restricted to declared mutation paths (a 1.1
+#: reader would silently enumerate the full neighbourhood instead)
+RESTRICTED_SUITE_FORMAT = "gwpop-search-nearby-baseline-suite-1.2"
+_READABLE_SUITE_FORMATS = (
+    "gwpop-search-nearby-baseline-suite-1.0",
+    SUITE_FORMAT,
+    RESTRICTED_SUITE_FORMAT,
+)
+
+#: Named mutation catalogues a restricted scenario resolves its mutation ids
+#: against. Grammar extensions (e.g. the v2 atoms) register theirs with
+#: :func:`register_mutation_catalogue`; the name is stored in the scenario so a
+#: saved suite is replayable.
+MUTATION_CATALOGUES: dict[str, tuple[MutationSpec, ...]] = {
+    "default": tuple(DEFAULT_MUTATIONS),
+    "default+followup": tuple(DEFAULT_MUTATIONS) + tuple(FOLLOWUP_MUTATIONS),
+}
+
+#: the v2 chi_eff atoms every D5 alternative root must run (plan 2026-09-30)
+V2_CHI_EFF_ATOMS = ("C1", "C2", "C3", "C4", "C5", "C6", "S1", "S2", "S3", "S4")
+
+
+def register_mutation_catalogue(name: str, mutations) -> None:
+    """Register (or identically re-register) a named mutation catalogue."""
+    name = str(name)
+    if not name or not _ID.match(name.replace("+", "_")):
+        raise ValueError("catalogue name must contain only letters, numbers, _, ., -, +")
+    items = tuple(mutations)
+    ids = [item.mutation_id for item in items]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"catalogue {name!r} has duplicate mutation ids")
+    existing = MUTATION_CATALOGUES.get(name)
+    if existing is not None and existing != items:
+        raise ValueError(f"mutation catalogue {name!r} is already registered with different mutations")
+    MUTATION_CATALOGUES[name] = items
+
+
+def mutation_catalogue(name: str) -> dict[str, MutationSpec]:
+    try:
+        items = MUTATION_CATALOGUES[str(name)]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown mutation catalogue {name!r}; registered: {sorted(MUTATION_CATALOGUES)}"
+        ) from exc
+    return {item.mutation_id: item for item in items}
 PLAN_FORMAT = "gwpop-search-nearby-baseline-plan-1.1"
 SUMMARY_FORMAT = "gwpop-search-nearby-baseline-summary-1.1"
 MODEL_EVALUATION_FORMAT = "gwpop-search-nearby-model-evaluation-1.0"
@@ -50,6 +103,12 @@ class NearbyBaselineScenario:
     max_depth: int = 1
     max_models: int = 20
     note: str = ""
+    #: ``None``: the full depth-``max_depth`` neighbourhood of the root (the
+    #: v1 behaviour). Otherwise the scenario runs exactly the root plus the
+    #: nodes reached by these ordered mutation paths (and their prefixes),
+    #: e.g. the v2 D5 restriction "root + candidates + all 10 chi_eff atoms".
+    mutation_paths: tuple[tuple[str, ...], ...] | None = None
+    mutation_catalogue: str = "default"
 
     def __post_init__(self) -> None:
         if not self.scenario_id or not _ID.match(self.scenario_id):
@@ -60,27 +119,59 @@ class NearbyBaselineScenario:
             raise ValueError("max_depth cannot be negative")
         if self.max_models <= 0:
             raise ValueError("max_models must be positive")
+        if self.mutation_paths is not None:
+            paths = []
+            for path in self.mutation_paths:
+                path = (path,) if isinstance(path, str) else tuple(str(x) for x in path)
+                if not path or len(set(path)) != len(path):
+                    raise ValueError(f"mutation path {path!r} must be non-empty without repeats")
+                if len(path) > self.max_depth:
+                    raise ValueError(
+                        f"mutation path {path!r} is deeper than max_depth={self.max_depth}"
+                    )
+                paths.append(path)
+            if not paths:
+                raise ValueError("a restricted scenario needs at least one mutation path")
+            if len(set(paths)) != len(paths):
+                raise ValueError("mutation paths must be unique")
+            object.__setattr__(self, "mutation_paths", tuple(sorted(paths)))
+            mutation_catalogue(self.mutation_catalogue)  # must be registered
+
+    @property
+    def restricted(self) -> bool:
+        return self.mutation_paths is not None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "scenario_id": self.scenario_id,
             "root_spec": self.root_spec.to_dict(),
             "max_depth": int(self.max_depth),
             "max_models": int(self.max_models),
             "note": self.note,
         }
+        if self.mutation_paths is not None:
+            # written only for restricted scenarios, so unrestricted suites keep
+            # their 1.1 serialisation (and plan) byte for byte
+            payload["mutation_paths"] = [list(path) for path in self.mutation_paths]
+            payload["mutation_catalogue"] = self.mutation_catalogue
+        return payload
 
     @classmethod
     def from_dict(
         cls,
         payload: Mapping[str, object],
     ) -> "NearbyBaselineScenario":
+        paths = payload.get("mutation_paths")
         return cls(
             scenario_id=str(payload["scenario_id"]),
             root_spec=ModelSpec.from_dict(dict(payload["root_spec"])),
             max_depth=int(payload.get("max_depth", 1)),
             max_models=int(payload.get("max_models", 20)),
             note=str(payload.get("note", "")),
+            mutation_paths=(
+                None if paths is None else tuple(tuple(str(x) for x in p) for p in paths)
+            ),
+            mutation_catalogue=str(payload.get("mutation_catalogue", "default")),
         )
 
 
@@ -120,9 +211,16 @@ class NearbyBaselineSuiteSpec:
     def __post_init__(self) -> None:
         if self.format_version not in _READABLE_SUITE_FORMATS:
             raise ValueError("unsupported nearby-baseline suite format")
-        # 1.0 specs are read (their stop fidelity is re-validated) and written as 1.1
-        object.__setattr__(self, "format_version", SUITE_FORMAT)
         scenarios = tuple(self.scenarios)
+        # 1.0 specs are read (their stop fidelity is re-validated) and written as
+        # 1.1; a suite with a restricted scenario is written as 1.2
+        object.__setattr__(
+            self,
+            "format_version",
+            RESTRICTED_SUITE_FORMAT
+            if any(item.restricted for item in scenarios)
+            else SUITE_FORMAT,
+        )
         if not scenarios:
             raise ValueError("nearby-baseline suite requires scenarios")
         ids = [item.scenario_id for item in scenarios]
@@ -296,17 +394,172 @@ def _write_plan_once(path: Path, payload: dict[str, object]) -> None:
         path.write_text(json.dumps(payload, sort_keys=True, indent=2))
 
 
+def restricted_model_graph(
+    root: ModelSpec,
+    paths,
+    mutations: Mapping[str, MutationSpec],
+    *,
+    max_models: int | None = None,
+) -> tuple[ModelGraph, tuple[str, ...]]:
+    """Root plus the nodes reached by ordered mutation ``paths`` (and their prefixes).
+
+    Returns the graph and the edge keys (:mod:`gwpop_search.grammar.paths`) of
+    the paths whose mutations are inapplicable on this root (for example the
+    beta-per-component atom on a root that already has it); those paths are
+    skipped, not failed. Unknown mutation ids raise.
+    """
+    nodes: list[ModelSpec] = [root]
+    by_hash: dict[str, ModelSpec] = {root.model_hash: root}
+    depths: dict[str, int] = {root.model_hash: 0}
+    edges: list[ModelEdge] = []
+    edge_keys: set[tuple[str, str, str]] = set()
+    inapplicable: list[str] = []
+    ordered = sorted({tuple(p) for p in paths}, key=lambda p: (len(p), p))
+    for path in ordered:
+        unknown = [m for m in path if m not in mutations]
+        if unknown:
+            raise ValueError(f"mutation path {path} uses unknown mutation id(s) {unknown}")
+    for path in ordered:
+        parent = root
+        for depth, mutation_id in enumerate(path, start=1):
+            try:
+                child = apply_mutation(parent, mutations[mutation_id])
+            except InapplicableMutation:
+                inapplicable.append(path_edge_key(path[:depth]))
+                break
+            if child.model_hash not in by_hash:
+                if max_models is not None and len(nodes) >= int(max_models):
+                    raise ValueError(
+                        f"restricted graph needs more than max_models={max_models} models"
+                    )
+                by_hash[child.model_hash] = child
+                depths[child.model_hash] = depth
+                nodes.append(child)
+            key = (parent.model_hash, child.model_hash, mutation_id)
+            if key not in edge_keys:
+                edge_keys.add(key)
+                edges.append(
+                    ModelEdge(
+                        parent_hash=parent.model_hash,
+                        child_hash=child.model_hash,
+                        mutation_id=mutation_id,
+                        depth=depth,
+                    )
+                )
+            parent = child
+    graph = ModelGraph(
+        root_hash=root.model_hash,
+        nodes=tuple(nodes),
+        edges=tuple(edges),
+        depths=depths,
+    )
+    return graph, tuple(sorted(set(inapplicable)))
+
+
 def nearby_scenario_graph(scenario: NearbyBaselineScenario) -> ModelGraph:
     """The alternative-root graph neighbourhood one scenario searches.
 
     The suite and the per-model evaluation both enumerate it here, so they
     cannot disagree on which models (and which model hashes) a scenario holds.
+    A restricted scenario (``mutation_paths``) holds exactly the root and the
+    nodes of its declared paths.
     """
+    if scenario.restricted:
+        graph, _ = restricted_model_graph(
+            scenario.root_spec,
+            scenario.mutation_paths,
+            mutation_catalogue(scenario.mutation_catalogue),
+            max_models=scenario.max_models,
+        )
+        return graph
     return enumerate_model_graph(
         scenario.root_spec,
         max_depth=scenario.max_depth,
         max_models=scenario.max_models,
     )
+
+
+def nearby_scenario_inapplicable_paths(scenario: NearbyBaselineScenario) -> tuple[str, ...]:
+    """Edge keys of a restricted scenario's paths that do not apply to its root."""
+    if not scenario.restricted:
+        return ()
+    _, inapplicable = restricted_model_graph(
+        scenario.root_spec,
+        scenario.mutation_paths,
+        mutation_catalogue(scenario.mutation_catalogue),
+        max_models=scenario.max_models,
+    )
+    return inapplicable
+
+
+def v2_alt_root_scenario(
+    scenario_id: str,
+    root_spec: ModelSpec,
+    *,
+    candidate_paths,
+    chi_eff_mutation_ids: Mapping[str, object],
+    mutation_catalogue_name: str = "default",
+    note: str = "",
+) -> NearbyBaselineScenario:
+    """The v2 D5 scenario: an alternative root + the candidates + all 10 chi_eff atoms.
+
+    ``chi_eff_mutation_ids`` maps every plan atom label of
+    :data:`V2_CHI_EFF_ATOMS` (C1-C6, S1-S4) to its mutation id, or to an
+    ordered mutation path when the grammar builds the atom in more than one
+    step (e.g. a mixture followed by its fraction law); all ten are required
+    (plan 2026-09-30, D5). ``candidate_paths`` are the ordered
+    mutation paths of the candidate edges from the searched graph
+    (``"<id>"`` for a depth-1 atom, ``(a, b)`` for the depth-2 edge applying
+    ``b`` to the root + ``a`` node). Nothing else of the alternative root's
+    neighbourhood is run.
+    """
+    labels = sorted(chi_eff_mutation_ids)
+    if tuple(sorted(V2_CHI_EFF_ATOMS)) != tuple(labels):
+        raise ValueError(
+            f"D5 needs exactly the chi_eff atoms {V2_CHI_EFF_ATOMS}; got {labels}"
+        )
+    def _as_path(value) -> tuple[str, ...]:
+        return (str(value),) if isinstance(value, str) else tuple(str(x) for x in value)
+
+    atom_paths = [_as_path(chi_eff_mutation_ids[label]) for label in V2_CHI_EFF_ATOMS]
+    if len(set(atom_paths)) != len(atom_paths):
+        raise ValueError("the chi_eff atoms must map to distinct mutation paths")
+    paths: set[tuple[str, ...]] = set()
+    for path in [*atom_paths, *(_as_path(p) for p in candidate_paths)]:
+        if not path:
+            raise ValueError("empty mutation path")
+        paths.add(path)
+        paths.update(path[:k] for k in range(1, len(path)))
+    depth = max(len(p) for p in paths)
+    return NearbyBaselineScenario(
+        scenario_id=scenario_id,
+        root_spec=root_spec,
+        max_depth=depth,
+        max_models=1 + len(paths),
+        note=note or "v2 D5: alternative root + candidates + all 10 chi_eff atoms",
+        mutation_paths=tuple(sorted(paths)),
+        mutation_catalogue=mutation_catalogue_name,
+    )
+
+
+def root_edge_log_bayes_factors(
+    graph: ModelGraph,
+    evidences: Mapping[str, ModelEvidence],
+) -> dict[str, float]:
+    """Signed ``ln BF`` of every evaluated edge, keyed by its root-independent edge key."""
+    keys = graph_edge_keys(graph)
+    out: dict[str, float] = {}
+    for edge in graph.edges:
+        if edge.parent_hash not in evidences or edge.child_hash not in evidences:
+            continue
+        key = keys.get((edge.parent_hash, edge.child_hash, edge.mutation_id))
+        if key is None:
+            continue
+        out[key] = float(
+            evidences[edge.child_hash].log_evidence
+            - evidences[edge.parent_hash].log_evidence
+        )
+    return dict(sorted(out.items()))
 
 
 def nearby_scenario_model_run_dir(
@@ -568,6 +821,15 @@ def run_nearby_baseline_suite(
             "reference_comparison": comparison,
             "scientific_scoring": scoring,
         }
+        if scenario.restricted:
+            # the signed per-edge ln BF the v2 claim table's D5 reads
+            row["root_edge_log_bayes_factors"] = root_edge_log_bayes_factors(
+                graph,
+                evidence,
+            )
+            row["inapplicable_paths"] = list(
+                nearby_scenario_inapplicable_paths(scenario)
+            )
         (scenario_root / "nearby_baseline_summary.json").write_text(
             json.dumps(row, sort_keys=True, indent=2)
         )
