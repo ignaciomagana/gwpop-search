@@ -29,6 +29,18 @@ class MutationSpec:
     #: family change they are part of the one atomic axis, not extra mutations.
     #: Empty for every DEFAULT_MUTATIONS entry.
     companion_options: Mapping[str, JsonValue] = field(default_factory=dict)
+    #: ``change_family`` only: options written over the new family's defaults
+    #: (e.g. the v2 mass-dependent mixture fraction). Part of the one family axis.
+    family_options: Mapping[str, JsonValue] = field(default_factory=dict)
+    #: ``change_family`` only: parent-block options copied into the new block
+    #: when the new family declares them (e.g. the v2 chi_eff correlation
+    #: switches, so a spin-shape change keeps an already-added correlation and
+    #: two-atom compositions commute). Their priors are inherited unchanged.
+    carry_options: tuple[str, ...] = ()
+    #: The mutation applies only if the block family is one of these (empty: no
+    #: restriction beyond ``requires_family``). Used by the v2 correlation atoms,
+    #: which apply to every v2 chi_eff family.
+    requires_any_family: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.mutation_id:
@@ -43,6 +55,12 @@ class MutationSpec:
             raise ValueError("companion_options require a set_option mutation")
         if self.option is not None and self.option in self.companion_options:
             raise ValueError("companion_options cannot repeat the mutated option")
+        if (self.family_options or self.carry_options) and self.operation != "change_family":
+            raise ValueError("family_options/carry_options require a change_family mutation")
+        if set(self.family_options) & set(self.carry_options):
+            raise ValueError("an option cannot be both set and carried")
+        object.__setattr__(self, "carry_options", tuple(self.carry_options))
+        object.__setattr__(self, "requires_any_family", tuple(self.requires_any_family))
 
     @property
     def axis(self) -> str:
@@ -63,6 +81,11 @@ def apply_mutation(
             f"{mutation.mutation_id} requires {mutation.block} family "
             f"{mutation.requires_family!r}, found {block.family!r}"
         )
+    if mutation.requires_any_family and block.family not in mutation.requires_any_family:
+        raise InapplicableMutation(
+            f"{mutation.mutation_id} requires {mutation.block} family in "
+            f"{list(mutation.requires_any_family)}, found {block.family!r}"
+        )
 
     if mutation.operation == "change_family":
         family = str(mutation.value)
@@ -71,6 +94,19 @@ def apply_mutation(
                 f"{mutation.mutation_id} would leave family unchanged"
             )
         child_block = registry.block(mutation.block, family)
+        if mutation.family_options or mutation.carry_options:
+            definition = registry.definition(mutation.block, family)
+            declared = (
+                set(definition.default_options)
+                | set(definition.option_choices)
+                | set(definition.optional_options)
+            )
+            options = dict(child_block.options)
+            for key in mutation.carry_options:
+                if key in block.options and key in declared:
+                    options[str(key)] = block.options[key]
+            options.update({str(k): v for k, v in mutation.family_options.items()})
+            child_block = type(child_block)(family=family, options=options)
     else:
         options = dict(block.options)
         if options.get(mutation.option) == mutation.value:

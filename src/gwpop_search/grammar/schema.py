@@ -120,6 +120,15 @@ class ModelSpec:
     Sampler settings, datasets, compute resources, and model priors do not belong
     here. Hyperpriors do: changing a parameter prior changes the evidence-defined
     scientific model and therefore changes the model hash.
+
+    ``support`` holds the model-wide support and normalisation context that
+    defines the density (redshift ceiling ``zmax``, pairing floor ``q_floor``,
+    mass floor ``mmin`` and ceiling ``mmax``, normalisation grids, cosmology,
+    sky convention). It is part of the hash when non-empty. It is empty for
+    every v1 (``phase3`` / ``gwtc5-v1``) model, whose canonical form and hash are
+    unchanged; the v1 compiler then applies its historical defaults. Every v2
+    model must carry it (see ``grammar.v2_structure``): v2 densities have no
+    hidden support defaults.
     """
 
     mass: BlockSpec
@@ -129,6 +138,7 @@ class ModelSpec:
     mixture: BlockSpec
     priors: Mapping[str, PriorConfig] = field(default_factory=dict)
     schema_version: str = "1.0"
+    support: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.schema_version != "1.0":
@@ -142,15 +152,20 @@ class ModelSpec:
             for name, prior in self.priors.items()
         }
         object.__setattr__(self, "priors", priors)
+        object.__setattr__(self, "support", _canonicalize(dict(self.support)))
 
     def structure_dict(self) -> dict[str, JsonValue]:
-        return {
+        payload: dict[str, JsonValue] = {
             "schema_version": self.schema_version,
             "blocks": {
                 name: getattr(self, name).to_dict()
                 for name in _BLOCK_NAMES
             },
         }
+        # Omitted when empty so that every v1 canonical form (and hash) is unchanged.
+        if self.support:
+            payload["support"] = _canonicalize(self.support)
+        return payload
 
     def canonical_dict(self) -> dict[str, JsonValue]:
         payload = self.structure_dict()
@@ -193,6 +208,7 @@ class ModelSpec:
                 for name, prior in dict(payload.get("priors", {})).items()
             },
             schema_version=str(payload.get("schema_version", "1.0")),
+            support=dict(payload.get("support", {})),
         )
 
     @classmethod
@@ -207,6 +223,9 @@ def structural_diff_axes(parent: ModelSpec, child: ModelSpec) -> tuple[str, ...]
     family-default options do not count as additional mutations.
     """
     axes: list[str] = []
+    for key in sorted(set(parent.support) | set(child.support)):
+        if parent.support.get(key) != child.support.get(key):
+            axes.append(f"support.{key}")
     for block_name in _BLOCK_NAMES:
         a = getattr(parent, block_name)
         b = getattr(child, block_name)
