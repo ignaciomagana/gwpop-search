@@ -452,6 +452,13 @@ def pool_dynesty_results(
     weights = np.concatenate(weights)
     runs = np.concatenate(runs)
     weights = weights / weights.sum()
+    # A weight in the subnormal range (~5e-324) passes the ``w > 0`` filter above but rounds to
+    # exactly 0.0 once divided by the number of runs. Such points carry no mass and are dropped
+    # like plateau points; otherwise WeightedPosterior rejects the whole pooled sample.
+    nonzero = weights > 0.0
+    if not np.all(nonzero):
+        points, weights, runs = points[nonzero], weights[nonzero], runs[nonzero]
+        weights = weights / weights.sum()
     source = "dynesty_pooled"
     metadata: dict[str, object] = {"n_points_weighted": int(points.shape[0])}
     if n_draws is not None:
