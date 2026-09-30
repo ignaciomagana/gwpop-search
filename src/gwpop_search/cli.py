@@ -805,6 +805,277 @@ def _run_exact_null_index(args: argparse.Namespace) -> None:
     print(json.dumps(result.to_dict(), sort_keys=True, indent=2))
 
 
+def _run_null_model_evaluation(args: argparse.Namespace) -> None:
+    """Pre-compute one model's evidence rung for one exact-null replay.
+
+    Execution-only: the record is printed and written into the replay's own
+    artifact tree, never to a state database (the replay writes its own rows
+    when it reloads this run). The seed, dataset identity and run directory
+    are the replay's; there is deliberately no seed override.
+    """
+    from .nulls import run_null_model_evaluation
+
+    (
+        _,
+        campaign,
+        graph,
+        config,
+        posterior,
+        selection,
+        dataset_identity,
+    ) = _load_exact_null_cli_context(args, load_data=True)
+    payload = run_null_model_evaluation(
+        Path(args.root),
+        graph,
+        campaign,
+        config,
+        null_index=args.null_index,
+        model_hash=args.model_hash,
+        production_posterior=posterior,
+        production_selection=selection,
+        production_dataset_identity=dataset_identity,
+    )
+    print(json.dumps(payload, sort_keys=True, indent=2))
+
+
+def _run_stress_model_evaluation(args: argparse.Namespace) -> None:
+    """Pre-compute one model's F3 evidence for one event-drop scenario.
+
+    The event-drop counterpart of ``run-null-model-evaluation``: nothing is
+    written to a state database and no ``stress_plan.json`` is written, so the
+    suite still freezes the full scenario list itself.
+    """
+    from .grammar import load_model_graph
+    from .production import (
+        load_dataset_manifest,
+        load_frozen_dataset,
+        load_production_campaign,
+        validate_production_freeze,
+    )
+    from .validation import (
+        load_event_stress_suite_spec,
+        run_stress_model_evaluation,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    freeze = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    if not freeze["valid"]:
+        raise ValueError("production freeze validation failed")
+
+    spec = load_event_stress_suite_spec(Path(args.stress_config))
+    scenarios = {item.scenario_id: item for item in spec.scenarios}
+    if args.scenario_id not in scenarios:
+        raise ValueError(
+            f"unknown scenario id {args.scenario_id!r}; the suite declares "
+            f"{sorted(scenarios)}"
+        )
+
+    posterior, selection = load_frozen_dataset(
+        manifest,
+        data_base_dir=Path(args.base_dir),
+    )
+    payload = run_stress_model_evaluation(
+        Path(args.root),
+        posterior,
+        selection,
+        load_model_graph(Path(args.graph)),
+        campaign,
+        base_dataset_identity=manifest.manifest_hash,
+        scenario=scenarios[args.scenario_id],
+        model_hash=args.model_hash,
+    )
+    print(json.dumps(payload, sort_keys=True, indent=2))
+
+
+def _list_nearby_scenario_models(args: argparse.Namespace) -> None:
+    """Print the models a nearby-baseline scenario evaluates (no data, no sampling).
+
+    Default output: one model hash per line, in the order the suite evaluates
+    them (sorted by hash; every graph model is an F3 candidate, and the ones
+    that pass F0 inside the suite are evaluated at F3). ``--json`` prints the
+    full listing (depth, root mutation ids, F3 budget check).
+    """
+    from .validation import load_nearby_baseline_suite_spec, nearby_scenario_models
+
+    suite = load_nearby_baseline_suite_spec(Path(args.nearby_config))
+    scenarios = list(suite.scenarios)
+    if args.scenario_id is not None:
+        scenarios = [item for item in scenarios if item.scenario_id == args.scenario_id]
+        if not scenarios:
+            raise ValueError(
+                f"unknown scenario id {args.scenario_id!r}; the suite declares "
+                f"{sorted(item.scenario_id for item in suite.scenarios)}"
+            )
+    listings = [nearby_scenario_models(item, suite.config) for item in scenarios]
+    if args.json:
+        print(json.dumps({"scenarios": listings}, sort_keys=True, indent=2))
+        return
+    for listing in listings:
+        for row in listing["models"]:
+            if len(listings) > 1:
+                print(f"{listing['scenario_id']} {row['model_hash']}")
+            else:
+                print(row["model_hash"])
+
+
+def _run_nearby_model_evaluation(args: argparse.Namespace) -> None:
+    """Pre-compute one model's F3 evidence for one nearby-baseline scenario.
+
+    The alternative-root counterpart of ``run-stress-model-evaluation``:
+    nothing is written to a state database and no ``nearby_baseline_plan.json``
+    is written; ``run-nearby-baseline-suite`` later reloads the run.
+    """
+    from .production import (
+        load_dataset_manifest,
+        load_frozen_dataset,
+        load_production_campaign,
+        validate_production_freeze,
+    )
+    from .validation import (
+        load_nearby_baseline_suite_spec,
+        run_nearby_model_evaluation,
+    )
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    freeze = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    if not freeze["valid"]:
+        raise ValueError("production freeze validation failed")
+
+    suite = load_nearby_baseline_suite_spec(Path(args.nearby_config))
+    scenarios = {item.scenario_id: item for item in suite.scenarios}
+    if args.scenario_id not in scenarios:
+        raise ValueError(
+            f"unknown scenario id {args.scenario_id!r}; the suite declares "
+            f"{sorted(scenarios)}"
+        )
+
+    posterior, selection = load_frozen_dataset(
+        manifest,
+        data_base_dir=Path(args.base_dir),
+    )
+    payload = run_nearby_model_evaluation(
+        Path(args.root),
+        posterior,
+        selection,
+        campaign,
+        base_dataset_identity=manifest.manifest_hash,
+        scenario=scenarios[args.scenario_id],
+        model_hash=args.model_hash,
+    )
+    print(json.dumps(payload, sort_keys=True, indent=2))
+
+
+def _export_model_spec(args: argparse.Namespace) -> None:
+    """Write the declarative spec of one frozen-graph model (optionally re-priored).
+
+    ``--set-prior NAME FAMILY A B`` replaces one declared hyperprior
+    (uniform/log_uniform: A=low B=high; normal: A=loc B=scale), so a
+    prior-widened variant is derived from the exact production spec.
+    """
+    from .grammar import load_model_graph, save_model_spec
+    from .production import model_spec_diff, with_prior
+
+    graph = load_model_graph(Path(args.graph))
+    if args.model_hash not in graph.by_hash:
+        raise ValueError(f"unknown graph model hash {args.model_hash!r}")
+    parent = graph.by_hash[args.model_hash]
+    spec = parent
+    for name, family, first, second in args.set_prior or []:
+        family = str(family).strip().lower()
+        keys = ("loc", "scale") if family == "normal" else ("low", "high")
+        spec = with_prior(
+            spec,
+            name,
+            family,
+            {keys[0]: float(first), keys[1]: float(second)},
+        )
+    if args.output is None:
+        print(json.dumps(spec.to_dict(), sort_keys=True, indent=2))
+        return
+    save_model_spec(Path(args.output), spec)
+    print(
+        json.dumps(
+            {
+                "output": str(args.output),
+                "model_hash": spec.model_hash,
+                "derived_from": model_spec_diff(parent, spec),
+            },
+            sort_keys=True,
+            indent=2,
+        )
+    )
+
+
+def _run_model_spec_evaluation(args: argparse.Namespace) -> None:
+    """Evaluate one model spec JSON at the frozen campaign's settings.
+
+    The same evaluator, seed derivation, gates and artifact layout as a
+    production (or ``run-fidelity-evaluation``) evaluation of a graph model;
+    nothing is written to a state database.
+    """
+    from .grammar import load_model_graph, load_model_spec
+    from .production import (
+        load_dataset_manifest,
+        load_frozen_dataset,
+        load_production_campaign,
+        run_model_spec_evaluation,
+        validate_production_freeze,
+    )
+    from .search import Fidelity
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    freeze = validate_production_freeze(
+        manifest,
+        Path(args.graph),
+        campaign,
+        data_base_dir=Path(args.base_dir),
+        require_current_commit=not args.ignore_current_commit,
+    )
+    if not freeze["valid"]:
+        raise ValueError("production freeze validation failed")
+    graph = load_model_graph(Path(args.graph))
+    spec = load_model_spec(Path(args.model_spec))
+    derived_from = None
+    if args.derived_from is not None:
+        if args.derived_from not in graph.by_hash:
+            raise ValueError(f"unknown graph model hash {args.derived_from!r}")
+        derived_from = graph.by_hash[args.derived_from]
+
+    posterior, selection = load_frozen_dataset(
+        manifest,
+        data_base_dir=Path(args.base_dir),
+    )
+    payload = run_model_spec_evaluation(
+        Path(args.root),
+        posterior,
+        selection,
+        campaign,
+        spec,
+        dataset_identity=manifest.manifest_hash,
+        fidelity=Fidelity(args.fidelity),
+        graph=graph,
+        spec_path=Path(args.model_spec),
+        derived_from=derived_from,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(payload, sort_keys=True, indent=2))
+
+
 def _finalize_exact_null_calibration(args: argparse.Namespace) -> None:
     from .nulls import finalize_exact_null_campaign
 
@@ -2036,6 +2307,25 @@ def build_parser() -> argparse.ArgumentParser:
     null_index.add_argument("--ignore-current-commit", action="store_true")
     null_index.set_defaults(func=_run_exact_null_index)
 
+    null_model_eval = subparsers.add_parser(
+        "run-null-model-evaluation",
+        help=(
+            "pre-compute one model's evidence rung inside one exact-null replay's "
+            "artifact tree (execution-only; nothing is recorded as production "
+            "state, and run-null-search-index later reloads it)"
+        ),
+    )
+    null_model_eval.add_argument("--manifest", required=True)
+    null_model_eval.add_argument("--graph", required=True)
+    null_model_eval.add_argument("--campaign", required=True)
+    null_model_eval.add_argument("--null-config", required=True)
+    null_model_eval.add_argument("--root", required=True)
+    null_model_eval.add_argument("--null-index", type=int, required=True)
+    null_model_eval.add_argument("--model-hash", required=True)
+    null_model_eval.add_argument("--base-dir", default=".")
+    null_model_eval.add_argument("--ignore-current-commit", action="store_true")
+    null_model_eval.set_defaults(func=_run_null_model_evaluation)
+
     null_finalize = subparsers.add_parser(
         "finalize-null-search-calibration",
         help="aggregate a complete indexed exact-null campaign and calibrate",
@@ -2094,6 +2384,41 @@ def build_parser() -> argparse.ArgumentParser:
     nearby_run.add_argument("--ignore-current-commit", action="store_true")
     nearby_run.set_defaults(func=_run_nearby_baseline_suite)
 
+    nearby_list = subparsers.add_parser(
+        "list-nearby-scenario-models",
+        help=(
+            "print the model hashes a nearby-baseline scenario evaluates, in the "
+            "suite's order (reads only the nearby config; no data, no sampling)"
+        ),
+    )
+    nearby_list.add_argument("--nearby-config", required=True)
+    nearby_list.add_argument("--scenario-id")
+    nearby_list.add_argument("--json", action="store_true")
+    nearby_list.set_defaults(func=_list_nearby_scenario_models)
+
+    nearby_model_eval = subparsers.add_parser(
+        "run-nearby-model-evaluation",
+        help=(
+            "pre-compute one model's F3 evidence inside one nearby-baseline "
+            "scenario's artifact tree (execution-only; nothing is recorded as "
+            "production state, and run-nearby-baseline-suite later reloads it)"
+        ),
+    )
+    nearby_model_eval.add_argument("--manifest", required=True)
+    nearby_model_eval.add_argument("--graph", required=True)
+    nearby_model_eval.add_argument("--campaign", required=True)
+    nearby_model_eval.add_argument("--nearby-config", required=True)
+    nearby_model_eval.add_argument("--scenario-id", required=True)
+    nearby_model_eval.add_argument("--model-hash", required=True)
+    nearby_model_eval.add_argument(
+        "--root",
+        required=True,
+        help="the SUITE root; the scenario tree is <root>/<scenario-id>",
+    )
+    nearby_model_eval.add_argument("--base-dir", default=".")
+    nearby_model_eval.add_argument("--ignore-current-commit", action="store_true")
+    nearby_model_eval.set_defaults(func=_run_nearby_model_evaluation)
+
     loo_stress = subparsers.add_parser(
         "write-loo-stress-config",
         help="write explicit leave-one-out scenarios for every frozen event",
@@ -2137,6 +2462,29 @@ def build_parser() -> argparse.ArgumentParser:
     run_stress.add_argument("--reference-state-database")
     run_stress.add_argument("--ignore-current-commit", action="store_true")
     run_stress.set_defaults(func=_run_event_stress_suite)
+
+    stress_model_eval = subparsers.add_parser(
+        "run-stress-model-evaluation",
+        help=(
+            "pre-compute one model's F3 evidence inside one event-drop scenario's "
+            "artifact tree (execution-only; nothing is recorded as production "
+            "state, and run-event-stress-suite later reloads it)"
+        ),
+    )
+    stress_model_eval.add_argument("--manifest", required=True)
+    stress_model_eval.add_argument("--graph", required=True)
+    stress_model_eval.add_argument("--campaign", required=True)
+    stress_model_eval.add_argument("--stress-config", required=True)
+    stress_model_eval.add_argument("--scenario-id", required=True)
+    stress_model_eval.add_argument("--model-hash", required=True)
+    stress_model_eval.add_argument(
+        "--root",
+        required=True,
+        help="the SUITE root; the scenario tree is <root>/<scenario-id>",
+    )
+    stress_model_eval.add_argument("--base-dir", default=".")
+    stress_model_eval.add_argument("--ignore-current-commit", action="store_true")
+    stress_model_eval.set_defaults(func=_run_stress_model_evaluation)
 
     export_scout = subparsers.add_parser(
         "export-scout-baseline",
@@ -2437,6 +2785,59 @@ def build_parser() -> argparse.ArgumentParser:
     fidelity_eval.add_argument("--base-dir", default=".")
     fidelity_eval.add_argument("--ignore-current-commit", action="store_true")
     fidelity_eval.set_defaults(func=_run_fidelity_evaluation)
+
+    spec_export = subparsers.add_parser(
+        "export-model-spec",
+        help=(
+            "write the declarative spec of one frozen-graph model by hash, "
+            "optionally with declared hyperpriors replaced (--set-prior)"
+        ),
+    )
+    spec_export.add_argument("--graph", required=True)
+    spec_export.add_argument("--model-hash", required=True)
+    spec_export.add_argument(
+        "--set-prior",
+        nargs=4,
+        action="append",
+        metavar=("NAME", "FAMILY", "A", "B"),
+        help=(
+            "replace a declared prior: uniform/log_uniform A=low B=high, "
+            "normal A=loc B=scale (repeatable)"
+        ),
+    )
+    spec_export.add_argument("--output", help="default: print the spec to stdout")
+    spec_export.set_defaults(func=_export_model_spec)
+
+    spec_eval = subparsers.add_parser(
+        "run-model-spec-evaluation",
+        help=(
+            "evaluate one model spec JSON at the frozen campaign's fidelity "
+            "settings, seed derivation and gates on the frozen dataset "
+            "(nothing is recorded as production state)"
+        ),
+    )
+    spec_eval.add_argument("--manifest", required=True)
+    spec_eval.add_argument("--graph", required=True)
+    spec_eval.add_argument("--campaign", required=True)
+    spec_eval.add_argument("--model-spec", required=True)
+    spec_eval.add_argument(
+        "--root",
+        required=True,
+        help="output root; the run directory is <root>/<fidelity>/<model hash>",
+    )
+    spec_eval.add_argument("--fidelity", choices=("F0", "F3", "F4"), default="F3")
+    spec_eval.add_argument(
+        "--derived-from",
+        help="graph model hash the spec was derived from (provenance only)",
+    )
+    spec_eval.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate and print hash/seed/run dir without sampling or writing",
+    )
+    spec_eval.add_argument("--base-dir", default=".")
+    spec_eval.add_argument("--ignore-current-commit", action="store_true")
+    spec_eval.set_defaults(func=_run_model_spec_evaluation)
 
     fidelity_summary = subparsers.add_parser(
         "summarize-fidelity-evaluation",

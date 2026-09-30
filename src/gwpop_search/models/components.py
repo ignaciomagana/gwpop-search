@@ -7,8 +7,9 @@ from functools import lru_cache
 import numpy as np
 
 try:
+    import jax
     import jax.numpy as jnp
-    from jax.scipy.special import log_ndtr, ndtr
+    from jax.scipy.special import betainc, gammaln, log_ndtr, ndtr
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "baseline population models require JAX: install gwpop-search[inference]"
@@ -445,3 +446,134 @@ def redshift_madau_dickinson_logpdf(
         jnp.log(safe_shape) - jnp.log(safe_norm),
         -jnp.inf,
     )
+
+
+# ---------------------------------------------------------------------------
+# Follow-up chi_eff components (opt-in; not used by any DEFAULT_MUTATIONS model).
+# ---------------------------------------------------------------------------
+
+
+def _student_t_log_kernel(z, nu):
+    """Log density of the standard Student-t with ``nu`` degrees of freedom."""
+    return (
+        gammaln(0.5 * (nu + 1.0))
+        - gammaln(0.5 * nu)
+        - 0.5 * jnp.log(nu * jnp.pi)
+        - 0.5 * (nu + 1.0) * jnp.log1p(z * z / nu)
+    )
+
+
+def _student_t_central(z, nu):
+    """``P(0 < T < |z|)`` for a standard Student-t, via I_x(1/2, nu/2)."""
+    z2 = z * z
+    return 0.5 * betainc(0.5, 0.5 * nu, z2 / (nu + z2))
+
+
+def _student_t_tail(z, nu):
+    """``P(T > |z|)`` for a standard Student-t, via I_x(nu/2, 1/2)."""
+    return 0.5 * betainc(0.5 * nu, 0.5, nu / (nu + z * z))
+
+
+def _log_student_t_interval_mass(a, b, nu):
+    """``log(F(b) - F(a))`` of a standard Student-t CDF for ``a < b``.
+
+    Written without catastrophic cancellation from the regularized incomplete
+    beta function: an interval straddling zero is the *sum* of two central
+    masses ``P(0 < T < |a|) + P(0 < T < b)``; a one-sided interval is reflected
+    to ``0 <= lo < hi`` and taken as the difference of whichever representation
+    (central masses or upper tails) has the smaller minuend. Float64 accuracy
+    of ``jax.scipy.special.betainc`` is ~1e-13 relative for ``nu <= 100``.
+    """
+    straddle = (a < 0.0) & (b > 0.0)
+    central_sum = _student_t_central(a, nu) + _student_t_central(b, nu)
+
+    lo = jnp.maximum(jnp.where(a >= 0.0, a, -b), 0.0)
+    hi = jnp.maximum(jnp.where(a >= 0.0, b, -a), 0.0)
+    # Keep the unselected one-sided branch away from z = 0, where d I_x/dx is
+    # singular, so a masked branch cannot turn a location/scale gradient into NaN.
+    lo = jnp.where(straddle, 1.0, lo)
+    hi = jnp.where(straddle, 2.0, hi)
+    c_lo = _student_t_central(lo, nu)
+    c_hi = _student_t_central(hi, nu)
+    t_lo = _student_t_tail(lo, nu)
+    t_hi = _student_t_tail(hi, nu)
+    one_sided = jnp.where(c_hi <= t_lo, c_hi - c_lo, t_lo - t_hi)
+
+    mass = jnp.where(straddle, central_sum, one_sided)
+    safe_mass = jnp.where(mass > 0.0, mass, 1.0)
+    return jnp.where(mass > 0.0, jnp.log(safe_mass), -jnp.inf)
+
+
+def truncated_student_t_logpdf(x, *, mu, sigma, nu, low, high):
+    """Normalized location-scale Student-t truncated to [low, high].
+
+    Gradient-free use only: ``jax.scipy.special.betainc`` has no derivative
+    with respect to its shape parameter ``nu/2`` (the dynesty ladder does not
+    differentiate the likelihood).
+    """
+    x = jnp.asarray(x)
+    mu = jnp.asarray(mu)
+    sigma = jnp.asarray(sigma)
+    nu = jnp.asarray(nu)
+
+    valid_sigma = jnp.isfinite(sigma) & (sigma > 0.0)
+    valid_nu = jnp.isfinite(nu) & (nu > 0.0)
+    safe_sigma = jnp.where(valid_sigma, sigma, 1.0)
+    safe_nu = jnp.where(valid_nu, nu, 1.0)
+    a = (low - mu) / safe_sigma
+    b = (high - mu) / safe_sigma
+    z = (x - mu) / safe_sigma
+    log_norm = _log_student_t_interval_mass(a, b, safe_nu)
+    valid_hyper = valid_sigma & valid_nu & (high > low) & jnp.isfinite(log_norm)
+    safe_log_norm = jnp.where(valid_hyper, log_norm, 0.0)
+    valid = valid_hyper & (x >= low) & (x <= high)
+    logp = _student_t_log_kernel(z, safe_nu) - jnp.log(safe_sigma) - safe_log_norm
+    return jnp.where(valid, logp, -jnp.inf)
+
+
+def chi_eff_student_t_logpdf(chi_eff, *, mu, sigma, nu):
+    """Truncated Student-t effective-spin distribution on [-1, 1]."""
+    return truncated_student_t_logpdf(
+        chi_eff,
+        mu=mu,
+        sigma=sigma,
+        nu=nu,
+        low=-1.0,
+        high=1.0,
+    )
+
+
+def chi_eff_logistic_mixture_logpdf(
+    chi_eff,
+    *,
+    mu1,
+    sigma1,
+    mu2,
+    sigma2,
+    fraction_logit,
+):
+    """Two-component truncated-Gaussian chi_eff mixture with a per-sample weight.
+
+    The weight of component 2 is ``sigmoid(fraction_logit)`` (broadcast against
+    ``chi_eff``); log weights are formed with ``log_sigmoid`` so no clipping is
+    needed. With a constant logit this equals :func:`chi_eff_mixture_logpdf`
+    with ``fraction = sigmoid(fraction_logit)``.
+    """
+    eta = jnp.asarray(fraction_logit)
+    log1 = chi_eff_logpdf(chi_eff, mu=mu1, sigma=sigma1)
+    log2 = chi_eff_logpdf(chi_eff, mu=mu2, sigma=sigma2)
+    safe1 = jnp.where(jnp.isfinite(log1), log1, 0.0)
+    safe2 = jnp.where(jnp.isfinite(log2), log2, 0.0)
+    safe_eta = jnp.where(jnp.isfinite(eta), eta, 0.0)
+    mixture = jnp.logaddexp(
+        jax.nn.log_sigmoid(-safe_eta) + safe1,
+        jax.nn.log_sigmoid(safe_eta) + safe2,
+    )
+    valid = (
+        jnp.isfinite(eta)
+        & jnp.isfinite(log1)
+        & jnp.isfinite(log2)
+        & (chi_eff >= -1.0)
+        & (chi_eff <= 1.0)
+    )
+    return jnp.where(valid, mixture, -jnp.inf)

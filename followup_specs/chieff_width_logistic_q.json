@@ -1,0 +1,134 @@
+{
+  "blocks": {
+    "chieff": {
+      "family": "truncated_gaussian",
+      "options": {
+        "components": 1,
+        "m1_pivot": 30.0,
+        "mean_dependence": "constant",
+        "q_pivot": 0.7,
+        "width_dependence": "logistic_q",
+        "z_pivot": 0.3
+      }
+    },
+    "mass": {
+      "family": "pl_peak",
+      "options": {
+        "peak_count": 1
+      }
+    },
+    "mixture": {
+      "family": "single",
+      "options": {
+        "components": 1
+      }
+    },
+    "pairing": {
+      "family": "powerlaw_q",
+      "options": {
+        "beta_dependence": "constant",
+        "m1_pivot": 30.0
+      }
+    },
+    "redshift": {
+      "family": "powerlaw",
+      "options": {
+        "kappa_dependence": "constant"
+      }
+    }
+  },
+  "priors": {
+    "alpha": {
+      "family": "uniform",
+      "parameters": {
+        "high": 8.0,
+        "low": 0.0
+      }
+    },
+    "beta_q": {
+      "family": "uniform",
+      "parameters": {
+        "high": 12.0,
+        "low": -4.0
+      }
+    },
+    "chi_mu": {
+      "family": "uniform",
+      "parameters": {
+        "high": 0.3,
+        "low": -0.3
+      }
+    },
+    "chi_sigma": {
+      "family": "log_uniform",
+      "parameters": {
+        "high": 0.5,
+        "low": 0.03
+      }
+    },
+    "delta_log_chi_sigma": {
+      "family": "uniform",
+      "parameters": {
+        "high": 4.0,
+        "low": -1.0
+      }
+    },
+    "kappa": {
+      "family": "uniform",
+      "parameters": {
+        "high": 12.0,
+        "low": -6.0
+      }
+    },
+    "mmax": {
+      "family": "uniform",
+      "parameters": {
+        "high": 200.0,
+        "low": 60.0
+      }
+    },
+    "mmin": {
+      "family": "uniform",
+      "parameters": {
+        "high": 10.0,
+        "low": 2.0
+      }
+    },
+    "peak_fraction": {
+      "family": "uniform",
+      "parameters": {
+        "high": 0.5,
+        "low": 0.0
+      }
+    },
+    "peak_mu": {
+      "family": "uniform",
+      "parameters": {
+        "high": 50.0,
+        "low": 20.0
+      }
+    },
+    "peak_sigma": {
+      "family": "log_uniform",
+      "parameters": {
+        "high": 15.0,
+        "low": 1.0
+      }
+    },
+    "q_transition": {
+      "family": "uniform",
+      "parameters": {
+        "high": 1.0,
+        "low": 0.1
+      }
+    },
+    "q_transition_width": {
+      "family": "log_uniform",
+      "parameters": {
+        "high": 0.3,
+        "low": 0.01
+      }
+    }
+  },
+  "schema_version": "1.0"
+}

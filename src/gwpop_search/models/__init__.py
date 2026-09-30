@@ -2,8 +2,10 @@
 
 from .baseline import DEFAULT_BASELINE_HYPERPARAMETERS, GwcatChiEffBBHModel
 from .components import (
+    chi_eff_logistic_mixture_logpdf,
     chi_eff_logpdf,
     chi_eff_mixture_logpdf,
+    chi_eff_student_t_logpdf,
     mass_ratio_logpdf,
     mass_ratio_truncated_normal_logpdf,
     powerlaw_logpdf,
@@ -13,6 +15,7 @@ from .components import (
     redshift_madau_dickinson_logpdf,
     redshift_rate_logpdf,
     truncated_normal_logpdf,
+    truncated_student_t_logpdf,
 )
 from .cosmology import FlatLambdaCDM
 from .declarative import DeclarativeGwcatChiEffModel, compile_model_spec
@@ -22,8 +25,10 @@ __all__ = [
     "DeclarativeGwcatChiEffModel",
     "FlatLambdaCDM",
     "GwcatChiEffBBHModel",
+    "chi_eff_logistic_mixture_logpdf",
     "chi_eff_logpdf",
     "chi_eff_mixture_logpdf",
+    "chi_eff_student_t_logpdf",
     "compile_model_spec",
     "mass_ratio_logpdf",
     "mass_ratio_truncated_normal_logpdf",
@@ -34,4 +39,5 @@ __all__ = [
     "redshift_madau_dickinson_logpdf",
     "redshift_rate_logpdf",
     "truncated_normal_logpdf",
+    "truncated_student_t_logpdf",
 ]

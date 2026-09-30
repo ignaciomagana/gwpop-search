@@ -1,0 +1,54 @@
+{
+  "models": {
+    "chieff_mixture_logistic_q_fraction": {
+      "chieff": {
+        "family": "gaussian_mixture",
+        "options": {
+          "components": 2,
+          "fraction_dependence": "logistic_q",
+          "q_pivot": 0.7
+        }
+      },
+      "file": "chieff_mixture_logistic_q_fraction.json",
+      "model_hash": "39017291f77f89e14c162f7523e2e0b2feec42e05551acb56f5beb3c430f9b25",
+      "mutation_path": [
+        "chieff.family.gaussian_mixture",
+        "chieff.fraction.logistic_q"
+      ]
+    },
+    "chieff_student_t": {
+      "chieff": {
+        "family": "truncated_student_t",
+        "options": {
+          "components": 1,
+          "mean_dependence": "constant",
+          "width_dependence": "constant"
+        }
+      },
+      "file": "chieff_student_t.json",
+      "model_hash": "5ba71a0ddf2a2f83aac1df628159a9eb51a7c22ea30f23075623c2729e5c9213",
+      "mutation_path": [
+        "chieff.family.student_t"
+      ]
+    },
+    "chieff_width_logistic_q": {
+      "chieff": {
+        "family": "truncated_gaussian",
+        "options": {
+          "components": 1,
+          "m1_pivot": 30.0,
+          "mean_dependence": "constant",
+          "q_pivot": 0.7,
+          "width_dependence": "logistic_q",
+          "z_pivot": 0.3
+        }
+      },
+      "file": "chieff_width_logistic_q.json",
+      "model_hash": "2136018ba5c1ef75d50e23526f2ee33b8e4fd5c459c702fe7e706342e2935f57",
+      "mutation_path": [
+        "chieff.width.logistic_q"
+      ]
+    }
+  },
+  "root_hash": "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67"
+}

@@ -28,7 +28,10 @@ import math
 from pathlib import Path
 
 from gwpop_search.grammar import ModelGraph
-from gwpop_search.inference.fidelity import fidelity_config_sha256
+from gwpop_search.inference.fidelity import (
+    DeterministicHBIEvaluator,
+    fidelity_config_sha256,
+)
 from gwpop_search.inference.numpyro import _code_identity
 from gwpop_search.inference.synthetic import (
     OBSERVATION_MODEL_NOISY,
@@ -41,7 +44,11 @@ from gwpop_search.production.runner import (
     collect_best_available_evidence,
     model_prior_from_config,
 )
-from gwpop_search.search import Fidelity, SearchExecutionConfig
+from gwpop_search.search import (
+    Fidelity,
+    SearchExecutionConfig,
+    evaluation_seed,
+)
 
 from .frozen_selection import (
     DEFAULT_MIN_RESAMPLING_ESS_PER_EVENT,
@@ -101,10 +108,13 @@ from .replay import (
     null_replay_seed,
 )
 from .search_replay import (
+    build_null_replay_dataset,
     declared_null_root,
     run_baseline_null_search_replay,
     search_statistics_from_evidence,
 )
+
+NULL_MODEL_EVALUATION_FORMAT_VERSION = "gwpop-search-null-model-evaluation-1.0"
 
 
 @dataclass(frozen=True)
@@ -633,6 +643,130 @@ def run_exact_null_index(
         json.dumps(result.to_dict(), sort_keys=True, indent=2)
     )
     return result
+
+
+def null_replay_model_run_dir(
+    root: str | Path,
+    null_index: int,
+    model_hash: str,
+    fidelity: Fidelity,
+) -> Path:
+    """The run directory the replay at ``null_index`` uses for one evaluation.
+
+    Identical to what :func:`gwpop_search.search.execute_search` and
+    :func:`gwpop_search.production.completion.complete_graph_evidence` derive
+    inside :func:`run_baseline_null_search_replay`
+    (``<root>/searches/null_<index>/artifacts/<fidelity>/<model hash>``).
+    """
+    return (
+        Path(root)
+        / "searches"
+        / f"null_{int(null_index):05d}"
+        / "artifacts"
+        / Fidelity(fidelity).value
+        / str(model_hash)
+    )
+
+
+def run_null_model_evaluation(
+    root: str | Path,
+    graph: ModelGraph,
+    campaign: ProductionCampaignConfig,
+    config: ExactNullCampaignConfig,
+    *,
+    null_index: int,
+    model_hash: str,
+    production_posterior=None,
+    production_selection=None,
+    production_dataset_identity: str | None = None,
+) -> dict[str, object]:
+    """Pre-compute one model's evidence rung inside one null replay's tree.
+
+    Execution-only plumbing. :func:`run_exact_null_index` evaluates every graph
+    model serially in a single process; this runs exactly one of those
+    evaluations, with the replay's own null catalog, dataset identity,
+    evaluation seed and run directory, so the later replay reloads it from its
+    artifact tree instead of recomputing it. The numerics, seeds and gates are
+    the replay's own: nothing here chooses them.
+
+    Nothing is written to any state database (the replay records its own rows,
+    exactly as it does today), so this is safe to run concurrently for distinct
+    models. The compute it spends is *not* charged against
+    ``max_gpu_hours_per_null``, which only counts what the replay process
+    itself evaluates.
+    """
+    _validate_exact_null_inputs(
+        campaign,
+        config,
+        production_posterior=production_posterior,
+        production_selection=production_selection,
+        production_dataset_identity=production_dataset_identity,
+    )
+    index = int(null_index)
+    if index < 0 or index >= config.n_nulls:
+        raise ValueError(
+            f"null_index={index} is outside [0, {config.n_nulls})"
+        )
+    model_hash = str(model_hash)
+    if model_hash not in graph.by_hash:
+        raise ValueError(f"unknown graph model hash {model_hash!r}")
+
+    root = Path(root)
+    _require_exact_null_plan(root, graph, campaign, config)
+
+    data_seed = null_replay_seed(config.root_seed, index)
+    dataset = build_null_replay_dataset(
+        data_seed,
+        graph=graph,
+        survey_config=config.survey,
+        truth_hyperparameters=config.truth_hyperparameters,
+        data_mode=config.data_mode,
+        observed_posterior=production_posterior,
+        frozen_selection=production_selection,
+        production_dataset_identity=production_dataset_identity,
+        min_resampling_ess=config.min_resampling_ess,
+        min_resampling_ess_per_event=config.min_resampling_ess_per_event,
+        pe_scale_policy=config.pe_scale_policy,
+    )
+    evaluator = DeterministicHBIEvaluator(
+        dataset.posterior,
+        dataset.selection,
+        config=campaign.fidelity,
+        dataset_identity=dataset.dataset_identity,
+    )
+    # The rung the statistic reads, which is where the replay spends its
+    # compute; the F0 rung stays with the replay (it is cheap and it is what
+    # screens the model before the executor promotes it).
+    fidelity = STATISTIC_STOP_FIDELITY[config.statistic]
+    seed = evaluation_seed(
+        null_search_seed(config.root_seed, index),
+        model_hash,
+        fidelity,
+    )
+    run_dir = null_replay_model_run_dir(root, index, model_hash, fidelity)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    record = evaluator.evaluate(
+        graph.by_hash[model_hash],
+        fidelity,
+        seed=seed,
+        run_dir=run_dir,
+    )
+    return {
+        "format_version": NULL_MODEL_EVALUATION_FORMAT_VERSION,
+        "state_database_written": False,
+        "null_index": index,
+        "model_hash": model_hash,
+        "fidelity": fidelity.value,
+        "data_seed": int(data_seed),
+        "seed": int(seed),
+        "dataset_identity": dataset.dataset_identity,
+        "fidelity_config_sha256": evaluator.fidelity_config_sha256,
+        "diagnostics_pass": record.diagnostics_pass,
+        "screen_value": record.screen_value,
+        "compute_cost_hours": record.compute_cost,
+        "run_dir": str(run_dir),
+        "evaluation": str(run_dir / "evaluation.json"),
+    }
 
 
 def _null_data_diagnostics(
