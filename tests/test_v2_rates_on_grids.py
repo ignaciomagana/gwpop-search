@@ -15,7 +15,14 @@ maximum_mass = M; var_cut 4 has M = 200 with the power law still normalised to
 mmax = 300) and q_floor = 0.001, which makes the v2 pairing grid the LVK one.
 
 Skipped when the release directory is not mounted (override with
-``GWPOP_LVK_RELEASE_DIR``).
+``GWPOP_LVK_RELEASE_DIR``), unless ``GWPOP_REQUIRE_G2A=1`` (set it on miko and
+in the pre-freeze suite), which turns the skip into a failure.
+
+``test_production_q_floor_deviation_is_pinned`` records the production root
+(q_floor = 0.05) against the same release: it is *not* the LVK model at 1e-6
+(max dR/dm1 deviation ~1.7e-4, dR/dq on q >= 0.05 ~5.6e-3), which is pinned so
+that a change of either the model or q_floor is noticed (operator decision,
+grammar.v2.V2_DRAFT_PRIORS["support.q_floor"]).
 """
 
 from __future__ import annotations
@@ -72,7 +79,15 @@ FLOOR = 1e-6
 LVK_Q_FLOOR = 0.001
 _trapz = getattr(np, "trapezoid", None) or np.trapz
 
-pytestmark = pytest.mark.skipif(not RELEASE_DIR.is_dir(), reason="LVK GWTC-5 release not mounted")
+REQUIRE_G2A = os.environ.get("GWPOP_REQUIRE_G2A", "") == "1"
+
+
+@pytest.fixture(autouse=True)
+def _release_mounted():
+    if not RELEASE_DIR.is_dir():
+        if REQUIRE_G2A:
+            pytest.fail(f"GWPOP_REQUIRE_G2A=1 but the LVK GWTC-5 release is not mounted at {RELEASE_DIR}")
+        pytest.skip("LVK GWTC-5 release not mounted")
 
 
 def _sha256(path: Path) -> str:
@@ -171,3 +186,31 @@ def test_g2a_declarative_root_coordinates_reproduce_the_release():
         dens = np.exp(np.asarray(fn(hp))) * float(x[i, col["rate"]])
         devs.append(_maxdev(_trapz(dens, q, axis=0), rm[j]))
     assert max(devs) < TOL, max(devs)
+
+
+#: production-support deviation bounds (measured 1.66e-4 and 5.61e-3 on 64 draws, 2026-09-30)
+PROD_DM1_BOUNDS = (1e-6, 5e-4)
+PROD_DQ_BOUNDS = (1e-6, 2e-2)
+
+
+def test_production_q_floor_deviation_is_pinned():
+    """The production root (q_floor = 0.05) against the release: a pinned, disclosed deviation."""
+    col, x, rows, grids = _load("default")
+    m, rm = grids["mass_1"]
+    q, rq = grids["mass_ratio"]
+    root = v2_root_model_spec()
+    assert root.support["q_floor"] == 0.05
+    model = compile_model_spec(root)
+    mm, qq = np.meshgrid(m, q)
+    fn = jax.jit(lambda hp: v2_mass_logpdf(model, jnp.asarray(mm), jnp.asarray(qq), hp))
+    keep = q >= root.support["q_floor"]
+    dm1, dq, below = [], [], []
+    for j, i in enumerate(rows[:64]):
+        lvk = {k: float(x[i, col[k]]) for k in LVK_MASS_KEYS}
+        dens = np.exp(np.asarray(fn(lvk_default_coordinates(lvk)))) * float(x[i, col["rate"]])
+        dm1.append(_maxdev(_trapz(dens, q, axis=0), rm[j]))
+        dq.append(_maxdev(_trapz(dens, m, axis=1)[keep], rq[j][keep]))
+        below.append(_trapz(rq[j][~keep], q[~keep]) / _trapz(rq[j], q))
+    assert PROD_DM1_BOUNDS[0] < max(dm1) < PROD_DM1_BOUNDS[1], max(dm1)
+    assert PROD_DQ_BOUNDS[0] < max(dq) < PROD_DQ_BOUNDS[1], max(dq)
+    assert max(below) < 1e-5, max(below)  # LVK rate fraction the floor removes at these draws

@@ -443,6 +443,13 @@ def restricted_model_graph(
             except InapplicableMutation:
                 inapplicable.append(path_edge_key(path[:depth]))
                 break
+            except ValueError as exc:
+                # a grammar defect (the child is not a valid model), not an
+                # inapplicable atom: fail loudly at planning time, naming the path
+                raise ValueError(
+                    f"mutation path {path}: {mutation_id} produces an invalid model on "
+                    f"root {root.model_hash[:12]}: {exc}"
+                ) from exc
             if child.model_hash not in by_hash:
                 if max_models is not None and len(nodes) >= int(max_models):
                     raise ValueError(

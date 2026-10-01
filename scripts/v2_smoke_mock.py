@@ -10,8 +10,10 @@ a validation catalog: it is small (few events, thinned injections) and its only
 job is to exercise enumeration -> tapered dynesty -> claim table on CPU.
 
 DAG (mock-data-dag): one draw distribution ``p_draw`` in the source frame
-(m1 log-uniform on [3, 200], q uniform on [0.05, 1], z ~ dVc/dz/(1+z) on
-[0, 1.9], chi_eff uniform on [-1, 1]) is mapped to the density basis
+(m1 log-uniform on [mmin, mmax] = [3, 300], q uniform on [q_floor, 1] =
+[0.05, 1], z ~ dVc/dz/(1+z) on [0, zmax = 1.9], chi_eff uniform on [-1, 1];
+the bounds are read from the v2 model support and asserted to cover it) is
+mapped to the density basis
 (m1_detector, q, luminosity_distance, chi_eff) with its exact Jacobian. The
 same deterministic detection rule (a chirp-mass/distance SNR proxy > 10) is
 applied to the injections and to the events. Events are drawn from the v2 root
@@ -21,6 +23,13 @@ the detection rule is applied. PE: Gaussian likelihood in the basis
 coordinates around a noisy observation (observation = truth + noise), uniform
 PE prior on a box, so the posterior is the truncated Gaussian and
 ``log_ref_density`` is the log of the uniform prior density.
+
+SMOKE ONLY -- not for the step-6b mock closure. Known departures from the
+mock-data-dag rules, acceptable for a pipeline smoke test only: the PE widths
+scale with the true values (``sigma ~ w * truth``, a misspecified Gaussian
+likelihood), and detection is a deterministic step on the true parameters with
+no noise shared with the PE. The closure mock needs a noisy detection
+statistic shared with the PE likelihood and truth-independent PE widths.
 """
 
 from __future__ import annotations
@@ -41,9 +50,17 @@ TRUTH = {
     "beta": 1.1, "kappa": 3.0, "chi_mu": 0.06, "chi_log_sigma": float(np.log(0.1)),
 }
 
-M_LO, M_HI = 3.0, 200.0
-Q_LO = 0.05
-Z_MAX = 1.9
+def _support():
+    from gwpop_search.grammar.v2 import V2_SUPPORT
+
+    return V2_SUPPORT
+
+
+# The draw distribution covers the v2 population support exactly (mock-data-dag:
+# the draw support must contain the population support).
+M_LO, M_HI = float(_support()["mmin"]), float(_support()["mmax"])
+Q_LO = float(_support()["q_floor"])
+Z_MAX = float(_support()["zmax"])
 SNR_THRESHOLD = 10.0
 PE_BOX = {  # uniform PE prior box in the density basis
     "m1_detector": (2.0, 600.0),
@@ -101,6 +118,11 @@ def build(output_dir: Path, *, n_events: int, n_pe: int, n_draw: int, seed: int)
 
     rng = np.random.default_rng(seed)
     root = v2_root_model_spec()
+    support = root.support
+    if not (M_LO <= float(support["mmin"]) and M_HI >= float(support["mmax"])
+            and Q_LO <= float(support["q_floor"]) and Z_MAX >= float(support["zmax"])):
+        raise SystemExit(f"mock draw support [{M_LO}, {M_HI}] x [{Q_LO}, 1] x [0, {Z_MAX}] does not "
+                         f"cover the model support {dict(support)}")
     model = compile_model_spec(root)
     cosmo = model.cosmology
     draw = DrawDistribution(cosmo)

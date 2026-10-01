@@ -1537,6 +1537,12 @@ class DeterministicHBIEvaluator:
     selection: object
     config: FidelityRunConfig = field(default_factory=FidelityRunConfig)
     dataset_identity: str = "unspecified"
+    #: Optional v2 data policy (``GwcatV2DataPolicy`` or anything with
+    #: ``z_max``) for the v2 support check's ``zmax.policy`` clause. Without it
+    #: the check still requires model zmax == the selection's (and PE's)
+    #: declared ``z_max``, which canonicalisation under the policy already
+    #: forced to equal the policy value (v2_policy, OD-6/G17).
+    data_policy: object | None = None
 
     supported_fidelities = tuple(item.value for item in LADDER_V2)
 
@@ -1671,6 +1677,7 @@ class DeterministicHBIEvaluator:
 
             data_support = require_v2_data_support(
                 population_model, self.posterior, self.selection,
+                policy=self.data_policy,
                 context=f"model {model.model_hash}",
             )
         priors = prior_specs_from_model_spec(model)

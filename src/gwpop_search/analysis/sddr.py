@@ -49,7 +49,7 @@ verified numerically by :func:`verify_nesting` on the compiled models.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 from typing import Mapping, Sequence
 
@@ -572,17 +572,22 @@ _V2_CHIEFF_CORRELATION_OPTIONS = (
 _FAMILY_NULLS.update({
     # Dirichlet unit coordinates: dropping component c is lam_u_c = 0 with every
     # other prior unchanged (grammar.v2_structure), so these are exact.
+    # On a per-component pairing (D5 root A1) the component's pairing slope
+    # beta_c is also unidentified at lam_u_c = 0 ("unidentified_if_present").
     ("mass", "bp1p_low", "bp2p"): {
         "exact": True, "symmetric": False,
         "embeddings": (NullEmbedding("lam_u_p35", 0.0, "lower", {}, ("mu_p35", "sigma_p35")),),
+        "unidentified_if_present": ("beta_p35",),
     },
     ("mass", "bp1p_high", "bp2p"): {
         "exact": True, "symmetric": False,
         "embeddings": (NullEmbedding("lam_u_p10", 0.0, "lower", {}, ("mu_p10", "sigma_p10")),),
+        "unidentified_if_present": ("beta_p10",),
     },
     ("mass", "bp2p", "bp3p"): {
         "exact": True, "symmetric": False,
         "embeddings": (NullEmbedding("lam_u_p3", 0.0, "lower", {}, ("mu_p3", "sigma_p3")),),
+        "unidentified_if_present": ("beta_p3",),
     },
     # no break: alpha_2 = alpha_1 (m_break unidentified), a difference null.
     ("mass", "pl2p", "bp2p"): {
@@ -711,6 +716,13 @@ def classify_edge(parent: ModelSpec, child: ModelSpec, mutation_id: str) -> Edge
                     reason=f"{block}.{option} differs between the two families' blocks",
                 )
         embeddings = tuple(rule["embeddings"])
+        extra_unidentified = tuple(
+            name for name in rule.get("unidentified_if_present", ()) if name in larger_spec.priors
+        )
+        if extra_unidentified:
+            embeddings = tuple(
+                replace(emb, unidentified=tuple(emb.unidentified) + extra_unidentified) for emb in embeddings
+            )
         symmetric = bool(rule["symmetric"])
         exact_embedding = bool(rule["exact"])
 

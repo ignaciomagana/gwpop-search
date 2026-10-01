@@ -9,6 +9,7 @@ from .baseline import (
 from .enumerate import ModelEdge, ModelGraph, enumerate_model_graph
 from .io import load_model_graph, load_model_spec, save_model_graph, save_model_spec
 from .mutations import (
+    ConditionalPriors,
     DEFAULT_MUTATIONS,
     FOLLOWUP_MUTATION_TABLE,
     FOLLOWUP_MUTATIONS,
@@ -44,6 +45,7 @@ __all__ = [
     "DEFAULT_HYPERPRIOR_PROFILE",
     "HYPERPRIOR_PROFILES",
     "ComponentRegistry",
+    "ConditionalPriors",
     "DEFAULT_COMPONENT_REGISTRY",
     "DEFAULT_MUTATIONS",
     "FOLLOWUP_MUTATION_TABLE",

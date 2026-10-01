@@ -277,3 +277,52 @@ def test_d5_reads_nearby_summaries_and_keys_depth2_edges_by_path():
     assert row["edge_key"] is None and row["D5_alternative_roots"]["status"] == "incomplete"
     with pytest.raises(Exception, match="root_edge_log_bayes_factors"):
         alt_root_edge_values({"graph_root_hash": "x"})
+
+
+def test_d1_requires_the_taper_mass_of_both_endpoints():
+    edges = [_edge("a" * 64, 9.0)]
+    table = build_claim_table(_report(edges), **_inputs(edges, taper_mass={"a" * 64: 0.01}))
+    row = table["edges"][0]
+    assert row["D1_numerics"]["status"] == "incomplete"
+    assert row["D1_numerics"]["taper_mass_reported"] is False
+    assert row["label"] == INCONCLUSIVE and "taper_mass_not_reported" in row["flags"]
+    # nor is DISFAVOURED available without it
+    neg = [_edge("c" * 64, -9.0)]
+    table = build_claim_table(_report(neg), **_inputs(neg, taper_mass=None))
+    assert table["edges"][0]["label"] == INCONCLUSIVE
+
+
+def test_d2_is_incomplete_above_the_taper_mass_limit():
+    from gwpop_search.analysis.claims_v2 import TAPER_MASS_D2_LIMIT
+
+    edges = [_edge("a" * 64, 9.0), _edge("c" * 64, -9.0)]
+    masses = {ROOT: 0.01, "a" * 64: TAPER_MASS_D2_LIMIT + 0.05, "c" * 64: TAPER_MASS_D2_LIMIT + 0.05}
+    table = build_claim_table(_report(edges), **_inputs(edges, taper_mass=masses))
+    for child in ("a" * 64, "c" * 64):
+        row = _row(table, child)
+        assert row["D2_strength"]["status"] == "incomplete"
+        assert row["D2_strength"]["taper_mass_over_limit"] is True
+        assert row["D2_strength"]["disfavoured"] is False
+        assert row["label"] == INCONCLUSIVE
+    masses = {h: TAPER_MASS_D2_LIMIT for h in masses}  # at the limit: allowed
+    table = build_claim_table(_report(edges), **_inputs(edges, taper_mass=masses))
+    assert _row(table, "a" * 64)["label"] == SUPPORTED
+
+
+def test_trials_count_distinct_models_not_edges():
+    """A depth-2 model reached from both depth-1 parents is one hypothesis tried."""
+    a, b, ab = "a" * 64, "b" * 64, "d" * 64
+    edges = [_edge(a, 9.0), _edge(b, 0.4), _edge(ab, 1.0, parent=a, mutation="mut.x"),
+             _edge(ab, 0.8, parent=b, mutation="mut.y")]
+    table = build_claim_table(_report(edges), **_inputs(edges))
+    assert table["n_atoms_tried"] == 3
+    assert table["n_edges_evaluated"] == 4
+    assert "3** (4 edges evaluated)" in render_claims_markdown(table)
+
+
+def test_d6_needs_enough_draws_for_the_two_sided_tail():
+    edges = [_edge("a" * 64, 9.0)]
+    few = {"a" * 64: _ppc("a" * 64, config={"alpha": 0.01, "n_draws": 500})}
+    row = build_claim_table(_report(edges), **_inputs(edges, ppc=few))["edges"][0]
+    assert row["D6_ppc"]["status"] == "incomplete"
+    assert row["label"] == INCONCLUSIVE

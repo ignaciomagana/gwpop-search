@@ -26,6 +26,11 @@ from gwpop_search.analysis.ppc import (  # noqa: E402
     ppc_report,
     spearman_rho,
     two_sided_ppp,
+    family_wise_false_fail_bound,
+    observable_samples,
+    ppc_draws_resolve_alpha,
+    statistic_ppp,
+    upper_tail_ppp,
 )
 from gwpop_search.analysis.terms import CatalogWeightEvaluator, pad_catalog  # noqa: E402
 from gwpop_search.data import Campaign, PosteriorCatalog, SelectionCatalog, SelectionMode  # noqa: E402
@@ -166,7 +171,7 @@ def test_true_model_passes_every_predeclared_statistic(mock):
     sample = _near(np.random.default_rng(1), TRUTH, names)
     result = posterior_predictive_check(
         sample, pe, sel, MockPopulation(correlated=True),
-        config=PPCConfig(n_draws=500, seed=4, batch_size=50), verify_identity=False,
+        config=PPCConfig(n_draws=1000, seed=4, batch_size=50), verify_identity=False,
     )
     summary = result.summary()
     p = {k: v["p_value"] for k, v in summary["statistics"].items()}
@@ -237,10 +242,13 @@ def test_ppc_criterion_and_report_contract(mock):
     )
     payload = result.to_dict(include_draws=False)
     assert "draws" not in payload
-    # 100 draws cannot resolve alpha = 0.01 (needs n_draws * alpha >= 5)
+    # 100 draws cannot resolve alpha / 2 = 0.005 (needs n_draws * alpha / 2 >= 5)
     if not payload["failed_statistics"]:
         assert payload["status"] == "insufficient_draws"
     forged = dict(payload, identity_verified=True, status="pass")
+    assert ppc_criterion(dict(forged, diagnostics=dict(payload["diagnostics"], alpha_resolvable=True,
+                                                       reliable=True)))["status"] == "incomplete"
+    forged["config"] = dict(payload["config"], n_draws=1000)
     forged["diagnostics"] = dict(payload["diagnostics"], alpha_resolvable=True, reliable=True)
     forged["statistics"] = {k: dict(v, p_value=0.5) for k, v in payload["statistics"].items()}
     assert ppc_criterion(forged)["status"] == "pass"
@@ -255,3 +263,50 @@ def test_ppc_criterion_and_report_contract(mock):
     assert list(report["models"]) == ["model"]
     with pytest.raises(AnalysisInputError):
         ppc_report([result, result])
+
+
+def test_ks_p_values_are_one_sided_and_correlations_two_sided():
+    rng = np.random.default_rng(7)
+    t_pred = rng.random(2000)
+    # observed distances far *below* the predicted ones: fits better than predicted -> not a failure
+    better = np.full(2000, -1.0)
+    assert statistic_ppp("ks_m1", better, t_pred)["p_value"] == pytest.approx(1.0)
+    assert statistic_ppp("ks_m1", better, t_pred)["sidedness"] == "upper"
+    # ... but the same numbers as a correlation statistic are a two-sided failure
+    assert statistic_ppp("spearman_chi_eff_q", better, t_pred)["p_value"] == 0.0
+    # observed distances above every predicted one fail the one-sided KS test
+    worse = np.full(2000, 2.0)
+    assert statistic_ppp("ks_q", worse, t_pred)["p_value"] == 0.0
+    mid = np.full(2000, 0.5)
+    one = upper_tail_ppp(mid, t_pred)
+    assert one["p_value"] == pytest.approx(np.mean(t_pred >= 0.5), abs=1e-12)
+    assert one["mc_standard_error"] == pytest.approx(math.sqrt(one["p_value"] * (1 - one["p_value"]) / 2000))
+    assert ppc_draws_resolve_alpha(1000) and not ppc_draws_resolve_alpha(999)
+    assert family_wise_false_fail_bound() == pytest.approx(1 - 0.99**6)
+
+
+def test_source_frame_is_derived_at_the_population_cosmology_even_if_stored():
+    from types import SimpleNamespace
+
+    from gwpop_search.models.cosmology import FlatLambdaCDM
+
+    cosmo = FlatLambdaCDM()
+    d_l = np.array([400.0, 2000.0, 9000.0])
+    z_true = np.asarray(cosmo.z_of_dL(d_l))
+    m1_det = np.array([30.0, 45.0, 80.0])
+    stored = {"z": z_true * (1 + 2e-3), "m1_source": m1_det / (1 + z_true) * (1 - 1e-3)}
+    data = SimpleNamespace(samples={"m1_detector": m1_det, "luminosity_distance": d_l, "q": np.ones(3),
+                                    "chi_eff": np.zeros(3), **stored})
+    model = SimpleNamespace(cosmology=cosmo)
+    columns = {"m1": "m1_source", "q": "q", "chi_eff": "chi_eff", "z": "z"}
+    values, derived, diff = observable_samples(data, columns, model, what="PE")
+    assert derived == ["m1_source", "z"]
+    np.testing.assert_allclose(values["z"], z_true, rtol=1e-14)
+    np.testing.assert_allclose(values["m1_source"], m1_det / (1 + z_true), rtol=1e-14)
+    assert diff["z"] == pytest.approx(2e-3, rel=1e-6)
+    assert diff["m1_source"] == pytest.approx(1e-3, rel=1e-6)
+    # without the detector-frame columns the stored ones are used (nothing derived)
+    bare = SimpleNamespace(samples={k: data.samples[k] for k in ("q", "chi_eff", "z", "m1_source")})
+    values, derived, diff = observable_samples(bare, columns, model, what="PE")
+    assert derived == [] and diff == {}
+    np.testing.assert_array_equal(values["z"], stored["z"])

@@ -27,6 +27,7 @@ from gwpop_search.grammar import (
     structural_diff_axes,
     v2_root_model_spec,
 )
+from gwpop_search.grammar.schema import PriorConfig
 from gwpop_search.grammar.v2 import (
     CHIEFF_ATOMS,
     V2_DRAFT_PRIORS,
@@ -173,7 +174,7 @@ def test_depth2_only_uses_pairs_of_passing_edges():
 
 
 @pytest.mark.parametrize("pair", [("S1", "S2"), ("S3", "S4"), ("M1", "M3"), ("P1", "P2"), ("Z1", "Z2"),
-                                  ("M1", "P2"), ("M3", "P2"), ("M5", "M2")])
+                                  ("M5", "M2")])
 def test_incompatible_pairs_are_not_composable(pair):
     root = v2_root_model_spec()
     with pytest.raises(NotComposable):
@@ -246,3 +247,76 @@ def test_graph_payload_is_loadable_and_marked_draft(tmp_path):
     path.write_text(json.dumps(payload))
     loaded = load_model_graph(path)
     assert len(loaded.nodes) == 20 and len(loaded.edges) == 19
+
+
+@pytest.mark.parametrize("mass_atom, components", [
+    ("M1", ("pl", "p10")), ("M2", ("pl", "p35")), ("M3", ("pl", "p10", "p35", "p3")),
+    ("M4", ("pl", "p10", "p35", "p3")), ("M5", ("pl", "p10", "p35")),
+])
+def test_mass_x_per_component_pairing_composes_in_both_orders(mass_atom, components):
+    """A mass atom and P2 commute: one pairing slope per component of the final mass family."""
+    root = v2_root_model_spec()
+    model = compose_atoms(root, mass_atom, "P2")
+    assert model == compose_atoms(root, "P2", mass_atom)
+    m = apply_mutation(root, V2_MUTATION_TABLE[V2_ATOM_IDS[mass_atom]])
+    p = apply_mutation(root, V2_MUTATION_TABLE[V2_ATOM_IDS["P2"]])
+    assert apply_mutation(m, V2_MUTATION_TABLE[V2_ATOM_IDS["P2"]]) == model
+    assert apply_mutation(p, V2_MUTATION_TABLE[V2_ATOM_IDS[mass_atom]]) == model
+    betas = sorted(k for k in model.priors if k.startswith("beta_"))
+    assert betas == sorted(f"beta_{c}" for c in components)
+    assert all(model.priors[b] == PriorConfig("uniform", {"low": -10.0, "high": 13.0}) for b in betas)
+
+
+#: expected D5 status of every atom on each alternative root
+_D5_NOT_APPLICABLE = {"A1": {"P1", "P2"}, "A2": {"Z1", "Z2"}}
+
+
+@pytest.mark.parametrize("alt", ["A1", "A2"])
+def test_every_atom_applies_or_is_declared_inapplicable_on_each_alternative_root(alt):
+    """Every atom on A1/A2 yields a valid child or an InapplicableMutation (never a ValueError),
+    its edge classifies, and a D5 suite over all atoms can be planned."""
+    from gwpop_search.analysis.sddr import classify_edge
+    from gwpop_search.grammar import InapplicableMutation
+    from gwpop_search.grammar.v2 import v2_d5_atom_semantics
+    from gwpop_search.validation.baselines import restricted_model_graph
+
+    root = v2_alternative_roots()[alt]
+    applicable = set()
+    for atom in V2_ATOM_IDS:
+        mutation = V2_MUTATION_TABLE[V2_ATOM_IDS[atom]]
+        try:
+            child = apply_mutation(root, mutation)
+        except InapplicableMutation:
+            continue
+        applicable.add(atom)
+        nesting = classify_edge(root, child, mutation.mutation_id)
+        assert nesting.classification in ("exact", "approximate", "evidence_only")
+    assert set(V2_ATOM_IDS) - applicable == _D5_NOT_APPLICABLE[alt]
+    semantics = v2_d5_atom_semantics()[alt]
+    assert {a for a, row in semantics.items() if row["status"] == "not_applicable"} == _D5_NOT_APPLICABLE[alt]
+    graph, inapplicable = restricted_model_graph(
+        root, [(mid,) for mid in V2_ATOM_IDS.values()], V2_MUTATION_TABLE,
+    )
+    assert len(graph.nodes) == 1 + len(applicable)
+    assert sorted(inapplicable) == sorted(V2_ATOM_IDS[a] for a in _D5_NOT_APPLICABLE[alt])
+
+
+def test_a1_mass_atoms_carry_the_component_pairing_slope():
+    a1 = v2_alternative_roots()["A1"]
+    m1 = apply_mutation(a1, V2_MUTATION_TABLE[V2_ATOM_IDS["M1"]])
+    assert "beta_p35" not in m1.priors and {"beta_pl", "beta_p10"} <= set(m1.priors)
+    m3 = apply_mutation(a1, V2_MUTATION_TABLE[V2_ATOM_IDS["M3"]])
+    assert m3.priors["beta_p3"] == PriorConfig("uniform", {"low": -10.0, "high": 13.0})
+    # on R0 (constant beta) the same atoms add no pairing slope
+    r0 = v2_root_model_spec()
+    assert not any(k.startswith("beta_p") for k in apply_mutation(r0, V2_MUTATION_TABLE[V2_ATOM_IDS["M3"]]).priors)
+
+
+def test_z1_on_a2_and_p1_on_a1_are_inapplicable_not_different_hypotheses():
+    from gwpop_search.grammar import InapplicableMutation
+
+    alts = v2_alternative_roots()
+    with pytest.raises(InapplicableMutation, match="kappa_dependence"):
+        apply_mutation(alts["A2"], V2_MUTATION_TABLE[V2_ATOM_IDS["Z1"]])
+    with pytest.raises(InapplicableMutation, match="beta_dependence"):
+        apply_mutation(alts["A1"], V2_MUTATION_TABLE[V2_ATOM_IDS["P1"]])

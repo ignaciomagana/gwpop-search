@@ -27,27 +27,46 @@ Both catalogs are compared through the **pre-declared statistics** (plan
 * ``spearman_chi_eff_q`` and ``spearman_chi_eff_z``: Spearman rank
   correlations of the catalog (average ranks for ties).
 
-The two-sided posterior predictive p-value of a statistic is::
+The posterior predictive p-value of a statistic, estimated over the ``S``
+draws (ties counted 1/2), is
 
-    p_hi = P(T_pred >= T_obs),  p_lo = P(T_pred <= T_obs)   (ties counted 1/2)
-    p    = min(1, 2 min(p_hi, p_lo))
+* one-sided for the KS distances: ``p = P(T_pred >= T_obs)``. A distance is
+  a discrepancy: only an observed catalog *farther* from the reference than
+  the predicted ones indicates misfit. A small ``P(T_pred <= T_obs)`` means
+  the observed catalog fits *better* than predicted, which is what the reuse
+  of the data (below) produces for a correct model, so it is not a failure;
+* two-sided for the Spearman correlations (a misfit can have either sign):
+  ``p = min(1, 2 min(P(T_pred >= T_obs), P(T_pred <= T_obs)))``.
 
-estimated over the ``S`` draws. **Claim criterion (D6):** the model fails the
-check if ``p < alpha = 0.01`` for any pre-declared statistic. The Monte-Carlo
-standard error of each p is reported, and a p within two standard errors of
-``alpha`` is flagged ``borderline`` (the label is still decided by the point
-estimate, as pre-declared).
+**Claim criterion (D6):** the model fails the check if ``p < alpha = 0.01``
+for any pre-declared statistic. The Monte-Carlo standard error of each p is
+reported, and a p within two standard errors of ``alpha`` is flagged
+``borderline`` (the label is still decided by the point estimate, as
+pre-declared). The ``alpha`` is applied per statistic with no multiplicity
+correction (as the plan states: "any statistic at p < 0.01"); the family-wise
+false-fail probability of a correct model over the six correlated statistics
+is at most ``1 - (1 - alpha)^6 = 5.9%`` and is disclosed with every result.
+The check is resolvable only if the rarest tail probability it tests
+(``alpha / 2`` for the two-sided statistics) has at least 5 expected counts:
+``n_draws * alpha / 2 >= 5``, i.e. at least 1000 draws at ``alpha = 0.01``.
 
 Diagnostics: the Kish ESS of the injection weights at every draw
 (``1 / sum omega_m^2``) must be at least ``4 N`` for the predicted catalog to
 be a faithful draw (Farr 2019's criterion for the same weights); a check with
 more than ``max_low_ess_fraction`` of draws below that is ``unreliable``.
 
-Known approximation (documented, conservative): the observed catalog reuses the
-data that produced the posterior (no leave-one-out), which pulls the
-reweighted event samples towards the population and makes a failure *less*
-likely. The check can therefore miss mild misfits; it does not manufacture
-failures.
+Source-frame observables (``m1_source``, ``z``) are always derived from the
+detector-frame columns (``m1_detector``, ``luminosity_distance``) with the
+population model's cosmology, the conversion the likelihood itself applies;
+stored source-frame columns (which may be at another cosmology) are ignored
+and their largest relative difference from the derived values is reported.
+
+Known approximation (documented): the observed catalog reuses the data that
+produced the posterior (no leave-one-out), which pulls the reweighted event
+samples towards the population. For the one-sided KS discrepancies this makes
+a failure *less* likely (the check can miss mild misfits but does not
+manufacture failures); for the two-sided correlations the pull is towards the
+predicted correlation, again away from either tail.
 """
 
 from __future__ import annotations
@@ -71,9 +90,11 @@ from ._common import (
 )
 from .terms import CatalogWeightEvaluator, pad_catalog
 
-PPC_FORMAT = "gwpop-search-ppc-1.0"
+PPC_FORMAT = "gwpop-search-ppc-1.1"  # 1.1: one-sided KS p, derived source frame
 #: D6 level: a pre-declared statistic with p < PPC_ALPHA is a failure.
 PPC_ALPHA = 0.01
+#: expected tail counts needed to resolve the smallest tested tail (alpha / 2)
+PPC_MIN_TAIL_COUNTS = 5.0
 #: observable name -> column in the PE and selection catalogs.
 DEFAULT_COLUMNS: Mapping[str, str] = {
     "m1": "m1_source",
@@ -86,6 +107,18 @@ CORRELATION_PAIRS = (("chi_eff", "q"), ("chi_eff", "z"))
 PREDECLARED_STATISTICS = tuple(f"ks_{x}" for x in MARGINAL_VARIABLES) + tuple(
     f"spearman_{a}_{b}" for a, b in CORRELATION_PAIRS
 )
+#: statistics tested one-sided (distances: only a larger observed distance is a misfit)
+ONE_SIDED_STATISTICS = tuple(f"ks_{x}" for x in MARGINAL_VARIABLES)
+
+
+def family_wise_false_fail_bound(alpha: float = PPC_ALPHA, n_statistics: int = len(PREDECLARED_STATISTICS)) -> float:
+    """``1 - (1 - alpha)^n``: the family-wise false-fail rate for independent statistics (an upper bound)."""
+    return 1.0 - (1.0 - float(alpha)) ** int(n_statistics)
+
+
+def ppc_draws_resolve_alpha(n_draws: int, alpha: float = PPC_ALPHA) -> bool:
+    """``n_draws * alpha / 2 >= 5``: the two-sided tail has at least 5 expected counts."""
+    return float(n_draws) * float(alpha) / 2.0 >= PPC_MIN_TAIL_COUNTS
 DEFAULT_BAND_LEVELS = tuple(np.round(np.linspace(0.05, 0.95, 19), 4).tolist())
 
 
@@ -187,7 +220,28 @@ def two_sided_ppp(t_obs, t_pred) -> dict[str, float]:
     # the MC standard error of 2 min(p_hi, p_lo) as a binomial proportion
     p_tail = min(p_hi, p_lo)
     se = 2.0 * math.sqrt(max(p_tail * (1.0 - p_tail), 0.0) / s)
-    return {"p_upper": p_hi, "p_lower": p_lo, "p_value": p, "mc_standard_error": se}
+    return {"p_upper": p_hi, "p_lower": p_lo, "p_value": p, "mc_standard_error": se,
+            "sidedness": "two_sided"}
+
+
+def upper_tail_ppp(t_obs, t_pred) -> dict[str, float]:
+    """One-sided posterior predictive p-value ``P(T_pred >= T_obs)`` (ties count 1/2).
+
+    For a discrepancy (a distance): only an observed value above the predicted
+    ones indicates misfit.
+    """
+    two = two_sided_ppp(t_obs, t_pred)
+    p = two["p_upper"]
+    se = math.sqrt(max(p * (1.0 - p), 0.0) / np.asarray(t_obs).size)
+    return {"p_upper": two["p_upper"], "p_lower": two["p_lower"], "p_value": p,
+            "mc_standard_error": se, "sidedness": "upper"}
+
+
+def statistic_ppp(name: str, t_obs, t_pred) -> dict[str, float]:
+    """The pre-declared p-value of one statistic (one-sided for KS, two-sided otherwise)."""
+    if name in ONE_SIDED_STATISTICS:
+        return upper_tail_ppp(t_obs, t_pred)
+    return two_sided_ppp(t_obs, t_pred)
 
 
 class _WeightedReference:
@@ -231,16 +285,19 @@ def _derived_source_frame(samples: Mapping[str, np.ndarray], cosmology) -> dict[
 
 
 def observable_samples(data, columns: Mapping[str, str], population_model=None, *, what: str):
-    """The observable columns of a PE or selection catalog (derived where needed).
+    """The observable columns of a PE or selection catalog.
 
-    A missing ``m1_source``/``z`` column is derived from ``m1_detector`` and
+    ``m1_source``/``z`` are derived from ``m1_detector`` and
     ``luminosity_distance`` with ``population_model.cosmology`` (the
-    conversion the model itself applies), and the derivation is reported.
+    conversion the likelihood itself applies) whenever that is possible,
+    *even if the catalog stores them*: stored source-frame columns can be at
+    another cosmology (the v2r2 products store LAL Planck15). Returns
+    ``(values, derived column names, {stored column: max relative difference
+    from the derived values}``); a stored column is used only when the
+    derivation is impossible.
     """
     samples = data.samples
     needed = sorted(set(columns.values()))
-    missing = [c for c in needed if c not in samples]
-    derived: dict[str, np.ndarray] = {}
     cosmology = getattr(population_model, "cosmology", None)
     derivable = (
         cosmology is not None
@@ -248,16 +305,23 @@ def observable_samples(data, columns: Mapping[str, str], population_model=None, 
         and "m1_detector" in samples
         and "luminosity_distance" in samples
     )
-    if missing and derivable and set(missing) <= set(DERIVABLE_COLUMNS):
-        derived = _derived_source_frame(samples, cosmology)
-        missing = []
+    derived: dict[str, np.ndarray] = {}
+    if derivable and set(needed) & set(DERIVABLE_COLUMNS):
+        derived = {c: v for c, v in _derived_source_frame(samples, cosmology).items() if c in needed}
+    missing = [c for c in needed if c not in samples and c not in derived]
     if missing:
         raise AnalysisInputError(
             f"posterior predictive check: observable column(s) {missing} missing from the {what} "
             f"catalog; pass columns= to map the observables {sorted(columns)} to available columns"
         )
-    out = {c: np.asarray(samples[c], dtype=np.float64) if c in samples else derived[c] for c in needed}
-    return out, sorted(c for c in needed if c not in samples)
+    differences: dict[str, float] = {}
+    for c, values in derived.items():
+        if c in samples:
+            stored = np.asarray(samples[c], dtype=np.float64)
+            scale = np.maximum(np.abs(values), 1e-300)
+            differences[c] = float(np.max(np.abs(stored - values) / scale)) if values.size else 0.0
+    out = {c: derived[c] if c in derived else np.asarray(samples[c], dtype=np.float64) for c in needed}
+    return out, sorted(derived), differences
 
 
 def _padded_event_values(posterior, values: np.ndarray, n_max: int) -> np.ndarray:
@@ -302,9 +366,12 @@ class PPCResult:
     #: ``None`` for an untapered likelihood, else the recorded treatment
     #: (always ``"weights_only"``: the check uses the population weights only)
     taper_treatment: str | None = None
+    #: catalog -> {column: max |stored - derived| / |derived|} for stored
+    #: source-frame columns that were replaced by the derived ones
+    stored_column_difference: Mapping[str, dict] = field(default_factory=dict)
 
     def p_values(self) -> dict[str, dict[str, float]]:
-        return {name: two_sided_ppp(self.t_obs[name], self.t_pred[name]) for name in PREDECLARED_STATISTICS}
+        return {name: statistic_ppp(name, self.t_obs[name], self.t_pred[name]) for name in PREDECLARED_STATISTICS}
 
     def summary(self) -> dict[str, object]:
         alpha = float(self.config.alpha)
@@ -329,7 +396,7 @@ class PPCResult:
         floor = self.config.min_selection_ess_per_event * self.n_catalog
         low = float(np.mean(self.selection_ess < floor))
         reliable = low <= self.config.max_low_ess_fraction
-        resolvable = self.config.n_draws * alpha >= 5.0
+        resolvable = ppc_draws_resolve_alpha(self.config.n_draws, alpha)
         if failed:
             status = "fail"
         elif not reliable:
@@ -351,6 +418,13 @@ class PPCResult:
                 "reliable": bool(reliable),
                 "min_event_ess": _quantiles(self.min_event_ess),
                 "alpha_resolvable": bool(resolvable),
+                "stored_source_frame_max_relative_difference": dict(self.stored_column_difference),
+            },
+            "multiplicity": {
+                "correction": "none (plan: any pre-declared statistic at p < alpha)",
+                "n_statistics": len(PREDECLARED_STATISTICS),
+                "family_wise_false_fail_upper_bound": family_wise_false_fail_bound(
+                    alpha, len(PREDECLARED_STATISTICS)),
             },
         }
 
@@ -367,16 +441,18 @@ class PPCResult:
             "n_catalog": int(self.n_catalog),
             "predeclared_statistics": list(PREDECLARED_STATISTICS),
             "criterion": (
-                f"D6: fail if any pre-declared statistic has a two-sided posterior predictive "
-                f"p < {self.config.alpha:g}"
+                f"D6: fail if any pre-declared statistic has a posterior predictive p < "
+                f"{self.config.alpha:g} (one-sided P(T_pred >= T_obs) for the KS distances, "
+                "two-sided for the Spearman correlations; no multiplicity correction)"
             ),
             "method": (
                 "predicted catalog: N found injections resampled with p_pop/p_draw*(T_k/N_k) "
                 "weights; observed catalog: one population-reweighted PE sample per event; "
                 "marginals: KS distance to the predicted detected distribution under the same "
                 "draw (mid-CDF of the weighted injections); correlations: Spearman rho; "
-                "p = min(1, 2 min(P(T_pred>=T_obs), P(T_pred<=T_obs))), ties 1/2; "
-                "no leave-one-out (conservative)"
+                "KS: p = P(T_pred>=T_obs); Spearman: p = min(1, 2 min(P(T_pred>=T_obs), "
+                "P(T_pred<=T_obs))); ties 1/2; source frame derived from (m1_detector, d_L) at the "
+                "population cosmology; no leave-one-out"
             ),
             **self.summary(),
             "bands": self.bands,
@@ -423,8 +499,10 @@ def posterior_predictive_check(
             what=f"posterior predictive check of {label or 'model'}",
         )
     columns = dict(config.columns)
-    pe_columns, pe_derived = observable_samples(posterior, columns, population_model, what="PE")
-    sel_columns, sel_derived = observable_samples(selection, columns, population_model, what="selection")
+    pe_columns, pe_derived, pe_diff = observable_samples(posterior, columns, population_model, what="PE")
+    sel_columns, sel_derived, sel_diff = observable_samples(
+        selection, columns, population_model, what="selection"
+    )
     # The predicted and observed catalogs use the population weights only, which
     # do not depend on a variance taper; the posterior draws already carry it.
     taper_treatment = "weights_only" if getattr(hbi_config, "variance_taper", None) is not None else None
@@ -516,6 +594,7 @@ def posterior_predictive_check(
         identity_verified=bool(verify_identity),
         derived_columns={"pe": pe_derived, "selection": sel_derived},
         taper_treatment=taper_treatment,
+        stored_column_difference={"pe": pe_diff, "selection": sel_diff},
     )
 
 
@@ -545,14 +624,19 @@ def ppc_criterion(payload: Mapping[str, object] | None, *, alpha: float = PPC_AL
         "borderline_statistics": list(payload.get("borderline_statistics") or []),
         "n_draws": (payload.get("config") or {}).get("n_draws"),
         "identity_verified": payload.get("identity_verified"),
+        "sidedness": {name: stats[name].get("sidedness") for name in PREDECLARED_STATISTICS},
+        "family_wise_false_fail_upper_bound": family_wise_false_fail_bound(alpha),
     }
     if failed:
         return {"status": "fail", **detail}
     diagnostics = payload.get("diagnostics") or {}
     if not diagnostics.get("reliable", False):
         return {"status": "incomplete", "reason": "selection ESS below 4N at too many draws", **detail}
-    if not diagnostics.get("alpha_resolvable", False):
-        return {"status": "incomplete", "reason": "too few draws to resolve alpha", **detail}
+    n_draws = (payload.get("config") or {}).get("n_draws")
+    if not diagnostics.get("alpha_resolvable", False) or n_draws is None \
+            or not ppc_draws_resolve_alpha(int(n_draws), alpha):
+        return {"status": "incomplete",
+                "reason": "too few draws to resolve alpha / 2 (need n_draws * alpha / 2 >= 5)", **detail}
     if not payload.get("identity_verified", False):
         return {"status": "incomplete", "reason": "PPC ran without likelihood-identity verification", **detail}
     return {"status": "pass", **detail}

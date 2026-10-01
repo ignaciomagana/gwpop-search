@@ -1775,10 +1775,13 @@ def _freeze_production_campaign(args: argparse.Namespace) -> None:
             )
         model_prior = {"version": "uniform-v1"}
 
+    from .production.freeze import verify_graph_file
+
     git_commit = args.git_commit or str(_code_identity()["git_commit"])
     campaign = build_production_campaign(
         load_dataset_manifest(Path(args.manifest)),
         load_model_graph(Path(args.graph)),
+        graph_file_sha256=str(verify_graph_file(Path(args.graph))["file_sha256"]),
         campaign_id=args.campaign_id,
         git_commit=git_commit,
         model_prior=model_prior,

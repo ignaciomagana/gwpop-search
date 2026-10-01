@@ -28,11 +28,12 @@ from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
 from .enumerate import ModelEdge, ModelGraph, enumerate_model_graph
-from .mutations import InapplicableMutation, MutationSpec, apply_mutation
+from .mutations import ConditionalPriors, InapplicableMutation, MutationSpec, apply_mutation
 from .registry import DEFAULT_COMPONENT_REGISTRY, ComponentRegistry
 from .schema import ModelSpec, PriorConfig, structural_diff_axes
 from .v2_structure import (
     CHIEFF_CORRELATION_OPTIONS,
+    V2_MASS_FAMILIES,
     V2_CHIEFF_FAMILIES,
     mass_components,
 )
@@ -131,10 +132,27 @@ _MIXTURE_COMPONENT_2 = {
 }
 
 
-def _mass(mid, family, description, *, removals=(), updates=None):
+#: Pairing slope of one mass component when the pairing is per component (P2
+#: and the D5 alternative root A1); the P2 prior.
+_BETA_COMPONENT_PRIOR = _u(-10.0, 13.0)
+
+
+def _mass(mid, family, description, *, removals=(), updates=None, added=(), dropped=()):
+    """A mass-family atom. ``added`` / ``dropped`` name the mass components it adds
+    or removes: on a per-component pairing (root A1) their pairing slope
+    ``beta_<c>`` is added (P2 prior) or removed with the component, so the atom
+    stays one structural axis and the D5 edge is the same physical question."""
+    conditional = ()
+    if added or dropped:
+        conditional = (ConditionalPriors(
+            "pairing", "beta_dependence", "per_mass_component",
+            prior_updates={f"beta_{c}": _BETA_COMPONENT_PRIOR for c in added},
+            prior_removals=tuple(f"beta_{c}" for c in dropped),
+        ),)
     return MutationSpec(
         mid, "mass", "change_family", family, requires_family="bp2p",
         prior_removals=tuple(removals), prior_updates=dict(updates or {}), description=description,
+        conditional_priors=conditional,
     )
 
 
@@ -157,14 +175,15 @@ def _shape(mid, family, updates, description, *, family_options=None):
 
 V2_MUTATIONS: tuple[MutationSpec, ...] = (
     _mass("v2.mass.drop_p35", "bp1p_low", "M1: drop the 35 Msun peak (BP1P)",
-          removals=("mu_p35", "sigma_p35", "lam_u_p35")),
+          removals=("mu_p35", "sigma_p35", "lam_u_p35"), dropped=("p35",)),
     _mass("v2.mass.drop_p10", "bp1p_high", "M2: drop the 10 Msun peak",
-          removals=("mu_p10", "sigma_p10", "lam_u_p10")),
+          removals=("mu_p10", "sigma_p10", "lam_u_p10"), dropped=("p10",)),
     _mass("v2.mass.add_p20", "bp3p", "M3: third peak near 20 Msun; mu_p10 narrowed to U(5, 14)",
           updates={"mu_p3": _u(14.0, 24.0), "sigma_p3": _u(0.0, 10.0), "lam_u_p3": _u(0.0, 1.0),
-                   "mu_p10": _u(5.0, 14.0)}),
+                   "mu_p10": _u(5.0, 14.0)}, added=("p3",)),
     _mass("v2.mass.add_p70", "bp3p", "M4: third peak near 60-90 Msun",
-          updates={"mu_p3": _u(60.0, 90.0), "sigma_p3": _u(0.0, 10.0), "lam_u_p3": _u(0.0, 1.0)}),
+          updates={"mu_p3": _u(60.0, 90.0), "sigma_p3": _u(0.0, 10.0), "lam_u_p3": _u(0.0, 1.0)},
+          added=("p3",)),
     _mass("v2.mass.no_break", "pl2p", "M5: no break (single power law + 2 peaks)",
           removals=("alpha_1", "alpha_2", "m_break"), updates={"alpha": _u(-4.0, 12.0)}),
     _corr("v2.chieff.mean_q", "mean_q", _u(-2.0, 2.0),
@@ -195,6 +214,9 @@ V2_MUTATIONS: tuple[MutationSpec, ...] = (
     MutationSpec(
         "v2.pairing.beta_logistic_log_m1", "pairing", "set_option", "logistic_log_m1",
         option="beta_dependence", requires_family="tapered_powerlaw_q", prior_removals=("beta",),
+        # a step of the one slope: defined relative to a constant slope only, so
+        # not applicable on root A1 (beta per component) -- D5 "not_applicable".
+        requires_options={"beta_dependence": "constant"},
         prior_updates={"beta_low": _u(-2.0, 7.0), "beta_high": _u(-2.0, 7.0),
                        "beta_m_t": _lu(10.0, 100.0), "beta_width": _lu(0.05, 1.0)},
         description="P1: pairing slope beta steps logistically in ln m1",
@@ -202,12 +224,20 @@ V2_MUTATIONS: tuple[MutationSpec, ...] = (
     MutationSpec(
         "v2.pairing.beta_per_component", "pairing", "set_option", "per_mass_component",
         option="beta_dependence", requires_family="tapered_powerlaw_q", prior_removals=("beta",),
-        prior_updates={f"beta_{c}": _u(-10.0, 13.0) for c in ("pl", "p10", "p35")},
+        # one slope per component of the parent's mass family (bp2p: pl, p10, p35)
+        conditional_priors=tuple(
+            ConditionalPriors("mass", None, family,
+                              prior_updates={f"beta_{c}": _BETA_COMPONENT_PRIOR for c in ("pl",) + peaks})
+            for family, (_, peaks) in V2_MASS_FAMILIES.items()
+        ),
         description="P2: one pairing slope per mass component (LVK 'Extended')",
     ),
     MutationSpec(
         "v2.redshift.madau_dickinson", "redshift", "change_family", "madau_dickinson_psi",
-        requires_family="powerlaw_1pz", prior_removals=("kappa", "kappa_log_m1_slope"),
+        requires_family="powerlaw_1pz", prior_removals=("kappa",),
+        # MD replaces a constant power law; on root A2 (kappa(m1)) the child would
+        # drop kappa(m1) too, a different hypothesis -- D5 "not_applicable".
+        requires_options={"kappa_dependence": "constant"},
         prior_updates={"md_gamma": _u(-10.0, 10.0), "md_kappa": _u(0.0, 10.0),
                        "md_z_peak": _u(0.0, 4.0)},
         description="Z1: Madau-Dickinson rate history (gwpopulation form)",
@@ -255,12 +285,18 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
     "C5.chi_mu_log_m1_slope": {
         "prior": "U(-2/3, 2/3) per e-fold of m1",
         "source": "GWTC-4 (arXiv:2508.18083) Table 10 q-slope delta_mu|q ~ U(-2, 2); Tong+22, Antonini+24",
-        "rationale": "over ln m1 in [ln 5, ln 100] (~3 e-folds) it spans the same |d mu| <= 2 as the q slope over q in [0, 1]",
+        "rationale": "over ln m1 in [ln 5, ln 100] (~3 e-folds, where the events are) it spans the same |d mu| <= 2 "
+                     "as the q slope over q in [0, 1]. Over the full population support [3, 300] Msun (4.6 e-folds) "
+                     "it spans |d mu| <= 3.1 (the q slope spans 1.9 over q in [0.05, 1]); the alternative that "
+                     "matches over the full support is U(-0.41, 0.41). OPERATOR CHOICE at freeze",
     },
     "C6.chi_log_sigma_log_m1_slope": {
         "prior": "U(-4, 4) per e-fold of m1",
         "source": "GWTC-4 Table 10 delta ln sigma|q ~ U(-12, 4); Tong+22, Antonini+24, Plunkett+26",
-        "rationale": "|d ln sigma| <= 12 over ~3 e-folds of m1, the largest excursion of the q-slope prior; symmetric because the sign is not predicted",
+        "rationale": "|d ln sigma| <= 12 over ~3 e-folds of m1 (5-100 Msun, where the events are), the largest excursion "
+                     "of the q-slope prior; symmetric because the sign is not predicted. Over the full support [3, 300] "
+                     "Msun (4.6 e-folds) it spans |d ln sigma| <= 18.4 versus 11.4 for the q slope over q in [0.05, 1]; "
+                     "the alternative that matches over the full support is U(-2.5, 2.5). OPERATOR CHOICE at freeze",
     },
     "S1.chi_mu_2_frac": {
         "prior": "U(0, 1): mu_2 = mu_1 + f (1 - mu_1), i.e. mu_2 | mu_1 ~ U(mu_1, 1)",
@@ -307,10 +343,40 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
         "source": "draft choice",
         "rationale": "kappa changes by up to ~4.4 between 10 and 30 Msun, several times the GWTC-5 kappa width",
     },
+    "Z2.normalisation": {
+        "prior": "p(z | m1) = dVc/dz (1+z)^(kappa(m1)-1) / N(kappa(m1)), normalised per m1 (implemented)",
+        "source": "draft choice; OPEN OPERATOR DECISION",
+        "rationale": "with the per-m1 normalisation BP2P is the mass spectrum integrated over the volume to z < 1.9. "
+                     "The usual mass-dependent-evolution convention R(m1, z) = R(m1, 0) (1+z)^kappa(m1) (BP2P = the "
+                     "local, z = 0, mass function) drops the N(kappa(m1)) division (the shape likelihood is invariant "
+                     "to a Lambda-dependent constant). Both reduce exactly to R0 at slope 0 (SDDR exact either way) "
+                     "but give different evidences for Z2 and for the whole A2 suite",
+    },
+    "taper.form": {
+        "prior": "ln T = -ln(1 + (sigma^2 / 1)^30): T = 0.5 at sigma^2 = 1, > 1% suppression above sigma^2 = 0.858",
+        "source": "Callister & Farr 2024 functional form (applied there to N_eff/(4 N_obs)); GWTC-5 Sec. III states "
+                  "'maximum variance 1' with a 'sharp or smoothly-tapered cutoff'; OPEN OPERATOR DECISION",
+        "rationale": "the LVK smooth-taper definition (gwpopulation_pipe) was not available to verify; the exponent "
+                     "p = 30 and the centring at the threshold are draft choices; p is a candidate D3 sensitivity "
+                     "alongside the taper-at-2 rerun",
+    },
     "support.q_floor": {
-        "prior": "0.05 (fixed support)",
-        "source": "OD-12 option (a): per-event NRSur fallback, harness floor kept (BUILD_PLAN 2.4)",
-        "rationale": "the XPHM-SpinTaylor PE prior floor; a global 1/6 floor was the rejected alternative",
+        "prior": "0.05 (fixed support; truncate and renormalise p(q | m1) on [max(0.05, mlow_2/m1), 1])",
+        "source": "OD-12 option (a): per-event NRSur fallback, harness floor kept (BUILD_PLAN 2.4); "
+                  "OPEN OPERATOR DECISION",
+        "rationale": "the XPHM-SpinTaylor PE prior floor; a global 1/6 floor was the rejected alternative. "
+                     "Consequence: R0 is the LVK Default only at q_floor = 0.001 (G2a, 4.7e-14). At 0.05 the "
+                     "root deviates from the GWTC-5 release by up to 1.7e-4 in dR/dm1 and 5.6e-3 in dR/dq "
+                     "(q >= 0.05; 64 release draws), while the LVK rate fraction below q = 0.05 is <= 1.5e-6 "
+                     "at those draws (more for beta < 0); 1556 found injections (q < 0.05) get zero weight "
+                     "(pinned by tests/test_v2_rates_on_grids.py). Alternative: q_floor = 0.001 (the LVK model)",
+    },
+    "A1.mass_atoms.beta_c": {
+        "prior": "beta_p3 ~ U(-10, 13) added with M3/M4 on A1; beta_p35 / beta_p10 removed with M1 / M2",
+        "source": "P2 per-component prior (LVK 'Extended')",
+        "rationale": "on the per-component pairing root each mass component carries its own pairing slope, so "
+                     "adding/dropping a component adds/drops its slope (same structural axis; the SDDR null "
+                     "lam_u_c = 0 leaves beta_c unidentified). Also makes mass x P2 depth-2 pairs commute",
     },
     "C3/C4.z_pivot": {
         "prior": "0.0 (intercept at z = 0)",
@@ -527,6 +593,51 @@ def v2_alternative_roots(root: ModelSpec | None = None) -> dict[str, ModelSpec]:
     }
 
 
+#: Why an atom has no D5 edge on an alternative root (keyed by (root, atom)).
+_D5_NOT_APPLICABLE_REASONS = {
+    ("A1", "P2"): "already part of the root (beta per mass component)",
+    ("A1", "P1"): "the logistic step of one pairing slope is defined relative to a constant slope; "
+                  "A1 has one slope per mass component",
+    ("A2", "Z2"): "already part of the root (kappa(m1))",
+    ("A2", "Z1"): "Madau-Dickinson replaces a constant-kappa power law; on A2 the child would also drop "
+                  "kappa(m1), a different hypothesis",
+}
+_D5_NOTES = {
+    ("A1", "M1"): "the dropped p35 component's pairing slope beta_p35 is removed with it",
+    ("A1", "M2"): "the dropped p10 component's pairing slope beta_p10 is removed with it",
+    ("A1", "M3"): "the added component's pairing slope beta_p3 ~ U(-10, 13) (the P2 prior) is added with it",
+    ("A1", "M4"): "the added component's pairing slope beta_p3 ~ U(-10, 13) (the P2 prior) is added with it",
+}
+
+
+def v2_d5_atom_semantics(root: ModelSpec | None = None) -> dict[str, dict[str, dict[str, object]]]:
+    """Per alternative root and atom: is the D5 edge the same question, or not applicable.
+
+    Computed by applying every atom to each alternative root (a grammar defect
+    raises). ``same_edge`` rows carry the SDDR-free structural statement only;
+    the claim table reads the not-applicable set from the D5 suite summary.
+    """
+    out: dict[str, dict[str, dict[str, object]]] = {}
+    for name, alt in v2_alternative_roots(root).items():
+        rows: dict[str, dict[str, object]] = {}
+        for atom in V2_ATOM_ORDER:
+            mutation = V2_MUTATION_TABLE[V2_ATOM_IDS[atom]]
+            try:
+                apply_mutation(alt, mutation)
+            except InapplicableMutation as exc:
+                rows[atom] = {
+                    "status": "not_applicable",
+                    "reason": _D5_NOT_APPLICABLE_REASONS.get((name, atom), str(exc)),
+                }
+                continue
+            row: dict[str, object] = {"status": "same_edge"}
+            if (name, atom) in _D5_NOTES:
+                row["note"] = _D5_NOTES[(name, atom)]
+            rows[atom] = row
+        out[name] = rows
+    return out
+
+
 def enumerate_alt_root_graph(alt_root: ModelSpec, atoms: Iterable[str]) -> ModelGraph:
     """Depth-1 graph of the given atoms (e.g. the 10 chi_eff atoms + candidates) on an alt root."""
     mutations = [V2_MUTATION_TABLE[V2_ATOM_IDS[a]] for a in atoms]
@@ -617,6 +728,7 @@ def v2_graph_payload(graph: ModelGraph, *, depth2: Depth2Plan | None = None) -> 
         "alternative_roots": {name: {"atom": atom, "model_hash": spec.model_hash}
                               for (name, atom), spec in zip(V2_ALT_ROOT_ATOMS.items(),
                                                             v2_alternative_roots().values())},
+        "d5_atom_semantics": v2_d5_atom_semantics(),
         "mass_components_root": list(mass_components(v2_root_model_spec())),
     }
     return payload

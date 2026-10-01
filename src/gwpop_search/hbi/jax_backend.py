@@ -181,22 +181,43 @@ def _selection_log_exposure(
     return final
 
 
+def _materialize(values):
+    """Force one materialisation of the population density.
+
+    Without the barrier XLA fuses ``log_density`` into every consumer and
+    recomputes the whole density once per reduction (max, the shifted sums,
+    the one-hot product): the tapered likelihood then costs ~3.4x the
+    untapered one (review of fe32657, CPU). The barrier is value-neutral.
+    """
+    return lax.optimization_barrier(values)
+
+
 def _event_terms_and_variance(
     prepared: PreparedPosterior, log_density: PopulationLogDensity, hyperparameters
 ):
-    """Event terms (as :func:`_event_terms`) and ``Var[ln I_i]`` per event."""
-    log_pop = log_density(prepared.samples, hyperparameters)
+    """Event terms (as :func:`_event_terms`) and ``Var[ln I_i]`` per event.
+
+    One shifted-exponential pass over the materialised weights gives
+    ``S1 = sum e^(w - shift)`` and ``S2 = sum e^(2 (w - shift))``; then
+    ``ln sum e^w = shift + ln S1`` and ``1/ESS = S2 / S1^2``.
+    """
+    log_pop = _materialize(log_density(prepared.samples, hyperparameters))
     logw = jnp.where(
         prepared.mask,
         log_pop - prepared.log_ref_density,
         -jnp.inf,
     )
-    lse = logsumexp(logw, axis=1)
-    lse2 = logsumexp(2.0 * logw, axis=1)
-    has = jnp.isfinite(lse)
-    safe_lse = jnp.where(has, lse, 0.0)
-    safe_lse2 = jnp.where(has, lse2, 0.0)
-    inv_ess = jnp.exp(safe_lse2 - 2.0 * safe_lse)
+    peak = jnp.max(logw, axis=1)
+    finite_peak = jnp.isfinite(peak)
+    shift = jnp.where(finite_peak, peak, 0.0)
+    scaled = jnp.where(jnp.isfinite(logw), jnp.exp(logw - shift[:, None]), 0.0)
+    s1 = jnp.sum(scaled, axis=1)
+    s2 = jnp.sum(scaled * scaled, axis=1)
+    has = finite_peak & (s1 > 0.0)
+    safe_s1 = jnp.where(has, s1, 1.0)
+    # a NaN density propagates as NaN (as logsumexp does on the untapered path)
+    lse = jnp.where(has, shift + jnp.log(safe_s1), jnp.where(jnp.isnan(peak), jnp.nan, -jnp.inf))
+    inv_ess = s2 / (safe_s1 * safe_s1)
     variance = jnp.where(has, jnp.maximum(inv_ess - 1.0 / prepared.counts, 0.0), jnp.inf)
     return lse - jnp.log(prepared.counts), variance
 
@@ -204,15 +225,19 @@ def _event_terms_and_variance(
 def _selection_log_exposure_and_variance(
     prepared: PreparedSelection, log_density: PopulationLogDensity, hyperparameters
 ):
-    """``ln xi`` (as :func:`_selection_log_exposure`, up to rounding) and ``Var[xi]/xi^2``."""
+    """``ln xi`` (as :func:`_selection_log_exposure`, up to rounding) and ``Var[xi]/xi^2``.
+
+    One shifted-exponential pass per chunk (running shift): ``ln xi = shift +
+    ln S1`` with ``S1``, ``S2`` and the per-campaign sums from the same
+    materialised weights.
+    """
     n_campaigns = prepared.campaign_inv_n_draw.shape[0]
 
     def body(acc, xs):
-        lse_acc, peak_acc, s1_acc, s2_acc, sk_acc = acc
+        peak_acc, s1_acc, s2_acc, sk_acc = acc
         sample_chunk, log_draw, log_factor, mask, onehot = xs
-        log_pop = log_density(sample_chunk, hyperparameters)
+        log_pop = _materialize(log_density(sample_chunk, hyperparameters))
         logw = jnp.where(mask, log_pop - log_draw + log_factor, -jnp.inf)
-        lse_acc = jnp.logaddexp(lse_acc, logsumexp(logw))
         peak = jnp.max(logw)
         new_peak = jnp.maximum(peak_acc, peak)
         shift = jnp.where(jnp.isfinite(new_peak), new_peak, 0.0)
@@ -221,16 +246,15 @@ def _selection_log_exposure_and_variance(
         s1 = s1_acc * rescale + jnp.sum(scaled)
         s2 = s2_acc * rescale * rescale + jnp.sum(scaled * scaled)
         sk = sk_acc * rescale + scaled @ onehot
-        return (lse_acc, new_peak, s1, s2, sk), None
+        return (new_peak, s1, s2, sk), None
 
     init = (
-        jnp.asarray(-jnp.inf),
         jnp.asarray(-jnp.inf),
         jnp.asarray(0.0),
         jnp.asarray(0.0),
         jnp.zeros(n_campaigns),
     )
-    (log_exposure, _, s1, s2, sk), _ = lax.scan(
+    (peak, s1, s2, sk), _ = lax.scan(
         body,
         init,
         (
@@ -241,8 +265,11 @@ def _selection_log_exposure_and_variance(
             prepared.campaign_onehot,
         ),
     )
-    has = s1 > 0.0
+    has = jnp.isfinite(peak) & (s1 > 0.0)
     safe_s1 = jnp.where(has, s1, 1.0)
+    log_exposure = jnp.where(
+        has, peak + jnp.log(safe_s1), jnp.where(jnp.isnan(peak), jnp.nan, -jnp.inf)
+    )
     fractions = sk / safe_s1
     relative = s2 / (safe_s1 * safe_s1) - jnp.sum(
         fractions * fractions * prepared.campaign_inv_n_draw

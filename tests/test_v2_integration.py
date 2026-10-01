@@ -196,11 +196,36 @@ def test_v2_campaign_freeze_requires_the_taper_and_accepts_graph_metadata(tmp_pa
     )
     with pytest.raises(ValueError, match="variance taper"):
         build_production_campaign(manifest, graph, fidelity=FidelityRunConfig(), **kwargs)
+    with pytest.raises(ValueError, match="graph file's sha256"):
+        build_production_campaign(
+            manifest, graph, fidelity=v2_fidelity_run_config(), require_root_profile="gwtc5-v2", **kwargs
+        )
     campaign = build_production_campaign(
-        manifest, graph, fidelity=v2_fidelity_run_config(), require_root_profile="gwtc5-v2", **kwargs
+        manifest, graph, fidelity=v2_fidelity_run_config(), require_root_profile="gwtc5-v2",
+        graph_file_sha256=inspected["file_sha256"], **kwargs
     )
     assert campaign.fidelity.hbi.variance_taper.threshold == 1.0
     assert campaign.model_graph_hash == inspected["graph_hash"]
+    assert campaign.model_graph_file_sha256 == inspected["file_sha256"]
+    from gwpop_search.production.config import ProductionCampaignConfig
+
+    assert ProductionCampaignConfig.from_dict(campaign.to_dict()) == campaign
+
+    # a post-freeze edit of the graph metadata (e.g. an atom label) is detected
+    from gwpop_search.production.validate import validate_production_freeze
+
+    ok = validate_production_freeze(manifest, path, campaign, data_base_dir=tmp_path,
+                                    require_current_commit=False)
+    assert ok["checks"]["model_graph_file_sha256_matches"]
+    assert ok["checks"]["model_graph_file_sha256_recorded_for_v2"]
+    edited = json.loads(path.read_text())
+    edited["metadata"]["atoms"]["C2"]["description"] = "edited after the freeze"
+    path.write_text(json.dumps(edited, sort_keys=True))
+    bad = validate_production_freeze(manifest, path, campaign, data_base_dir=tmp_path,
+                                     require_current_commit=False)
+    assert bad["checks"]["model_graph_hash_matches"]  # the model graph itself is unchanged
+    assert not bad["checks"]["model_graph_file_sha256_matches"]
+    assert not bad["valid"]
 
 
 # --------------------------------------------------------------------------
@@ -297,9 +322,12 @@ def test_collect_v2_evaluations_and_graph_atom_labels(tmp_path):
     from gwpop_search.analysis._common import AnalysisInputError
     from gwpop_search.analysis.claims_v2 import atom_labels_from_graph_payload, collect_v2_evaluations
 
-    def write(path, model_hash, fidelity, passed, mass):
+    trajectory = {"nlive": 500, "dlogz": 0.1, "bound": "multi", "sample": "rslice", "seed": None}
+
+    def write(path, model_hash, fidelity, passed, mass, **overrides):
         path.parent.mkdir(parents=True, exist_ok=True)
-        diag = {"passed": passed}
+        diag = {"passed": passed,
+                "nested_sampling": {"resolved_dynesty_config": {**trajectory, **overrides}}}
         if mass is not None:
             diag["taper"] = {"pooled": {"posterior_mass_in_taper_region": mass}}
         path.write_text(json.dumps({"model_hash": model_hash, "fidelity": fidelity, "diagnostics": diag}))
@@ -310,8 +338,23 @@ def test_collect_v2_evaluations_and_graph_atom_labels(tmp_path):
     out = collect_v2_evaluations([tmp_path])
     assert out["gates"] == {"a": True, "b": False}
     assert out["taper_mass"] == {"a": 0.02}
-    write(tmp_path / "F4" / "a" / "evaluation.json", "a", "F4", True, 0.03)
-    with pytest.raises(AnalysisInputError, match="more than one evaluation"):
+    assert out["superseded"] == {}
+    # the documented second-seed workflow: depth 1 at F3, decision-relevant
+    # models re-evaluated at F4 -> the F4 evaluation supersedes F3 for D1
+    write(tmp_path / "F4" / "a" / "evaluation.json", "a", "F4", False, 0.03, sample="rwalk")
+    out = collect_v2_evaluations([tmp_path])
+    assert out["fidelity"] == {"a": "F4", "b": "F3"}
+    assert out["gates"] == {"a": False, "b": False}
+    assert out["taper_mass"] == {"a": 0.03}
+    assert out["superseded"] == {"a": str(tmp_path / "F3" / "a" / "evaluation.json")}
+    # a second evaluation at the same rung is refused
+    write(tmp_path / "F3bis" / "a" / "evaluation.json", "a", "F3", True, 0.02)
+    with pytest.raises(AnalysisInputError, match="more than one F3 evaluation"):
+        collect_v2_evaluations([tmp_path])
+    (tmp_path / "F3bis" / "a" / "evaluation.json").unlink()
+    # F3 and F4 must share the trajectory configuration (only the seeds differ)
+    write(tmp_path / "F4" / "a" / "evaluation.json", "a", "F4", True, 0.03, nlive=1000)
+    with pytest.raises(AnalysisInputError, match="trajectory configuration"):
         collect_v2_evaluations([tmp_path])
     labels = atom_labels_from_graph_payload(v2_graph_payload(enumerate_v2_depth1()))
     assert labels == {mid: atom for atom, mid in V2_ATOM_IDS.items()}
@@ -375,3 +418,60 @@ def test_taper2_rows_from_rerun_evaluations(tmp_path):
     write(edge.parent_hash, 10.0, 1.0)
     with pytest.raises(AnalysisInputError, match="taper-at-2"):
         taper2_rows_from_evaluations(graph, [tmp_path / "1.0"])
+
+
+def test_draw_support_edge_test_detects_a_draw_cliff_inside_the_support():
+    from gwpop_search.models.data_support import _edge_test
+
+    rng = np.random.default_rng(0)
+    # draws stop at 200 Msun while the population runs to 300: a cliff
+    flat = rng.uniform(3.0, 200.0, 20000)
+    assert _edge_test(flat, 300.0, "upper")["cliff"] is True
+    # a detector-limited tail that thins out smoothly before the edge is fine
+    smooth = 3.0 + rng.exponential(20.0, 20000)
+    smooth = smooth[smooth < 250.0]
+    assert _edge_test(smooth, 300.0, "upper")["passed"] is True
+    # reaching the edge is fine whatever the density there
+    assert _edge_test(rng.uniform(3.0, 400.0, 20000), 300.0, "upper")["passed"] is True
+    assert _edge_test(rng.uniform(0.02, 1.0, 20000), 0.05, "lower")["passed"] is True
+    assert _edge_test(rng.uniform(0.2, 1.0, 20000), 0.05, "lower")["cliff"] is True
+    # too few found injections: not evaluated
+    assert _edge_test(flat[:100], 300.0, "upper")["reached"] is None
+
+
+def test_declared_draw_support_must_contain_the_population_support(pair, model):
+    pe, sel = pair
+    ok = v2_data_support_report(model, pe, sel, draw_support={"m1_source_max": 1000.0, "q_min": 0.01,
+                                                             "z_max": 1.9, "m1_source_min": 1.0})
+    assert ok["pass"] and ok["reported"]["draw_support_declaration"] == "declared"
+    bad = v2_data_support_report(model, pe, sel, draw_support={"m1_source_max": 200.0})
+    failed = {c["name"] for c in bad["checks"] if not c["passed"]}
+    assert failed == {"draw_support.declared.m1_source_max"}
+    # a finite-draw maximum just below zmax (O3: 1.896) is within the 1% tolerance
+    assert v2_data_support_report(model, pe, sel, draw_support={"z_max": 1.896})["pass"]
+    assert not v2_data_support_report(model, pe, sel, draw_support={"z_max": 1.66})["pass"]
+
+
+def test_write_v2_draft_configs_refuses_frozen(tmp_path):
+    from gwpop_search.inference.v2_numerics import write_v2_draft_configs
+
+    with pytest.raises(ValueError, match="frozen"):
+        write_v2_draft_configs(tmp_path / "frozen" / "gwtc5-bbh-v2")
+    assert set(write_v2_draft_configs(tmp_path / "staging")) == {"primary", "taper_sensitivity", "campaign"}
+
+
+def test_v2_grids_stay_float64_when_compiled_before_x64():
+    from gwpop_search.models.components import LVKMassGrid, PowerLawRedshiftNormTable
+    from gwpop_search.models.cosmology import FlatLambdaCDM
+
+    reference = PowerLawRedshiftNormTable(FlatLambdaCDM(), 1.9)
+    jax.config.update("jax_enable_x64", False)
+    try:
+        grid = LVKMassGrid(mmin=3.0, mmax=300.0, n_m1=1000, n_q=500, q_floor=0.05)
+        table = PowerLawRedshiftNormTable(FlatLambdaCDM(), 1.9)
+    finally:
+        jax.config.update("jax_enable_x64", True)
+    assert grid.m1s.dtype == np.float64 and grid.w_q.dtype == np.float64
+    np.testing.assert_array_equal(np.asarray(grid.m1s), np.geomspace(3.0, 300.0, 1000))
+    assert table.log_norm.dtype == np.float64
+    np.testing.assert_array_equal(np.asarray(table.log_norm), np.asarray(reference.log_norm))

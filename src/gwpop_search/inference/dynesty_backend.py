@@ -2160,7 +2160,10 @@ def posterior_taper_mass(
     results: Sequence[DynestyResult],
     loglike: BatchedShapeLogLikelihood,
     *,
-    log_likelihood_rtol: float = 1.0e-9,
+    log_likelihood_atol: float = 1.0e-8,
+    log_likelihood_rtol: float = 1.0e-8,
+    log_likelihood_hard_rtol: float = 1.0e-4,
+    max_support_mismatch_fraction: float = 1.0e-3,
 ) -> dict[str, object]:
     """Posterior fraction inside the variance-taper region, per run and pooled.
 
@@ -2170,10 +2173,18 @@ def posterior_taper_mass(
     aside) at every weighted point of each run (dead points and final live
     points) and summarised with the run's importance weights by
     :func:`gwpop_search.hbi.taper.taper_region_summary`. The pooled block is
-    the equal-weight mixture of the separately normalised runs. The
-    re-evaluated tapered ``ln L`` must reproduce the stored one
-    (``|d ln L| <= rtol max(1, |ln L|)`` on finite points); the largest
-    deviation is reported and a larger one raises.
+    the equal-weight mixture of the separately normalised runs.
+
+    Reproduction of the sampled likelihood is a *recorded diagnostic*: the
+    re-evaluation may run on another device or batch size than the sampling
+    (e.g. sampled on the H100, summarised on the same process's backend,
+    recorded as ``reevaluation_backend``), so rounding-level differences are
+    expected. ``reproduces`` is ``|d ln L| <= atol + rtol |ln L|`` on every
+    finite point and identical support; the largest deviation and the number
+    of support mismatches are reported. Only a gross mismatch -- relative
+    deviation above ``log_likelihood_hard_rtol`` or support differing on more
+    than ``max_support_mismatch_fraction`` of the points, i.e. a different
+    likelihood -- raises.
     """
     from gwpop_search.hbi.taper import taper_region_summary
 
@@ -2187,6 +2198,8 @@ def posterior_taper_mass(
     requested = _without_chunk_size(loglike.likelihood_identity())
     variances, weights, runs = [], [], []
     worst = 0.0
+    reproduces = True
+    support_mismatches = 0
     for index, result in enumerate(results):
         if tuple(result.names) != names:
             raise ValueError(f"run {index} has different parameter names than the likelihood")
@@ -2202,18 +2215,27 @@ def posterior_taper_mass(
         comps = loglike.components(result.samples)
         stored_logl = np.asarray(result.log_likelihoods, dtype=float)
         finite = np.isfinite(stored_logl) & np.isfinite(comps["log_likelihood"])
-        if np.any(np.isfinite(stored_logl) != np.isfinite(comps["log_likelihood"])):
-            raise ValueError(f"run {index}: re-evaluated likelihood support differs from the run")
+        n_mismatch = int(np.sum(np.isfinite(stored_logl) != np.isfinite(comps["log_likelihood"])))
+        support_mismatches += n_mismatch
+        if n_mismatch:
+            reproduces = False
+            if n_mismatch > max_support_mismatch_fraction * max(stored_logl.size, 1):
+                raise ValueError(
+                    f"run {index}: re-evaluated likelihood support differs from the run at "
+                    f"{n_mismatch} of {stored_logl.size} points"
+                )
         if finite.any():
-            dev = np.abs(comps["log_likelihood"][finite] - stored_logl[finite]) / np.maximum(
-                1.0, np.abs(stored_logl[finite])
-            )
+            new, old = comps["log_likelihood"][finite], stored_logl[finite]
+            absdev = np.abs(new - old)
+            dev = absdev / np.maximum(1.0, np.abs(old))
             run_worst = float(np.max(dev))
             worst = max(worst, run_worst)
-            if run_worst > log_likelihood_rtol:
+            if np.any(absdev > log_likelihood_atol + log_likelihood_rtol * np.abs(old)):
+                reproduces = False
+            if run_worst > log_likelihood_hard_rtol:
                 raise ValueError(
                     f"run {index}: re-evaluated tapered log-likelihood deviates from the "
-                    f"sampled one by {run_worst:.3g} (relative)"
+                    f"sampled one by {run_worst:.3g} (relative): not the sampled likelihood"
                 )
         w = result.weights
         summary = taper_region_summary(comps["variance"], w, taper)
@@ -2232,7 +2254,21 @@ def posterior_taper_mass(
         "runs": runs,
         "pooled": pooled,
         "max_relative_log_likelihood_mismatch": worst,
+        "reproduces_sampled_log_likelihood": bool(reproduces),
+        "reproduction_tolerance": {"atol": float(log_likelihood_atol), "rtol": float(log_likelihood_rtol),
+                                   "hard_rtol": float(log_likelihood_hard_rtol)},
+        "support_mismatches": int(support_mismatches),
+        "reevaluation_backend": _jax_backend_name(),
     }
+
+
+def _jax_backend_name() -> str | None:
+    try:
+        import jax
+
+        return str(jax.default_backend())
+    except Exception:  # pragma: no cover - JAX is a hard dependency of the tapered path
+        return None
 
 
 def _warn_selection_unsupported(result: DynestyResult, *, stacklevel: int = 3) -> None:

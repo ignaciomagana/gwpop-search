@@ -11,12 +11,15 @@ SUPPORTED requires all six:
 
 * **D1 numerics.** Every nested-sampling and evidence check passes for both
   endpoints (the frozen per-model gate file, ``numerics.production_gates``;
-  the models were scored at one fidelity rung). The fraction of posterior mass
-  inside the variance-taper region is *reported* (``--taper-mass``); the
+  the models were scored at one fidelity rung, see
+  :func:`collect_v2_evaluations` for the F3/F4 second-seed rule). The fraction
+  of posterior mass inside the variance-taper region must be *reported* for
+  both endpoints (``--taper-mass``; D1 is ``incomplete`` without it); the
   tool's G-MC1..5 defaults are reported beside D1, not binding (as in v1).
 * **D2 strength.** ``ln BF - 2 sigma_total - |bias| >= 3``; the number of
-  atoms tried (the trials count: every evaluated edge of the graph) is
-  disclosed next to every claim.
+  atoms tried (the trials count: every distinct evaluated non-root model, so
+  a depth-2 model reached by two parent edges counts once) is disclosed next
+  to every claim.
 * **D3 prior sensitivity.** Halving and doubling each added parameter's prior
   (exact reweighting for the narrowed prior, the Occam relation for the widened
   one, or -- where neither is valid -- an explicit rerun, ``--d3-reruns``)
@@ -65,6 +68,14 @@ SDDR_FLOOR = 0.5                  # D4: max(0.5, 2 sigma)
 SDDR_SIGMAS = 2.0                 # D4
 PPC_LEVEL = PPC_ALPHA             # D6
 ALT_ROOTS = ("A1", "A2")          # D5
+#: D2 (DRAFT, operator approves at freeze): the Monte-Carlo error of a tapered
+#: edge is the first-order error of the untapered estimator
+#: (``first_order_untapered_mc``); the fluctuation of ln T(sigma^2_hat) is
+#: neglected. Inside the taper region d ln T / d ln sigma^2 reaches -p/2 = -15
+#: at the threshold, so a 5% Monte-Carlo error on sigma^2 is ~0.75 nat there.
+#: Above this posterior taper-region mass (either endpoint) the approximation
+#: is not trusted: D2 is ``incomplete`` (and DISFAVOURED is not available).
+TAPER_MASS_D2_LIMIT = 0.10
 ALT_ROOT_DESCRIPTIONS = {
     "A1": "BP2P + beta per mass component (LVK 'Extended' pairing)",
     "A2": "BP2P + kappa(m1)",
@@ -107,13 +118,19 @@ def d1_numerics(claim: Mapping, *, taper_mass: Mapping[str, float] | None = None
     masses = None
     if taper_mass is not None:
         masses = {"parent": taper_mass.get(parent), "child": taper_mass.get(child)}
+    reported = bool(masses and None not in masses.values())
+    reason = None
+    if status == "pass" and not reported:
+        # D1: "the fraction of posterior mass inside the taper region is reported"
+        status, reason = "incomplete", "taper-region posterior mass not reported for both endpoints"
     return {
         "status": status,
+        "reason": reason,
         "production_gates": gates,
         "rung_homogeneous": tool.get("rung_homogeneous"),
         "gmc_failed_reported_not_binding": gmc_failed,
         "taper_mass_fraction": masses,
-        "taper_mass_reported": bool(masses and None not in masses.values()),
+        "taper_mass_reported": reported,
     }
 
 
@@ -122,7 +139,8 @@ def d1_numerics(claim: Mapping, *, taper_mass: Mapping[str, float] | None = None
 # ---------------------------------------------------------------------------
 
 
-def d2_strength(edge: Mapping, *, n_atoms_tried: int) -> dict:
+def d2_strength(edge: Mapping, *, n_atoms_tried: int, taper_mass: Mapping | None = None) -> dict:
+    """D2 strength. ``taper_mass`` = ``{"parent": m_p, "child": m_c}`` (D1's block)."""
     lnbf = edge.get("log_bayes_factor")
     if lnbf is None:
         return {"status": "missing", "reason": "no ln BF", "n_atoms_tried": n_atoms_tried}
@@ -136,14 +154,27 @@ def d2_strength(edge: Mapping, *, n_atoms_tried: int) -> dict:
     bias = abs(float(bias))
     lower = float(lnbf) - STRENGTH_SIGMAS * sigma_total - bias
     upper = float(lnbf) + STRENGTH_SIGMAS * sigma_total + bias
+    status = "pass" if lower >= STRENGTH_THRESHOLD else "fail"
+    disfavoured = bool(upper <= -STRENGTH_THRESHOLD)
+    reason = None
+    masses = [m for m in (taper_mass or {}).values() if m is not None]
+    over = bool(masses) and max(masses) > TAPER_MASS_D2_LIMIT
+    if over:
+        # sigma_total neglects the Monte-Carlo fluctuation of ln T(sigma^2_hat)
+        status, disfavoured = "incomplete", False
+        reason = (f"posterior taper-region mass {max(masses):.3g} > {TAPER_MASS_D2_LIMIT:g}: the first-order "
+                  "(untapered) Monte-Carlo error may understate sigma_total")
     return {
-        "status": "pass" if lower >= STRENGTH_THRESHOLD else "fail",
+        "status": status,
+        "reason": reason,
         "log_bayes_factor": float(lnbf),
         "sigma_total": sigma_total,
         "abs_bias": bias,
         "lower": lower,
         "upper": upper,
-        "disfavoured": bool(upper <= -STRENGTH_THRESHOLD),
+        "disfavoured": disfavoured,
+        "taper_mass_limit": TAPER_MASS_D2_LIMIT,
+        "taper_mass_over_limit": over,
         "n_atoms_tried": int(n_atoms_tried),
     }
 
@@ -425,7 +456,9 @@ def d5_alt_roots(
             continue
         if edge_key in data["inapplicable"]:
             per_root[name] = {"status": "not_applicable", "edge_key": edge_key,
-                              "reason": "the mutation is inapplicable on this root (already part of it)"}
+                              "reason": "the mutation is inapplicable on this root (already part of it, "
+                                        "or defined only relative to the constant form the root replaces; "
+                                        "grammar.v2.v2_d5_atom_semantics)"}
             continue
         value = data["values"].get(edge_key)
         if value is None:
@@ -490,36 +523,91 @@ def _edge_key(edge: Mapping, root_hash: str | None, paths: Mapping[str, tuple] |
     return None
 
 
+#: ``DynestyConfig`` fields that do not define the trajectory rung (as
+#: :data:`gwpop_search.analysis._common._NON_RUNG_FIELDS`)
+_NON_TRAJECTORY_FIELDS = ("sample", "slices", "walks", "batch_size", "seed")
+_RUNG_ORDER = {"F3": 0, "F4": 1}
+
+
+def _trajectory(payload: Mapping) -> dict | None:
+    nested = ((payload.get("diagnostics") or {}).get("nested_sampling") or {})
+    resolved = nested.get("resolved_dynesty_config")
+    if not isinstance(resolved, Mapping):
+        return None
+    return {k: v for k, v in resolved.items() if k not in _NON_TRAJECTORY_FIELDS}
+
+
 def collect_v2_evaluations(paths) -> dict[str, dict]:
     """Per-model D1 inputs from the production evaluator's ``evaluation.json`` files.
 
     ``paths`` are ``evaluation.json`` files or directories searched recursively.
     Returns ``{"gates": {model_hash: passed}, "taper_mass": {model_hash:
     pooled posterior mass fraction inside the taper region}, "fidelity":
-    {model_hash: rung}, "files": {model_hash: path}}``; a model evaluated at
-    more than one rung or in more than one file is refused (D1 needs one rung).
+    {model_hash: rung}, "files": {model_hash: path}, "superseded": {model_hash:
+    path}}``.
+
+    **F3/F4 rule (v2 second seeds).** Every model has one F3 evaluation (one
+    dynesty run); decision-relevant edges are re-evaluated at F4 (the
+    second-seed rung). A model with both uses its **F4** evaluation for D1
+    (its gates include the cross-run checks over the F4 runs) and its taper
+    mass; the F3 evaluation is recorded as ``superseded``. This is not a
+    mixture of procedures: v2 F3 and F4 runs share one dynesty trajectory
+    configuration (nlive, dlogz, bound, caps; checked here when the
+    evaluations record it) and differ only in the number of seeds, so the
+    evidence analysis pools all of a model's runs as repeats of one rung
+    (:func:`gwpop_search.analysis._common.discover_dynesty_results`; the F4
+    root seed differs from the F3 one, so the F4 runs are fresh seeds).
+    Refused: two evaluations of one model at the same rung, a rung other than
+    F3/F4, or F3/F4 evaluations with different trajectory configurations.
     The taper mass is the ``diagnostics.taper.pooled`` block the tapered
     evaluator writes (``summarize_dynesty_fit``); it is absent (not reported)
-    for an untapered likelihood or an F0 row.
+    for an untapered likelihood.
     """
-    out: dict[str, dict] = {"gates": {}, "taper_mass": {}, "fidelity": {}, "files": {}}
+    per_model: dict[str, dict[str, tuple]] = {}
     for path, payload in _evidence_evaluations(paths):
         model_hash = str(payload["model_hash"])
-        if model_hash in out["files"]:
+        rung = str(payload.get("fidelity"))
+        if rung not in _RUNG_ORDER:
+            raise AnalysisInputError(f"{path}: unsupported evaluation rung {rung!r} (v2 uses F3 and F4)")
+        slot = per_model.setdefault(model_hash, {})
+        if rung in slot:
             raise AnalysisInputError(
-                f"model {model_hash} has more than one evaluation ({out['files'][model_hash]}, {path}); "
-                "pass the evaluations of one fidelity rung"
+                f"model {model_hash} has more than one {rung} evaluation ({slot[rung][0]}, {path})"
             )
+        slot[rung] = (path, payload)
+    out: dict[str, dict] = {"gates": {}, "taper_mass": {}, "fidelity": {}, "files": {}, "superseded": {}}
+    trajectories: dict[str, dict] = {}
+    for model_hash, slot in per_model.items():
+        for rung, (path, payload) in slot.items():
+            trajectory = _trajectory(payload)
+            if trajectory is None:
+                continue
+            key = json_dumps_sorted(trajectory)
+            trajectories.setdefault(key, {"config": trajectory, "files": []})["files"].append(str(path))
+        rung = max(slot, key=_RUNG_ORDER.__getitem__)
+        path, payload = slot[rung]
+        if len(slot) > 1:
+            out["superseded"][model_hash] = str(slot["F3"][0])
         diagnostics = payload.get("diagnostics") or {}
         out["files"][model_hash] = str(path)
-        out["fidelity"][model_hash] = payload.get("fidelity")
+        out["fidelity"][model_hash] = rung
         out["gates"][model_hash] = bool(diagnostics.get("passed"))
         pooled = ((diagnostics.get("taper") or {}).get("pooled") or {})
         if "posterior_mass_in_taper_region" in pooled:
             out["taper_mass"][model_hash] = float(pooled["posterior_mass_in_taper_region"])
-    if len(set(out["fidelity"].values())) > 1:
-        raise AnalysisInputError(f"evaluations span several rungs {sorted(set(out['fidelity'].values()))}")
+    if len(trajectories) > 1:
+        listing = "; ".join(f"{v['config']} ({len(v['files'])} files)" for v in trajectories.values())
+        raise AnalysisInputError(
+            "the evaluations use more than one dynesty trajectory configuration; F3 and F4 may be "
+            f"combined only when they differ in the number of seeds alone: {listing}"
+        )
     return out
+
+
+def json_dumps_sorted(payload) -> str:
+    import json
+
+    return json.dumps(payload, sort_keys=True, default=str)
 
 
 def _evidence_evaluations(paths):
@@ -597,9 +685,22 @@ def atom_labels_from_graph_payload(payload: Mapping) -> dict[str, str]:
     return {str(v["mutation_id"]): str(k) for k, v in atoms.items() if isinstance(v, Mapping) and "mutation_id" in v}
 
 
+def _evaluated_edges(report: Mapping) -> list[Mapping]:
+    return [e for e in report.get("edges", []) if not e.get("skipped") and e.get("log_bayes_factor") is not None]
+
+
 def count_atoms_tried(report: Mapping) -> int:
-    """Trials count: distinct evaluated edges of the report (every depth)."""
-    return sum(1 for e in report.get("edges", []) if not e.get("skipped") and e.get("log_bayes_factor") is not None)
+    """Trials count: distinct non-root models tested by an evaluated edge (every depth).
+
+    A depth-2 model has an edge from each of its two depth-1 parents; it is
+    one hypothesis tried, so it counts once (distinct child hashes).
+    """
+    return len({str(e["child_hash"]) for e in _evaluated_edges(report)})
+
+
+def count_edges_evaluated(report: Mapping) -> int:
+    """Evaluated edges (reported beside the trials count)."""
+    return len(_evaluated_edges(report))
 
 
 def label_for(d1: Mapping, d2: Mapping, d3: Mapping, d4: Mapping, d5: Mapping, d6: Mapping) -> str:
@@ -666,7 +767,7 @@ def build_claim_table(
             continue
         lnbf = float(edge["log_bayes_factor"])
         d1 = d1_numerics(claim, taper_mass=taper_mass)
-        d2 = d2_strength(edge, n_atoms_tried=tried)
+        d2 = d2_strength(edge, n_atoms_tried=tried, taper_mass=d1["taper_mass_fraction"])
         d3 = d3_prior(claim, variants, lnbf, reruns=d3_reruns, taper2=taper2,
                       factor=factors.get((claim["parent_hash"], claim["child_hash"])))
         d4 = d4_sddr(claim, edge, sddr_index)
@@ -709,11 +810,14 @@ def build_claim_table(
         "specification": "gwpop-search v2 plan 2026-09-30, claim criteria D1-D6",
         "graph_root_hash": root_hash,
         "n_atoms_tried": tried,
+        "n_atoms_tried_definition": "distinct non-root models tested by an evaluated edge",
+        "n_edges_evaluated": count_edges_evaluated(report),
         "constants": {
             "strength_threshold": STRENGTH_THRESHOLD, "strength_sigmas": STRENGTH_SIGMAS,
             "width_min_log_bf": WIDTH_MIN_LOG_BF, "width_factor": WIDTH_FACTOR,
             "model_prior_min_ratio": MODEL_PRIOR_MIN_RATIO, "sddr_floor": SDDR_FLOOR,
             "sddr_sigmas": SDDR_SIGMAS, "ppc_alpha": PPC_LEVEL, "alt_roots": ALT_ROOT_DESCRIPTIONS,
+            "taper_mass_d2_limit": TAPER_MASS_D2_LIMIT,
         },
         "interpretations_pending_operator_confirmation": [
             "D1 is decided by the frozen per-model gate file; the tool's G-MC1..5 defaults are "
@@ -721,10 +825,19 @@ def build_claim_table(
             "D3 for a negative edge: sign stability of the width variants and of the taper-2 rerun "
             "where one exists; the model-prior clause is reported but inapplicable; a missing taper-2 "
             "rerun does not block DISFAVOURED (taper-2 reruns are budgeted for claimed edges).",
-            "D5: an atom that is already part of an alternative root is not_applicable on that root; "
-            "the other root must then pass.",
+            "D2 for a tapered edge (DRAFT): sigma_total is the first-order Monte-Carlo error of the "
+            "untapered estimator; above a posterior taper-region mass of 0.10 at either endpoint D2 is "
+            "incomplete (the neglected ln T(sigma^2_hat) fluctuation can reach ~0.75 nat at the threshold).",
+            "D5: an atom that is already part of an alternative root (P2 on A1, Z2 on A2), or that is "
+            "defined only relative to the constant form the root replaces (P1 on A1, Z1 on A2), is "
+            "not_applicable on that root; the other root must then pass. On A1 the mass atoms add/remove "
+            "the component's pairing slope with the component (grammar.v2.v2_d5_atom_semantics).",
             "D6 checks the claimed model: the child of a positive edge (the parent of a negative one; "
             "D6 is not required for DISFAVOURED).",
+            "D6 p-values: one-sided P(T_pred >= T_obs) for the four KS distances, two-sided for the "
+            "two Spearman correlations; alpha = 0.01 per statistic without multiplicity correction "
+            "(family-wise false-fail rate of a correct model <= 5.9% over the six statistics); at least "
+            "1000 posterior draws (n_draws * alpha / 2 >= 5).",
         ],
         "edges": rows,
     })
@@ -734,7 +847,8 @@ def render_claims_markdown(table: Mapping) -> str:
     lines = [
         "# v2 claim table (criteria D1-D6)",
         "",
-        f"Atoms tried (trials count, every evaluated edge): **{table['n_atoms_tried']}**.",
+        f"Atoms tried (trials count, distinct evaluated non-root models): **{table['n_atoms_tried']}** "
+        f"({table.get('n_edges_evaluated', '?')} edges evaluated).",
         "",
         "| atom | ln BF | D1 | D2 (lower) | D3 | D4 | D5 | D6 | label |",
         "| --- | ---: | --- | ---: | --- | --- | --- | --- | --- |",

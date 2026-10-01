@@ -597,6 +597,11 @@ def chi_eff_logistic_mixture_logpdf(
 #   by trapz over the q nodes at every m1 node, interpolated linearly in ln m1
 #   (LVK "geomspace" grid; index clipped to the end segments), evaluated in log
 #   space (finite where Z_q underflows); Z_q = 1 when delta_m_2 == 0.
+#   Known, inherited accuracy limit (accepted as LVK-faithful; review of
+#   fe32657): near m1 -> mlow_2 the q support spans only a few q nodes and the
+#   linear-in-Z interpolation error of Z_q is large pointwise; weighted by
+#   p(m1) over prior draws it is small (median 7e-6, max 2.6% when mlow_1 ~
+#   mlow_2 ~ 3 and delta_m_1 is small). The pilot reports it at the posterior.
 #
 # Generalisation (the only one): a population floor ``q_floor``. The pairing
 # lower edge is qmin(m1) = max(q_floor, mlow_2 / m1) and the q nodes are
@@ -747,13 +752,42 @@ class LVKMassGrid:
             self.x0 = self.mmin
             self.dx = float(m1s[1] - m1s[0])
         qs = np.linspace(self.q_floor, 1.0, self.n_q)
-        self.m1s = jnp.asarray(m1s)
-        self.log_m1s = jnp.asarray(np.log(m1s))
-        self.w_m1 = jnp.asarray(trapz_weights(m1s))
-        self.qs = jnp.asarray(qs)
-        self.log_qs = jnp.asarray(np.log(qs))
-        self.w_q = jnp.asarray(trapz_weights(qs))
+        # Nodes are stored as NumPy float64 and converted where they are used,
+        # so a model compiled before jax_enable_x64 is switched on does not keep
+        # float32 grids (review of fe32657).
+        self._np = {
+            "m1s": np.asarray(m1s, dtype=np.float64),
+            "log_m1s": np.log(m1s).astype(np.float64),
+            "w_m1": trapz_weights(m1s).astype(np.float64),
+            "qs": np.asarray(qs, dtype=np.float64),
+            "log_qs": np.log(qs).astype(np.float64),
+            "w_q": trapz_weights(qs).astype(np.float64),
+        }
         self.log_q_floor = float(np.log(self.q_floor))
+
+    @property
+    def m1s(self):
+        return jnp.asarray(self._np["m1s"])
+
+    @property
+    def log_m1s(self):
+        return jnp.asarray(self._np["log_m1s"])
+
+    @property
+    def w_m1(self):
+        return jnp.asarray(self._np["w_m1"])
+
+    @property
+    def qs(self):
+        return jnp.asarray(self._np["qs"])
+
+    @property
+    def log_qs(self):
+        return jnp.asarray(self._np["log_qs"])
+
+    @property
+    def w_q(self):
+        return jnp.asarray(self._np["w_q"])
 
     def log_interp(self, m1, log_m1, lz_nodes):
         x = log_m1 if self.m1_grid == "geomspace" else m1
@@ -912,6 +946,24 @@ def redshift_madau_dickinson_psi_logpdf(z, *, gamma, kappa, z_peak, zmax, cosmol
     return jnp.where(valid, log_shape - log_norm, NEG_INF)
 
 
+def _dvc_dz_float64(cosmology, z) -> np.ndarray:
+    """``dVc/dz`` in NumPy float64 (independent of the JAX x64 flag).
+
+    Mirrors :meth:`FlatLambdaCDM.dVc_dz` on its precomputed float64 grid;
+    other cosmology objects fall back to their own (JAX) method.
+    """
+    z = np.asarray(z, dtype=np.float64)
+    grid_z = getattr(cosmology, "_z_grid", None)
+    grid_dl = getattr(cosmology, "_dL_grid", None)
+    if grid_z is None or grid_dl is None:
+        return np.asarray(cosmology.dVc_dz(jnp.asarray(z)), dtype=np.float64)
+    from .cosmology import C_KM_S
+
+    dc = np.interp(z, grid_z, grid_dl) / (1.0 + z)
+    e = np.sqrt(cosmology.Om0 * (1.0 + z) ** 3 + (1.0 - cosmology.Om0))
+    return 4.0 * np.pi * (C_KM_S / cosmology.H0) * dc**2 / e
+
+
 class PowerLawRedshiftNormTable:
     """ln N(kappa) = ln int_0^zmax dVc/dz (1+z)^(kappa-1) dz on a fixed kappa grid.
 
@@ -926,17 +978,26 @@ class PowerLawRedshiftNormTable:
         nodes, weights = _legendre_nodes(int(quadrature_order))
         zq = 0.5 * float(zmax) * (np.asarray(nodes) + 1.0)
         wq = 0.5 * float(zmax) * np.asarray(weights)
-        log_dvc = np.log(np.asarray(cosmology.dVc_dz(jnp.asarray(zq)), dtype=float))
+        log_dvc = np.log(_dvc_dz_float64(cosmology, zq))
         l1pz = np.log1p(zq)
         kappas = np.linspace(kappa_low, kappa_high, int(n))
         a = log_dvc[None, :] + (kappas[:, None] - 1.0) * l1pz[None, :] + np.log(wq)[None, :]
         amax = a.max(axis=1, keepdims=True)
         e = np.exp(a - amax)
-        self.log_norm = jnp.asarray(amax[:, 0] + np.log(e.sum(axis=1)))
-        self.dlog_norm = jnp.asarray((e * l1pz[None, :]).sum(axis=1) / e.sum(axis=1))
+        # NumPy float64 storage, converted at use (see LVKMassGrid)
+        self._log_norm = (amax[:, 0] + np.log(e.sum(axis=1))).astype(np.float64)
+        self._dlog_norm = ((e * l1pz[None, :]).sum(axis=1) / e.sum(axis=1)).astype(np.float64)
         self.kappa_low, self.kappa_high = float(kappa_low), float(kappa_high)
         self.h = float(kappas[1] - kappas[0])
         self.n = int(n)
+
+    @property
+    def log_norm(self):
+        return jnp.asarray(self._log_norm)
+
+    @property
+    def dlog_norm(self):
+        return jnp.asarray(self._dlog_norm)
 
     def __call__(self, kappa):
         t_all = (kappa - self.kappa_low) / self.h

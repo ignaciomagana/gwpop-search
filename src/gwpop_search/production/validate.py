@@ -77,6 +77,15 @@ def validate_production_freeze(
         "model_graph_root_matches": (
             campaign.model_graph_root_hash == graph["root_hash"]
         ),
+        # the whole file (descriptive metadata included) when the campaign
+        # recorded it; campaigns frozen before the field existed carry None
+        "model_graph_file_sha256_matches": (
+            campaign.model_graph_file_sha256 is None
+            or campaign.model_graph_file_sha256 == graph["file_sha256"]
+        ),
+        "model_graph_file_sha256_recorded_for_v2": (
+            root_profile != "gwtc5-v2" or campaign.model_graph_file_sha256 is not None
+        ),
         "git_commit_matches": (
             not require_current_commit
             or (

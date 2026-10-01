@@ -16,6 +16,24 @@ sky-marginal density basis, the :class:`~gwpop_search.data.v2_policy.GwcatV2Data
   fixed population support (``mmin <= m1_source <= mmax``,
   ``q >= max(q_floor, mmin / m1_source)``, ``z <= zmax``) at the model's
   cosmology, otherwise its likelihood is zero for every hyperparameter;
+* **injection draw support** -- the selection estimate ``xi`` is unbiased
+  only if the injection draw distribution covers the population support
+  wherever detection is possible:
+
+  - *declared* draw bounds (``selection.metadata["draw_support"]`` or the
+    ``draw_support`` argument; keys ``m1_source_min``, ``m1_source_max``,
+    ``q_min``, ``z_max``) must contain the population support (the z bound
+    within a 1% finite-draw tolerance); not evaluated when none is declared
+    (the v2r2 canonical selection records none);
+  - *found-injection edges* (always): at each support edge (``m1`` in
+    ``[mmin, mmax]``, ``q >= q_floor``, ``z <= zmax``) the found injections
+    either reach the edge (within 1%) or thin out smoothly before it. A
+    found-injection density that stops inside the support at a cliff (the
+    density in the last 2% of the found range at least 10% of the mean)
+    means the draws, not the detector, end there, and fails (not evaluated
+    below 1000 found injections). Limitation: on a cumulative mixture a
+    per-run draw bound (e.g. O1/O2 draws to z = 1.30/1.66) is hidden by the
+    other runs; it is checked only through declared bounds;
 * **reported only** -- the PE mass above ``zmax``, the found injections above
   ``zmax`` and below ``q_floor``, and the least-supported event.
 
@@ -66,12 +84,55 @@ def _inside(m1, q, z, *, mmin, mmax, q_floor, zmax):
     )
 
 
-def v2_data_support_report(model, posterior, selection, *, policy=None) -> dict[str, object]:
+#: found-injection edge test: an edge is reached within this relative tolerance
+EDGE_REACH_TOLERANCE = 0.01
+#: width of the top window as a fraction of the found range, and the density
+#: ratio (window density / mean density) at or above which the stop is a cliff
+EDGE_WINDOW_FRACTION = 0.02
+EDGE_CLIFF_DENSITY_RATIO = 0.1
+#: below this many found injections the window test has no power: not evaluated
+EDGE_MIN_FOUND = 1000
+_DRAW_KEYS = ("m1_source_min", "m1_source_max", "q_min", "z_max")
+
+
+def _edge_test(values, edge: float, side: str) -> dict[str, object]:
+    """Does the found-injection extent reach ``edge`` or thin out smoothly before it?"""
+    values = np.asarray(values, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return {"edge": edge, "side": side, "n_found": 0, "reached": False, "cliff": True,
+                "passed": False, "note": "no found injections"}
+    lo, hi = float(values.min()), float(values.max())
+    if values.size < EDGE_MIN_FOUND:
+        return {"edge": float(edge), "side": side, "n_found": int(values.size),
+                "found_extent": hi if side == "upper" else lo, "reached": None, "cliff": None,
+                "passed": True, "note": f"not evaluated: fewer than {EDGE_MIN_FOUND} found injections"}
+    if side == "upper":
+        extent = hi
+        reached = hi >= edge * (1.0 - EDGE_REACH_TOLERANCE)
+        width = hi - lo
+        in_window = values >= hi - EDGE_WINDOW_FRACTION * width
+    else:
+        extent = lo
+        reached = lo <= edge * (1.0 + EDGE_REACH_TOLERANCE)
+        width = hi - lo
+        in_window = values <= lo + EDGE_WINDOW_FRACTION * width
+    ratio = float(np.mean(in_window) / EDGE_WINDOW_FRACTION) if width > 0 else float("inf")
+    cliff = (not reached) and ratio >= EDGE_CLIFF_DENSITY_RATIO
+    return {"edge": float(edge), "side": side, "n_found": int(values.size), "found_extent": extent,
+            "reached": bool(reached), "window_density_ratio": ratio, "cliff": bool(cliff),
+            "passed": bool(not cliff)}
+
+
+def v2_data_support_report(model, posterior, selection, *, policy=None,
+                           draw_support: Mapping[str, float] | None = None) -> dict[str, object]:
     """Check a v2 model's declared support against a canonical PE/selection pair.
 
     ``model`` is a v2 :class:`~gwpop_search.grammar.ModelSpec` or its compiled
     model; ``policy`` an optional :class:`GwcatV2DataPolicy` (or anything with
-    a ``z_max`` attribute / key). Returns a JSON-ready report with ``pass``.
+    a ``z_max`` attribute / key); ``draw_support`` optional declared injection
+    draw bounds (else ``selection.metadata["draw_support"]``). Returns a
+    JSON-ready report with ``pass``.
     """
     compiled = _compiled(model)
     if not compiled.is_v2:
@@ -127,6 +188,31 @@ def v2_data_support_report(model, posterior, selection, *, policy=None) -> dict[
 
     s_m1, s_q, s_z = _source_frame(selection.samples, cosmo)
     s_inside = _inside(s_m1, s_q, s_z, mmin=mmin, mmax=mmax, q_floor=q_floor, zmax=zmax)
+
+    # -- injection draw support ---------------------------------------------
+    declared = draw_support if draw_support is not None else _metadata(selection).get("draw_support")
+    draw_status = "not_declared"
+    if declared is not None:
+        declared = {k: float(v) for k, v in dict(declared).items() if k in _DRAW_KEYS and v is not None}
+        draw_status = "declared"
+        needs = {
+            "m1_source_min": ("<=", mmin), "m1_source_max": (">=", mmax),
+            "q_min": ("<=", q_floor),
+            "z_max": (">=", zmax * (1.0 - EDGE_REACH_TOLERANCE)),
+        }
+        for key, value in declared.items():
+            op, bound = needs[key]
+            ok = value <= bound if op == "<=" else value >= bound
+            check(f"draw_support.declared.{key}", ok, declared=value, population_bound=bound)
+    edges = {
+        "m1_upper": _edge_test(s_m1, mmax, "upper"),
+        "m1_lower": _edge_test(s_m1, mmin, "lower"),
+        "q_lower": _edge_test(s_q, q_floor, "lower"),
+        "z_upper": _edge_test(s_z, zmax, "upper"),
+    }
+    for name, row in edges.items():
+        check(f"draw_support.found_edge.{name}", row["passed"],
+              **{k: v for k, v in row.items() if k != "passed"})
     report = {
         "format_version": V2_DATA_SUPPORT_FORMAT,
         "model_hash": compiled.spec.model_hash,
@@ -143,14 +229,16 @@ def v2_data_support_report(model, posterior, selection, *, policy=None) -> dict[
             "selection_rows_above_zmax": int(np.sum(s_z > zmax)),
             "selection_rows_below_q_floor": int(np.sum(s_q < q_floor)),
             "selection_fraction_in_support": float(np.mean(s_inside)),
+            "draw_support_declaration": draw_status,
         },
     }
     return report
 
 
-def require_v2_data_support(model, posterior, selection, *, policy=None, context: str = "") -> dict[str, object]:
+def require_v2_data_support(model, posterior, selection, *, policy=None, draw_support=None,
+                            context: str = "") -> dict[str, object]:
     """:func:`v2_data_support_report`, raising :class:`V2DataSupportError` on a failure."""
-    report = v2_data_support_report(model, posterior, selection, policy=policy)
+    report = v2_data_support_report(model, posterior, selection, policy=policy, draw_support=draw_support)
     if not report["pass"]:
         failed = [c for c in report["checks"] if not c["passed"]]
         where = f" ({context})" if context else ""

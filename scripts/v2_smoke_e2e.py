@@ -79,7 +79,7 @@ def main(argv=None) -> None:
     parser.add_argument("--n-draw", type=int, default=100_000)
     parser.add_argument("--nlive", type=int, default=48)
     parser.add_argument("--maxcall", type=int, default=None)
-    parser.add_argument("--ppc-draws", type=int, default=500)
+    parser.add_argument("--ppc-draws", type=int, default=1000)  # D6: n * alpha / 2 >= 5
     parser.add_argument("--ignore-current-commit", action="store_true",
                         help="development only: accept a dirty tree / a commit other than the frozen one")
     args = parser.parse_args(argv)

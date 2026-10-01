@@ -106,6 +106,12 @@ class ProductionCampaignConfig:
     agents_enabled: bool = False
     sampler_backend: Mapping[str, str] = field(default_factory=_default_sampler_backend)
     format_version: str = PRODUCTION_CAMPAIGN_FORMAT_VERSION
+    #: SHA-256 of the canonical JSON of the whole frozen graph *file*
+    #: (``verify_graph_file(...)["file_sha256"]``), covering descriptive keys
+    #: outside the model graph (the v2 ``metadata`` block: atom labels the
+    #: claim table uses, DRAFT prior text, G12 records). Optional so that
+    #: campaigns frozen before it existed keep their hash; required for v2.
+    model_graph_file_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.format_version in LEGACY_PRODUCTION_CAMPAIGN_FORMATS:
@@ -126,11 +132,10 @@ class ProductionCampaignConfig:
         )
         if not self.campaign_id:
             raise ValueError("campaign_id cannot be empty")
-        for name in (
-            "dataset_manifest_hash",
-            "model_graph_hash",
-            "model_graph_root_hash",
-        ):
+        names = ["dataset_manifest_hash", "model_graph_hash", "model_graph_root_hash"]
+        if self.model_graph_file_sha256 is not None:
+            names.append("model_graph_file_sha256")
+        for name in names:
             value = str(getattr(self, name))
             if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
                 raise ValueError(f"{name} must be a SHA-256 hex digest")
@@ -156,6 +161,11 @@ class ProductionCampaignConfig:
             "state_database": self.state_database,
             "agents_enabled": bool(self.agents_enabled),
             "sampler_backend": dict(self.sampler_backend),
+            **(
+                {}
+                if self.model_graph_file_sha256 is None
+                else {"model_graph_file_sha256": self.model_graph_file_sha256}
+            ),
         }
 
     def canonical_json(self) -> str:
@@ -195,6 +205,11 @@ class ProductionCampaignConfig:
             agents_enabled=bool(payload.get("agents_enabled", False)),
             sampler_backend=dict(payload["sampler_backend"]),
             format_version=str(version),
+            model_graph_file_sha256=(
+                None
+                if payload.get("model_graph_file_sha256") is None
+                else str(payload["model_graph_file_sha256"])
+            ),
         )
 
 

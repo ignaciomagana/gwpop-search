@@ -309,9 +309,12 @@ def v2_campaign_numerics(
                 "F0": "prior-support scan + JAX/NumPy parity (every node)",
                 "F3": "one dynesty run per model, nlive 500, dlogz 0.1, multi/rslice",
                 "F4": (
-                    "second-seed rung (2 runs) for decision-relevant edges only; repeat 0 "
-                    "has the same seed and configuration as the F3 run, so an orchestrator "
-                    "can reuse it (reuse NOT implemented here)"
+                    "second-seed rung (2 runs) for decision-relevant edges only. The executor's "
+                    "evaluation seed depends on the rung, so both F4 runs are fresh seeds (the F3 "
+                    "run is not repeated); F3 and F4 share one trajectory configuration, so the "
+                    "evidence analysis pools all three runs of such a model and D1 uses the F4 "
+                    "evaluation (claims_v2.collect_v2_evaluations). Cost: 2 extra runs per "
+                    "endpoint, not 1 (the plan's second-seed line assumed 1)"
                 ),
             },
         },
@@ -333,8 +336,13 @@ def v2_campaign_numerics(
 
 
 def write_v2_draft_configs(out_dir: str | Path) -> dict[str, str]:
-    """Write the DRAFT v2 fidelity (primary + taper-2 sensitivity) and campaign JSONs."""
+    """Write the DRAFT v2 fidelity (primary + taper-2 sensitivity) and campaign JSONs.
+
+    Refuses any path with a ``frozen`` component (drafts never go to frozen/).
+    """
     out = Path(out_dir)
+    if "frozen" in out.resolve().parts or "frozen" in out.parts:
+        raise ValueError(f"refusing to write DRAFT configs under a frozen/ directory: {out}")
     out.mkdir(parents=True, exist_ok=True)
     files = {
         "primary": "fidelity_v2_DRAFT.json",

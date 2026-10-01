@@ -14,6 +14,35 @@ class InapplicableMutation(ValueError):
 
 
 @dataclass(frozen=True)
+class ConditionalPriors:
+    """Extra prior changes applied only when the *parent* has ``block.options[option] == value``
+    (or, with ``option=None``, ``block.family == value``).
+
+    Used when an atom on one block owns hyperparameters of another block, e.g.
+    the v2 mass add/drop-a-peak atoms on a root whose pairing slope is per mass
+    component: the pairing slope ``beta_<c>`` of the added/dropped component
+    must be added/removed together with the component (one structural axis);
+    and the per-component pairing atom adds one slope per component of the
+    parent's mass family.
+    """
+
+    block: str
+    option: str | None
+    value: JsonValue
+    prior_updates: Mapping[str, PriorConfig] = field(default_factory=dict)
+    prior_removals: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "prior_removals", tuple(self.prior_removals))
+
+    def applies(self, parent: ModelSpec) -> bool:
+        block = getattr(parent, self.block)
+        if self.option is None:
+            return block.family == self.value
+        return block.options.get(self.option) == self.value
+
+
+@dataclass(frozen=True)
 class MutationSpec:
     mutation_id: str
     block: str
@@ -41,6 +70,12 @@ class MutationSpec:
     #: restriction beyond ``requires_family``). Used by the v2 correlation atoms,
     #: which apply to every v2 chi_eff family.
     requires_any_family: tuple[str, ...] = ()
+    #: The mutation applies only if the parent block carries these option
+    #: values (e.g. the v2 pairing-slope step P1 is defined relative to a
+    #: constant slope; Madau-Dickinson Z1 relative to a constant kappa).
+    requires_options: Mapping[str, JsonValue] = field(default_factory=dict)
+    #: Cross-block prior changes conditioned on the parent's option state.
+    conditional_priors: tuple[ConditionalPriors, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.mutation_id:
@@ -61,6 +96,7 @@ class MutationSpec:
             raise ValueError("an option cannot be both set and carried")
         object.__setattr__(self, "carry_options", tuple(self.carry_options))
         object.__setattr__(self, "requires_any_family", tuple(self.requires_any_family))
+        object.__setattr__(self, "conditional_priors", tuple(self.conditional_priors))
 
     @property
     def axis(self) -> str:
@@ -86,6 +122,12 @@ def apply_mutation(
             f"{mutation.mutation_id} requires {mutation.block} family in "
             f"{list(mutation.requires_any_family)}, found {block.family!r}"
         )
+    for key, value in mutation.requires_options.items():
+        if block.options.get(key) != value:
+            raise InapplicableMutation(
+                f"{mutation.mutation_id} requires {mutation.block}.{key}={value!r}, "
+                f"found {block.options.get(key)!r}"
+            )
 
     if mutation.operation == "change_family":
         family = str(mutation.value)
@@ -122,6 +164,11 @@ def apply_mutation(
     for name in mutation.prior_removals:
         priors.pop(name, None)
     priors.update(mutation.prior_updates)
+    for rule in mutation.conditional_priors:
+        if rule.applies(parent):
+            for name in rule.prior_removals:
+                priors.pop(name, None)
+            priors.update(rule.prior_updates)
 
     child = replace(parent, **{mutation.block: child_block, "priors": priors})
     registry.validate_model(child)

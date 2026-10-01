@@ -440,6 +440,21 @@ def test_posterior_taper_mass_on_a_tapered_run():
         assert run.likelihood_identity == identity["likelihood"]
     report = posterior_taper_mass(runs, loglike)
     assert report["max_relative_log_likelihood_mismatch"] <= 1e-9
+    assert report["reproduces_sampled_log_likelihood"] is True
+    assert report["support_mismatches"] == 0
+    assert report["reevaluation_backend"] == jax.default_backend()
+    # rounding-level differences (another device / batch) are recorded, not fatal
+    import dataclasses
+
+    nudged = [dataclasses.replace(runs[0], log_likelihoods=np.asarray(runs[0].log_likelihoods) * (1 + 1e-7)),
+              runs[1]]
+    soft = posterior_taper_mass(nudged, loglike)
+    assert soft["reproduces_sampled_log_likelihood"] is False
+    assert 1e-8 < soft["max_relative_log_likelihood_mismatch"] < 1e-4
+    # a gross mismatch (not the sampled likelihood) still raises
+    gross = [dataclasses.replace(runs[0], log_likelihoods=np.asarray(runs[0].log_likelihoods) + 1.0), runs[1]]
+    with pytest.raises(ValueError, match="not the sampled likelihood"):
+        posterior_taper_mass(gross, loglike)
     for block in (*report["runs"], report["pooled"]):
         assert 0.0 <= block["posterior_mass_above_threshold"] <= block["posterior_mass_in_taper_region"] <= 1.0
         assert 0.0 < block["posterior_mean_taper"] <= 1.0
@@ -462,3 +477,33 @@ def test_posterior_taper_mass_on_a_tapered_run():
     untapered = build_batched_log_likelihood(pe, sel, density_ab_jax, names, batch_size=16)
     with pytest.raises(ValueError, match="variance taper"):
         posterior_taper_mass(runs, untapered)
+
+
+def test_tapered_terms_materialise_the_density_once():
+    """Regression guard for the tapered-likelihood cost (review of fe32657: XLA
+    recomputed the density once per reduction, 3.4x the untapered cost): the
+    event and selection passes each put the density behind an optimization barrier."""
+    pe = make_toy_posterior_catalog()
+    sel = make_toy_selection_catalog()
+    for chunk in (None, 4):
+        cfg = HBIConfig(selection_chunk_size=chunk, variance_taper=SMOOTH)
+        fn = build_terms_and_variance_function(pe, sel, density_jax, config=cfg, jit=False)
+        hp = dict(zip(NAMES, POINTS[0]))
+        text = jax.jit(fn).lower(hp).as_text()
+        assert text.count("optimization_barrier") >= 2, text.count("optimization_barrier")
+
+
+def test_tapered_terms_propagate_a_nan_density_like_the_untapered_path():
+    pe = make_toy_posterior_catalog()
+    sel = make_toy_selection_catalog()
+
+    def nan_density(samples, hp):
+        return jnp.where(samples["q"] > 0.5, jnp.nan, density_jax(samples, hp))
+
+    hp = dict(zip(NAMES, POINTS[0]))
+    events, log_exposure, _, _ = build_terms_and_variance_function(
+        pe, sel, nan_density, config=HBIConfig(variance_taper=SMOOTH)
+    )(hp)
+    plain_events, plain_exposure = build_terms_function(pe, sel, nan_density, config=HBIConfig())(hp)
+    np.testing.assert_array_equal(np.isnan(np.asarray(events)), np.isnan(np.asarray(plain_events)))
+    assert np.isnan(float(log_exposure)) == np.isnan(float(plain_exposure))

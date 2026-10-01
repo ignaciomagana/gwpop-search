@@ -337,7 +337,9 @@ def reweight_to_variant(
     r_rel = np.exp(log_r - delta_ln_z)
     se_ln_z = float(math.sqrt(float(np.sum(sample.weights**2 * (r_rel - 1.0) ** 2))))
     rng = np.random.default_rng(np.random.SeedSequence([int(seed), 0x5EED]))
-    n_khat = max(int(criteria.n_khat_draws), sample.n_points)
+    # k-hat on an equal-weight resample no larger than the primary Kish ESS:
+    # a larger resample fills the tail with duplicates and biases the Pareto fit
+    n_khat = int(max(10, min(int(criteria.n_khat_draws), math.floor(ess_root))))
     idx = equal_weight_resample(np.arange(sample.n_points), sample.weights, n_khat, rng)
     finite_r = log_r[idx][np.isfinite(log_r[idx])]
     if finite_r.size and float(np.ptp(finite_r)) <= 1e-12 and finite_r.size == idx.size:
@@ -381,6 +383,8 @@ def reweight_to_variant(
         "ess_variant": ess_new,
         "ess_fraction": ess_new / ess_root,
         "pareto_khat": khat,
+        "pareto_khat_resample_size": n_khat,
+        "primary_ess_below_min_ess": bool(ess_root < criteria.min_ess),
         "n_zero_variant_likelihood": int(np.sum(~np.isfinite(log_r))),
         "posterior_primary": root,
         "posterior_variant": new,
