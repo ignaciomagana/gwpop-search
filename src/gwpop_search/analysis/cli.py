@@ -17,7 +17,10 @@ Markdown for the model-comparison report).
 * ``run-ppc``                    — v2 D6 posterior predictive checks with selection
 * ``reweight-data-variants``     — importance reweighting to the 249-event / SNR 9 / SNR 11
   variants with ESS and the (operator-gated) rerun flag; never runs a sampler
-* ``collect-v2-evaluations``     — per-model D1 gates and taper mass from evaluation.json
+* ``collect-v2-evaluations``     — per-model D1 gates, taper mass and D2 posterior fractions
+  below the cuts from evaluation.json
+* ``posthoc-posterior-mass-below`` — D2 cut bracketing for an existing evaluation:
+  recompute P(sigma^2 <= c) from its stored dynesty results (CPU-capable, read-only)
 * ``v2-claim-table``             — the v2 claim table, criteria D1-D6
 """
 
@@ -620,6 +623,43 @@ def _collect_v2_evaluations(args) -> None:
     _write(args.gates_output, collected["gates"])
     if args.taper_mass_output:
         _write(args.taper_mass_output, collected["taper_mass"])
+    if args.mass_below_output:
+        from .posthoc_cut import posthoc_report
+
+        rows = [{"model_hash": h, "entry": e} for h, e in sorted(collected["mass_below"].items())]
+        _write(args.mass_below_output, posthoc_report(rows, cuts=(), provenance={"source": "evaluation.json"}))
+
+
+def _posthoc_posterior_mass_below(args) -> None:
+    """D2 cut bracketing for evaluations that finished without ``posterior_mass_below``."""
+    _enable_x64()
+    from gwpop_search.production import load_dataset_manifest, load_frozen_dataset, load_production_campaign
+
+    from .posthoc_cut import posthoc_mass_below, posthoc_report
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    posterior, selection = load_frozen_dataset(manifest, data_base_dir=Path(args.base_dir))
+    cuts = _float_list(args.cuts)
+    rows = []
+    for run_dir in args.run_dir:
+        row = posthoc_mass_below(
+            Path(run_dir), posterior, selection, campaign.fidelity,
+            dataset_identity=manifest.manifest_hash, cuts=cuts,
+            max_points_per_run=args.max_points_per_run, seed=args.seed, batch_size=args.batch_size,
+        )
+        rows.append(row)
+        for key, cut in sorted(row["entry"]["cuts"].items(), key=lambda kv: kv[1]["cut"]):
+            print(f"{row['model_hash'][:16]} P(sigma^2 <= {cut['cut']:g}) = {cut['fraction']:.4f} "
+                  f"+- {cut['error']:.4f} (n_eff {cut['n_eff']:.0f})")
+    import jax
+
+    _write(args.output, posthoc_report(rows, cuts=cuts, provenance={
+        "manifest": str(args.manifest), "manifest_hash": manifest.manifest_hash,
+        "campaign": str(args.campaign), "base_dir": str(args.base_dir),
+        "max_points_per_run": args.max_points_per_run, "seed": args.seed,
+        "jax_backend": jax.default_backend(),
+    }))
 
 
 def _v2_claim_table(args) -> None:
@@ -655,14 +695,28 @@ def _v2_claim_table(args) -> None:
     taper_mass = None
     if args.taper_mass:
         taper_mass = {str(k): float(v) for k, v in read_json(args.taper_mass).items() if k != "format_version"}
+    mass_below = {}
+    for path in args.mass_below or []:
+        from .posthoc_cut import read_mass_below
+
+        for model_hash, entry in read_mass_below(read_json(path)).items():
+            if model_hash in mass_below:
+                raise ValueError(f"model {model_hash} appears in more than one --mass-below file")
+            mass_below[model_hash] = entry
     if args.evaluations:
         from .claims_v2 import collect_v2_evaluations
 
-        collected = collect_v2_evaluations(args.evaluations)["taper_mass"]
+        everything = collect_v2_evaluations(args.evaluations)
+        collected = everything["taper_mass"]
         clash = sorted(k for k in set(collected) & set(taper_mass or {}) if collected[k] != taper_mass[k])
         if clash:
             raise ValueError(f"--taper-mass disagrees with --evaluations for {clash}")
         taper_mass = {**collected, **(taper_mass or {})}
+        both = sorted(set(everything["mass_below"]) & set(mass_below))
+        if both:
+            raise ValueError(f"posterior fractions below the cuts given twice (--mass-below and "
+                             f"--evaluations) for {both}")
+        mass_below = {**everything["mass_below"], **mass_below}
     labels = None
     if args.atom_labels:
         labels = {str(k): str(v) for k, v in read_json(args.atom_labels).items()}
@@ -677,8 +731,8 @@ def _v2_claim_table(args) -> None:
             labels = atom_labels_from_graph_payload(read_json(args.graph)) or None
     table = build_claim_table(
         report, sddr=sddr, prior_sensitivity=prior, d3_reruns=reruns, taper2=taper2, alt_roots=alt,
-        ppc=ppc, loo=loo, taper_mass=taper_mass, graph=graph, n_atoms_tried=args.n_atoms_tried,
-        atom_labels=labels,
+        ppc=ppc, loo=loo, taper_mass=taper_mass, mass_below=mass_below or None, graph=graph,
+        n_atoms_tried=args.n_atoms_tried, atom_labels=labels,
     )
     _write(args.output, table)
     markdown = render_claims_markdown(table)
@@ -843,7 +897,28 @@ def register_analysis_subcommands(subparsers) -> None:
                          help="evaluation.json file or directory; repeatable")
     collect.add_argument("--gates-output", required=True, help="JSON {model_hash: gates passed}")
     collect.add_argument("--taper-mass-output", help="JSON {model_hash: posterior taper mass}")
+    collect.add_argument("--mass-below-output",
+                         help="posthoc-format JSON of the recorded P(sigma^2 <= c) (v2-claim-table --mass-below)")
     collect.set_defaults(func=_collect_v2_evaluations)
+
+    posthoc = subparsers.add_parser(
+        "posthoc-posterior-mass-below",
+        help="D2 cut bracketing for an existing evaluation: recompute P(sigma^2 <= c) at every weighted "
+        "dynesty point with the run's own data/model/HBI configuration (read-only on the run directory)",
+    )
+    posthoc.add_argument("--run-dir", action="append", required=True,
+                         help="<output root>/<F3|F4>/<model hash> (holds evaluation.json); repeatable")
+    posthoc.add_argument("--manifest", required=True, help="the frozen dataset manifest of the evaluation")
+    posthoc.add_argument("--campaign", required=True, help="the campaign JSON the evaluation ran under")
+    posthoc.add_argument("--base-dir", default=".")
+    posthoc.add_argument("--cuts", default="0.9", help="comma-separated variance cuts (the threshold is added)")
+    posthoc.add_argument("--max-points-per-run", type=int,
+                         help="evaluate a systematic-resampling subset of this many draws per run "
+                         "(errors include the subsampling stage); default: every weighted point")
+    posthoc.add_argument("--seed", type=int, default=0, help="subsampling seed")
+    posthoc.add_argument("--batch-size", type=int, default=64)
+    posthoc.add_argument("--output", required=True)
+    posthoc.set_defaults(func=_posthoc_posterior_mass_below)
 
     claims = subparsers.add_parser("v2-claim-table", help="the v2 claim table (criteria D1-D6)")
     claims.add_argument("--report", required=True, help="analyze-model-comparison JSON")
@@ -859,8 +934,12 @@ def register_analysis_subcommands(subparsers) -> None:
     claims.add_argument("--ppc", action="append", help="run-ppc output; repeatable")
     claims.add_argument("--loo", help="run-psis-loo-influence output (reported, not binding)")
     claims.add_argument("--taper-mass", help="JSON {model_hash: posterior mass fraction inside the taper}")
+    claims.add_argument("--mass-below", action="append",
+                        help="posthoc-posterior-mass-below (or collect-v2-evaluations --mass-below-output) "
+                        "JSON: D2 posterior fractions below the tighter cuts; repeatable")
     claims.add_argument("--evaluations", action="append",
-                        help="evaluation.json file or directory (the taper mass of every tapered "
+                        help="evaluation.json file or directory (the taper mass and recorded posterior "
+                        "fractions below the cuts of every tapered "
                         "evaluation is read from it); repeatable")
     claims.add_argument("--atom-labels",
                         help="JSON {mutation_id: plan atom label} (default: the v2 graph's metadata.atoms)")

@@ -213,9 +213,17 @@ class NumericalCriteria:
     (``taper.posterior_mass_in_taper_region``); it needs a tapered HBI
     configuration.
 
-    Serialization omits ``binding`` when empty and
-    ``max_posterior_taper_mass`` when ``None``, so the hashes of configurations
-    written before these fields existed are unchanged.
+    ``posterior_mass_below_cuts`` (reported, never gated; empty: not
+    computed) lists variance cuts ``c`` at which the tapered evaluation
+    records the posterior fraction ``P(sigma^2 <= c)`` with its Kish-ESS
+    binomial error (``taper.pooled.posterior_mass_below``; the taper's own
+    threshold is always added to a non-empty list). Under the sharp cut the
+    evidence at a tighter cut ``c'`` is ``Z(c') = Z(c) P(sigma^2 <= c')``
+    (v2 D2, :mod:`gwpop_search.analysis.claims_v2`).
+
+    Serialization omits ``binding`` when empty, ``max_posterior_taper_mass``
+    when ``None`` and ``posterior_mass_below_cuts`` when empty, so the hashes
+    of configurations written before these fields existed are unchanged.
     """
 
     max_cross_run_r_hat: float | None = None
@@ -235,9 +243,17 @@ class NumericalCriteria:
     insertion_index_advisory: bool = False
     binding: Mapping[str, bool] = field(default_factory=dict)
     max_posterior_taper_mass: float | None = None
+    posterior_mass_below_cuts: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
+        if isinstance(self.posterior_mass_below_cuts, (str, bytes)) or not isinstance(
+            self.posterior_mass_below_cuts, (tuple, list)
+        ):
+            raise TypeError("posterior_mass_below_cuts must be a sequence of variance cuts")
+        from gwpop_search.hbi.taper import normalize_cuts
+
+        set_(self, "posterior_mass_below_cuts", normalize_cuts(self.posterior_mass_below_cuts))
         if not isinstance(self.binding, Mapping):
             raise TypeError("binding must be a mapping of check family -> bool")
         binding = {str(key): value for key, value in self.binding.items()}
@@ -324,6 +340,10 @@ class NumericalCriteria:
             payload.pop("binding")
         if payload["max_posterior_taper_mass"] is None:
             payload.pop("max_posterior_taper_mass")
+        if not payload["posterior_mass_below_cuts"]:
+            payload.pop("posterior_mass_below_cuts")
+        else:
+            payload["posterior_mass_below_cuts"] = list(self.posterior_mass_below_cuts)
         return payload
 
     @classmethod
@@ -1098,8 +1118,11 @@ def summarize_dynesty_fit(
     of the same estimator; built here with ``taper_batch_size`` rows per
     call when omitted). It is always reported; the check
     ``taper.posterior_mass_in_taper_region`` is added only when
-    ``criteria.max_posterior_taper_mass`` is set. Without a taper the block
-    is ``None``.
+    ``criteria.max_posterior_taper_mass`` is set. With
+    ``criteria.posterior_mass_below_cuts`` every summary of the block also
+    carries ``posterior_mass_below`` (``P(sigma^2 <= c)`` and its Kish-ESS
+    binomial error at each cut and at the taper threshold; reported, never
+    gated). Without a taper the block is ``None``.
 
     Binding: ``criteria.binding`` is applied to every check (each carries
     ``binding``; non-binding families are recorded as advisory).
@@ -1233,7 +1256,10 @@ def summarize_dynesty_fit(
                 hbi_config=hbi_config,
                 batch_size=taper_batch_size,
             )
-        taper_block = posterior_taper_mass(results, loglike)
+        cuts = ()
+        if criteria.posterior_mass_below_cuts:
+            cuts = tuple(sorted({*criteria.posterior_mass_below_cuts, float(taper.threshold)}))
+        taper_block = posterior_taper_mass(results, loglike, cuts=cuts)
         if criteria.max_posterior_taper_mass is not None:
             checks.append(
                 _check(

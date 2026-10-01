@@ -16,10 +16,23 @@ SUPPORTED requires all six:
   of posterior mass inside the variance-taper region must be *reported* for
   both endpoints (``--taper-mass``; D1 is ``incomplete`` without it); the
   tool's G-MC1..5 defaults are reported beside D1, not binding (as in v1).
-* **D2 strength.** ``ln BF - 2 sigma_total - |bias| >= 3``; the number of
-  atoms tried (the trials count: every distinct evaluated non-root model, so
-  a depth-2 model reached by two parent edges counts once) is disclosed next
-  to every claim.
+* **D2 strength.** ``ln BF - 2 sigma_total - |bias| >= 3`` at the primary
+  variance cut ``c = 1`` **and** at the tighter cut ``c' = 0.9``
+  (:data:`D2_TIGHTER_CUTS`; operator decision 2026-10-01). Under the sharp
+  LVK cut (likelihood ``x 1[sigma^2 <= c]``) the evidence at ``c' < c`` is
+  exactly ``Z(c') = Z(c) P_post(sigma^2 <= c' | cut c)``, so per edge
+  ``ln BF(c') = ln BF(c) + ln P_child(sigma^2 <= c') - ln P_parent(sigma^2 <= c')``;
+  at ``c'`` the same ``sigma_total`` and ``|bias|`` are used, with the
+  binomial errors of the two fractions (Kish ESS of the importance-weighted
+  dead + live points, ``sqrt(p (1 - p) / n_eff) / p`` in ``ln P``) added in
+  quadrature. The fractions come from the evaluations
+  (``diagnostics.taper.pooled.posterior_mass_below``) or from the post-hoc
+  recomputation (:mod:`gwpop_search.analysis.posthoc_cut`); without them D2
+  is ``incomplete``. With the cut-4 D3 rerun this brackets the cut. The
+  near-cut band mass (``sigma^2 > 0.95``) is reported, not gating. The
+  number of atoms tried (the trials count: every distinct evaluated
+  non-root model, so a depth-2 model reached by two parent edges counts
+  once) is disclosed next to every claim.
 * **D3 prior sensitivity.** Halving and doubling each added parameter's prior
   (exact reweighting for the narrowed prior, the Occam relation for the widened
   one, or -- where neither is valid -- an explicit rerun, ``--d3-reruns``)
@@ -41,8 +54,9 @@ SUPPORTED requires all six:
   positive edge): no pre-declared statistic at ``p < 0.01``
   (:mod:`gwpop_search.analysis.ppc`).
 
-DISFAVOURED: ``ln BF + 2 sigma_total + |bias| <= -3`` with D1 passing and the
-sign stable under D3 (width variants, and the taper-2 rerun where one exists).
+DISFAVOURED: ``ln BF + 2 sigma_total + |bias| <= -3`` at both cuts ``c = 1``
+and ``c' = 0.9`` (the symmetric D2 condition) with D1 passing and the sign
+stable under D3 (width variants, and the taper-2 rerun where one exists).
 INCONCLUSIVE: everything else.
 """
 
@@ -69,21 +83,12 @@ SDDR_FLOOR = 0.5                  # D4: max(0.5, 2 sigma)
 SDDR_SIGMAS = 2.0                 # D4
 PPC_LEVEL = PPC_ALPHA             # D6
 ALT_ROOTS = ("A1", "A2")          # D5
-#: D2 (DRAFT, operator approves at freeze): the Monte-Carlo error of a tapered
-#: edge is the first-order error of the untapered estimator
-#: (``first_order_untapered_mc``); the fluctuation of ln T(sigma^2_hat) is
-#: neglected. Under the v2 sharp cut (the LVK form) ln T is 0 or -inf, and the
-#: neglected term is the posterior mass that flips in or out of the cut under
-#: another Monte-Carlo realisation of sigma^2_hat: the taper region is the band
-#: sigma^2 > (1 - 0.05) x threshold (VarianceTaper.sharp_region_band, the
-#: assumed 5% relative error of sigma^2_hat). (Smooth alternative: d ln T /
-#: d ln sigma^2 reaches -p/2 = -15 at the threshold, ~0.75 nat per 5% error.)
-#: Above this posterior taper-region mass (either endpoint) the approximation
-#: is not trusted: D2 is ``incomplete`` (and DISFAVOURED is not available).
-#: OPEN: the LVK Default posterior has 67% of its mass at sigma^2 > 0.95
-#: (staging/v2/TAPER_FORM.md), so an R0 that piles against the cut the same
-#: way makes D2 incomplete everywhere at 0.10 (pilot item a-4 decides).
-TAPER_MASS_D2_LIMIT = 0.10
+#: D2 cut bracketing (operator decision 2026-10-01; replaces the DRAFT near-cut
+#: mass limit 0.10): D2 / DISFAVOURED must hold at the primary sharp cut and at
+#: every tighter cut, ln BF(c') = ln BF(c) + ln P_child(sigma^2 <= c') -
+#: ln P_parent(sigma^2 <= c') (exact for a sharp cut; Z(c') = Z(c) P_post).
+D2_PRIMARY_CUT = 1.0
+D2_TIGHTER_CUTS = (0.9,)
 ALT_ROOT_DESCRIPTIONS = {
     "A1": "BP2P + beta per mass component (LVK 'Extended' pairing)",
     "A2": "BP2P + kappa(m1)",
@@ -147,8 +152,116 @@ def d1_numerics(claim: Mapping, *, taper_mass: Mapping[str, float] | None = None
 # ---------------------------------------------------------------------------
 
 
-def d2_strength(edge: Mapping, *, n_atoms_tried: int, taper_mass: Mapping | None = None) -> dict:
-    """D2 strength. ``taper_mass`` = ``{"parent": m_p, "child": m_c}`` (D1's block)."""
+def mass_below_entry(taper_summary: Mapping, *, source=None) -> dict | None:
+    """Per-model D2 input from a taper summary block (``diagnostics.taper.pooled``).
+
+    Returns ``{"threshold", "kind", "kish_ess", "near_cut_band_mass", "cuts":
+    {cut_key: {"cut", "fraction", "error", "n_eff"}}, "source"}``, or ``None``
+    when the block carries no ``posterior_mass_below``.
+    """
+    below = taper_summary.get("posterior_mass_below")
+    if not below:
+        return None
+    taper = taper_summary.get("taper") or {}
+    return {
+        "threshold": None if taper.get("threshold") is None else float(taper["threshold"]),
+        "kind": str(taper.get("kind", DEFAULT_TAPER_KIND)),
+        "kish_ess": taper_summary.get("kish_ess"),
+        "near_cut_band_mass": taper_summary.get("posterior_mass_in_taper_region"),
+        "cuts": {str(k): dict(v) for k, v in below.items()},
+        "source": None if source is None else str(source),
+    }
+
+
+def _fraction_at(entry: Mapping | None, cut: float):
+    if not entry:
+        return None
+    from gwpop_search.hbi.taper import cut_key
+
+    row = (entry.get("cuts") or {}).get(cut_key(cut))
+    if row is None:
+        return None
+    return float(row["fraction"]), float(row.get("error") or 0.0)
+
+
+def d2_at_cut(
+    lnbf: float,
+    sigma_total: float,
+    bias: float,
+    cut: float,
+    *,
+    parent: Mapping | None,
+    child: Mapping | None,
+    primary_cut: float = D2_PRIMARY_CUT,
+) -> dict:
+    """The D2 inequality at a tighter sharp cut ``cut < primary_cut``.
+
+    ``parent``/``child`` are :func:`mass_below_entry` blocks. ``ln BF(c') =
+    ln BF + ln p_c - ln p_p``; ``sigma(c') = hypot(sigma_total, e_c / p_c,
+    e_p / p_p)`` (delta method on ``ln p``, ``e`` the Kish-ESS binomial
+    error); ``lower/upper = ln BF(c') -/+ (2 sigma(c') + |bias|)``. Status
+    ``pass``/``fail`` (D2 lower bound), ``disfavoured`` (upper bound), or
+    ``missing``/``incomplete`` (no fractions; a smooth taper or a cut that is
+    not tighter than the evaluations' threshold, for which the identity does
+    not hold; a zero fraction, which the samples cannot resolve).
+    """
+    out: dict[str, object] = {"cut": float(cut), "primary_cut": float(primary_cut)}
+    if not float(cut) < float(primary_cut):
+        return {**out, "status": "incomplete", "reason": "cut is not tighter than the primary cut"}
+    fp, fc = _fraction_at(parent, cut), _fraction_at(child, cut)
+    if fp is None or fc is None:
+        return {**out, "status": "missing",
+                "reason": f"posterior fraction below sigma^2 = {cut:g} not reported for both endpoints"}
+    for name, entry in (("parent", parent), ("child", child)):
+        if entry.get("kind", DEFAULT_TAPER_KIND) != "sharp":
+            return {**out, "status": "incomplete",
+                    "reason": f"{name} evaluation is not under a sharp cut (Z(c') = Z(c) P holds only there)"}
+        threshold = entry.get("threshold")
+        if threshold is None or float(threshold) != float(primary_cut):
+            return {**out, "status": "incomplete",
+                    "reason": f"{name} evaluation cut {threshold} is not the primary cut {primary_cut:g}"}
+    (p_p, e_p), (p_c, e_c) = fp, fc
+    out.update({"fraction_parent": p_p, "fraction_parent_error": e_p,
+                "fraction_child": p_c, "fraction_child_error": e_c})
+    if not (p_p > 0.0 and p_c > 0.0):
+        return {**out, "status": "incomplete",
+                "reason": "no posterior mass below the cut at one endpoint (ln BF(c') not resolved)"}
+    delta = math.log(p_c) - math.log(p_p)
+    sigma_fraction = math.hypot(e_c / p_c, e_p / p_p)
+    sigma_cut = math.hypot(float(sigma_total), sigma_fraction)
+    lnbf_cut = float(lnbf) + delta
+    lower = lnbf_cut - STRENGTH_SIGMAS * sigma_cut - bias
+    upper = lnbf_cut + STRENGTH_SIGMAS * sigma_cut + bias
+    return {
+        **out,
+        "status": "pass" if lower >= STRENGTH_THRESHOLD else "fail",
+        "log_bayes_factor": lnbf_cut,
+        "delta_log_bayes_factor": delta,
+        "sigma_fraction": sigma_fraction,
+        "sigma_total": sigma_cut,
+        "lower": lower,
+        "upper": upper,
+        "disfavoured": bool(upper <= -STRENGTH_THRESHOLD),
+    }
+
+
+def d2_strength(
+    edge: Mapping,
+    *,
+    n_atoms_tried: int,
+    mass_below: Mapping | None = None,
+    taper_mass: Mapping | None = None,
+    tighter_cuts: Sequence[float] = D2_TIGHTER_CUTS,
+) -> dict:
+    """D2 strength at the primary cut and at each tighter cut (module docstring).
+
+    ``mass_below`` = ``{"parent": entry, "child": entry}``
+    (:func:`mass_below_entry`); ``taper_mass`` = D1's near-cut band mass
+    block, reported here, never gating. D2 passes only if the inequality
+    holds at the primary cut and at every tighter cut; a primary pass with a
+    tighter cut not evaluable is ``incomplete``. DISFAVOURED (``disfavoured``)
+    needs the symmetric upper bound at every cut.
+    """
     lnbf = edge.get("log_bayes_factor")
     if lnbf is None:
         return {"status": "missing", "reason": "no ln BF", "n_atoms_tried": n_atoms_tried}
@@ -162,16 +275,32 @@ def d2_strength(edge: Mapping, *, n_atoms_tried: int, taper_mass: Mapping | None
     bias = abs(float(bias))
     lower = float(lnbf) - STRENGTH_SIGMAS * sigma_total - bias
     upper = float(lnbf) + STRENGTH_SIGMAS * sigma_total + bias
-    status = "pass" if lower >= STRENGTH_THRESHOLD else "fail"
-    disfavoured = bool(upper <= -STRENGTH_THRESHOLD)
+    primary = "pass" if lower >= STRENGTH_THRESHOLD else "fail"
+    mass_below = mass_below or {}
+    cuts = [
+        d2_at_cut(float(lnbf), sigma_total, bias, cut,
+                  parent=mass_below.get("parent"), child=mass_below.get("child"))
+        for cut in tighter_cuts
+    ]
+    evaluable = [c for c in cuts if c["status"] in ("pass", "fail")]
     reason = None
-    masses = [m for m in (taper_mass or {}).values() if m is not None]
-    over = bool(masses) and max(masses) > TAPER_MASS_D2_LIMIT
-    if over:
-        # sigma_total neglects the Monte-Carlo fluctuation of ln T(sigma^2_hat)
-        status, disfavoured = "incomplete", False
-        reason = (f"posterior taper-region mass {max(masses):.3g} > {TAPER_MASS_D2_LIMIT:g}: the first-order "
-                  "(untapered) Monte-Carlo error may understate sigma_total")
+    if primary == "fail":
+        status = "fail"
+    elif any(c["status"] == "fail" for c in evaluable):
+        status = "fail"
+        reason = "the D2 inequality fails at the tighter cut " + ", ".join(
+            f"{c['cut']:g} (lower {c['lower']:+.3g})" for c in evaluable if c["status"] == "fail")
+    elif len(evaluable) < len(cuts):
+        status = "incomplete"
+        reason = "; ".join(f"cut {c['cut']:g}: {c['reason']}" for c in cuts if c not in evaluable)
+    else:
+        status = "pass"
+    disfavoured = bool(upper <= -STRENGTH_THRESHOLD) and len(evaluable) == len(cuts) and all(
+        c["disfavoured"] for c in evaluable)
+    if upper <= -STRENGTH_THRESHOLD and len(evaluable) < len(cuts):
+        disfavoured_status = "incomplete"
+    else:
+        disfavoured_status = "pass" if disfavoured else "fail"
     return {
         "status": status,
         "reason": reason,
@@ -180,9 +309,14 @@ def d2_strength(edge: Mapping, *, n_atoms_tried: int, taper_mass: Mapping | None
         "abs_bias": bias,
         "lower": lower,
         "upper": upper,
+        "primary_cut": D2_PRIMARY_CUT,
+        "primary_status": primary,
+        "tighter_cuts": cuts,
+        "min_lower": min([lower, *(c["lower"] for c in evaluable)]),
+        "max_upper": max([upper, *(c["upper"] for c in evaluable)]),
         "disfavoured": disfavoured,
-        "taper_mass_limit": TAPER_MASS_D2_LIMIT,
-        "taper_mass_over_limit": over,
+        "disfavoured_status": disfavoured_status,
+        "near_cut_band_mass_reported_not_gating": None if taper_mass is None else dict(taper_mass),
         "n_atoms_tried": int(n_atoms_tried),
     }
 
@@ -550,15 +684,17 @@ def collect_v2_evaluations(paths) -> dict[str, dict]:
 
     ``paths`` are ``evaluation.json`` files or directories searched recursively.
     Returns ``{"gates": {model_hash: passed}, "taper_mass": {model_hash:
-    pooled posterior mass fraction inside the taper region}, "fidelity":
-    {model_hash: rung}, "files": {model_hash: path}, "superseded": {model_hash:
-    path}}``.
+    pooled posterior mass fraction inside the taper region (the near-cut
+    band)}, "mass_below": {model_hash: D2 cut-bracketing entry
+    (:func:`mass_below_entry`; only evaluations that recorded
+    ``posterior_mass_below``)}, "fidelity": {model_hash: rung}, "files":
+    {model_hash: path}, "superseded": {model_hash: path}}``.
 
     **F3/F4 rule (v2 second seeds).** Every model has one F3 evaluation (one
     dynesty run); decision-relevant edges are re-evaluated at F4 (the
     second-seed rung). A model with both uses its **F4** evaluation for D1
     (its gates include the cross-run checks over the F4 runs) and its taper
-    mass; the F3 evaluation is recorded as ``superseded``. This is not a
+    mass and posterior fractions; the F3 evaluation is recorded as ``superseded``. This is not a
     mixture of procedures: v2 F3 and F4 runs share one dynesty trajectory
     configuration (nlive, dlogz, bound, caps; checked here when the
     evaluations record it) and differ only in the number of seeds, so the
@@ -583,7 +719,8 @@ def collect_v2_evaluations(paths) -> dict[str, dict]:
                 f"model {model_hash} has more than one {rung} evaluation ({slot[rung][0]}, {path})"
             )
         slot[rung] = (path, payload)
-    out: dict[str, dict] = {"gates": {}, "taper_mass": {}, "fidelity": {}, "files": {}, "superseded": {}}
+    out: dict[str, dict] = {"gates": {}, "taper_mass": {}, "mass_below": {}, "fidelity": {}, "files": {},
+                            "superseded": {}}
     trajectories: dict[str, dict] = {}
     for model_hash, slot in per_model.items():
         for rung, (path, payload) in slot.items():
@@ -603,6 +740,9 @@ def collect_v2_evaluations(paths) -> dict[str, dict]:
         pooled = ((diagnostics.get("taper") or {}).get("pooled") or {})
         if "posterior_mass_in_taper_region" in pooled:
             out["taper_mass"][model_hash] = float(pooled["posterior_mass_in_taper_region"])
+        entry = mass_below_entry(pooled, source=path)
+        if entry is not None:
+            out["mass_below"][model_hash] = entry
     if len(trajectories) > 1:
         listing = "; ".join(f"{v['config']} ({len(v['files'])} files)" for v in trajectories.values())
         raise AnalysisInputError(
@@ -753,11 +893,17 @@ def build_claim_table(
     ppc: Mapping[str, Mapping] | None = None,
     loo: Mapping | None = None,
     taper_mass: Mapping[str, float] | None = None,
+    mass_below: Mapping[str, Mapping] | None = None,
     graph=None,
     n_atoms_tried: int | None = None,
     atom_labels: Mapping[str, str] | None = None,
 ) -> dict:
     """The v2 claim table from an ``analyze-model-comparison`` report and the D3-D6 inputs.
+
+    ``taper_mass`` maps model hashes to the near-cut band mass (D1: reported);
+    ``mass_below`` maps model hashes to the D2 cut-bracketing entries
+    (:func:`mass_below_entry`: ``collect_v2_evaluations(...)["mass_below"]``
+    or the post-hoc :func:`gwpop_search.analysis.posthoc_cut.posthoc_mass_below`).
 
     ``alt_roots`` maps ``"A1"``/``"A2"`` to :func:`alt_root_edge_values`
     outputs (or raw summaries); ``ppc`` maps model hashes to PPC payloads;
@@ -787,7 +933,9 @@ def build_claim_table(
             continue
         lnbf = float(edge["log_bayes_factor"])
         d1 = d1_numerics(claim, taper_mass=taper_mass)
-        d2 = d2_strength(edge, n_atoms_tried=tried, taper_mass=d1["taper_mass_fraction"])
+        below = {"parent": (mass_below or {}).get(claim["parent_hash"]),
+                 "child": (mass_below or {}).get(claim["child_hash"])}
+        d2 = d2_strength(edge, n_atoms_tried=tried, mass_below=below, taper_mass=d1["taper_mass_fraction"])
         d3 = d3_prior(claim, variants, lnbf, reruns=d3_reruns, taper2=taper2,
                       factor=factors.get((claim["parent_hash"], claim["child_hash"])))
         d4 = d4_sddr(claim, edge, sddr_index)
@@ -800,6 +948,8 @@ def build_claim_table(
             flags.append("sddr_disagreement_requires_human_review")
         if not d1["taper_mass_reported"]:
             flags.append("taper_mass_not_reported")
+        if any(c["status"] == "missing" for c in d2.get("tighter_cuts", ())):
+            flags.append("posterior_mass_below_cut_not_reported")
         if lnbf < 0 and d3.get("taper2_status") == "not_required_negative_edge":
             flags.append("negative_edge_without_taper2_rerun")
         if any(r["status"] == "not_applicable" for r in d5["alt_roots"].values()):
@@ -837,7 +987,7 @@ def build_claim_table(
             "width_min_log_bf": WIDTH_MIN_LOG_BF, "width_factor": WIDTH_FACTOR,
             "model_prior_min_ratio": MODEL_PRIOR_MIN_RATIO, "sddr_floor": SDDR_FLOOR,
             "sddr_sigmas": SDDR_SIGMAS, "ppc_alpha": PPC_LEVEL, "alt_roots": ALT_ROOT_DESCRIPTIONS,
-            "taper_mass_d2_limit": TAPER_MASS_D2_LIMIT,
+            "d2_primary_cut": D2_PRIMARY_CUT, "d2_tighter_cuts": list(D2_TIGHTER_CUTS),
         },
         "interpretations_pending_operator_confirmation": [
             "D1 is decided by the frozen per-model gate file; the tool's G-MC1..5 defaults are "
@@ -845,9 +995,12 @@ def build_claim_table(
             "D3 for a negative edge: sign stability of the width variants and of the taper-2 rerun "
             "where one exists; the model-prior clause is reported but inapplicable; a missing taper-2 "
             "rerun does not block DISFAVOURED (taper-2 reruns are budgeted for claimed edges).",
-            "D2 for a tapered edge (DRAFT): sigma_total is the first-order Monte-Carlo error of the "
-            "untapered estimator; above a posterior taper-region mass of 0.10 at either endpoint D2 is "
-            "incomplete (the neglected ln T(sigma^2_hat) fluctuation can reach ~0.75 nat at the threshold).",
+            "D2 cut bracketing (operator decision 2026-10-01): D2 (and DISFAVOURED, symmetrically) must "
+            "hold at the primary sharp cut sigma^2 <= 1 and at sigma^2 <= 0.9, where ln BF(0.9) = ln BF(1) "
+            "+ ln P_child(sigma^2 <= 0.9) - ln P_parent(sigma^2 <= 0.9) (exact for a sharp cut), with the "
+            "same sigma_total and |bias| plus the Kish-ESS binomial errors of the two fractions in "
+            "quadrature; with the cut-4 D3 rerun this brackets the cut. The near-cut band mass "
+            "(sigma^2 > 0.95) is reported, not gating (the DRAFT 0.10 limit is withdrawn).",
             "D5: an atom that is already part of an alternative root (P2 on A1, Z2 on A2), or that is "
             "defined only relative to the constant form the root replaces (P1 on A1, Z1 on A2), is "
             "not_applicable on that root; the other root must then pass. On A1 the mass atoms add/remove "
@@ -870,12 +1023,15 @@ def render_claims_markdown(table: Mapping) -> str:
         f"Atoms tried (trials count, distinct evaluated non-root models): **{table['n_atoms_tried']}** "
         f"({table.get('n_edges_evaluated', '?')} edges evaluated).",
         "",
-        "| atom | ln BF | D1 | D2 (lower) | D3 | D4 | D5 | D6 | label |",
+        "| atom | ln BF | D1 | D2 (lower; at tighter cuts) | D3 | D4 | D5 | D6 | label |",
         "| --- | ---: | --- | ---: | --- | --- | --- | --- | --- |",
     ]
     for r in table["edges"]:
         d2 = r["D2_strength"]
         d2_cell = f"{d2['status']} ({d2['lower']:+.2f})" if d2.get("lower") is not None else d2["status"]
+        for cut in d2.get("tighter_cuts", ()):
+            d2_cell += (f"; {cut['cut']:g}: {cut['lower']:+.2f}" if cut.get("lower") is not None
+                        else f"; {cut['cut']:g}: {cut['status']}")
         name = r.get("atom_label") or r.get("atom") or r["mutation_id"]
         lines.append(
             f"| `{name}` | {r['log_bayes_factor']:+.2f} | {r['D1_numerics']['status']} | {d2_cell} | "

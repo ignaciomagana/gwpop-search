@@ -154,7 +154,7 @@ def main(argv=None) -> None:
     data = ["--manifest", freeze / "manifest.json", "--base-dir", freeze]
     res = ["--graph", graph, "--results", f3]
     _cli(log, "collect-v2-evaluations", "--evaluations", f3, "--gates-output", ana / "gates.json",
-         "--taper-mass-output", ana / "taper_mass.json")
+         "--taper-mass-output", ana / "taper_mass.json", "--mass-below-output", ana / "mass_below.json")
     _cli(log, "analyze-edge-mc-error", *data, *res, "--n-draws", 512, "--bootstrap-replicates", 16,
          "--bootstrap-draws", 512, "--min-ess", 20, "--output-dir", ana / "mc")
     _cli(log, "analyze-sddr", *res, "--n-bootstrap", 50, "--output", ana / "sddr.json")

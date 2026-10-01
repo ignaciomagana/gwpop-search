@@ -2,6 +2,7 @@
 
 import copy
 import json
+import math
 
 import pytest
 
@@ -87,13 +88,22 @@ def _taper2(edges, sign=1.0):
              "log_bayes_factor": sign * e["log_bayes_factor"], "valid": True} for e in edges]
 
 
+def _below(fraction=0.6, error=0.0, *, cut=0.9, threshold=1.0, kind="sharp", n_eff=5000.0):
+    """A mass_below_entry block: P(sigma^2 <= cut) = fraction (+- error)."""
+    return {"threshold": threshold, "kind": kind, "kish_ess": n_eff, "near_cut_band_mass": 0.3,
+            "cuts": {repr(float(cut)): {"cut": cut, "fraction": fraction, "error": error, "n_eff": n_eff},
+                     repr(float(threshold)): {"cut": threshold, "fraction": 1.0, "error": 0.0, "n_eff": n_eff}}}
+
+
 def _inputs(edges, **over):
+    hashes = {ROOT} | {e["child_hash"] for e in edges} | {e["parent_hash"] for e in edges}
     base = dict(
         sddr=_sddr(edges),
         taper2=_taper2(edges),
         alt_roots={"A1": _alt(edges), "A2": _alt(edges)},
         ppc={e["child_hash"]: _ppc(e["child_hash"]) for e in edges},
         taper_mass={h: 0.01 for h in [ROOT] + [e["child_hash"] for e in edges]},
+        mass_below={h: _below() for h in hashes},
     )
     base.update(over)
     return base
@@ -292,21 +302,169 @@ def test_d1_requires_the_taper_mass_of_both_endpoints():
     assert table["edges"][0]["label"] == INCONCLUSIVE
 
 
-def test_d2_is_incomplete_above_the_taper_mass_limit():
-    from gwpop_search.analysis.claims_v2 import TAPER_MASS_D2_LIMIT
+def test_near_cut_band_mass_is_reported_not_gating():
+    """The DRAFT 0.10 band-mass limit is withdrawn: a large band mass no longer blocks D2."""
+    import gwpop_search.analysis.claims_v2 as claims
 
+    assert not hasattr(claims, "TAPER_MASS_D2_LIMIT")
     edges = [_edge("a" * 64, 9.0), _edge("c" * 64, -9.0)]
-    masses = {ROOT: 0.01, "a" * 64: TAPER_MASS_D2_LIMIT + 0.05, "c" * 64: TAPER_MASS_D2_LIMIT + 0.05}
+    masses = {ROOT: 0.67, "a" * 64: 0.67, "c" * 64: 0.67}
     table = build_claim_table(_report(edges), **_inputs(edges, taper_mass=masses))
-    for child in ("a" * 64, "c" * 64):
-        row = _row(table, child)
-        assert row["D2_strength"]["status"] == "incomplete"
-        assert row["D2_strength"]["taper_mass_over_limit"] is True
-        assert row["D2_strength"]["disfavoured"] is False
-        assert row["label"] == INCONCLUSIVE
-    masses = {h: TAPER_MASS_D2_LIMIT for h in masses}  # at the limit: allowed
-    table = build_claim_table(_report(edges), **_inputs(edges, taper_mass=masses))
-    assert _row(table, "a" * 64)["label"] == SUPPORTED
+    row = _row(table, "a" * 64)
+    assert row["D2_strength"]["status"] == "pass" and row["label"] == SUPPORTED
+    assert row["D2_strength"]["near_cut_band_mass_reported_not_gating"] == {"parent": 0.67, "child": 0.67}
+    assert _row(table, "c" * 64)["label"] == DISFAVOURED
+    assert table["constants"]["d2_primary_cut"] == 1.0 and table["constants"]["d2_tighter_cuts"] == [0.9]
+    assert "taper_mass_d2_limit" not in table["constants"]
+
+
+def test_d2_at_the_tighter_cut_uses_the_exact_sharp_cut_identity():
+    from gwpop_search.analysis.claims_v2 import d2_at_cut
+
+    a = "a" * 64
+    # parent keeps 80% of its posterior below 0.9, child only 20%: ln BF(0.9) = 9 + ln(0.2/0.8)
+    edges = [_edge(a, 9.0, sigma=0.5, bias=0.1)]
+    below = {ROOT: _below(0.8), a: _below(0.2)}
+    row = build_claim_table(_report(edges), **_inputs(edges, mass_below=below))["edges"][0]
+    (cut,) = row["D2_strength"]["tighter_cuts"]
+    assert cut["cut"] == 0.9
+    assert cut["log_bayes_factor"] == pytest.approx(9.0 + math.log(0.2 / 0.8))
+    assert cut["lower"] == pytest.approx(9.0 + math.log(0.25) - 1.0 - 0.1)
+    assert cut["status"] == "pass" and row["D2_strength"]["status"] == "pass"
+    assert row["D2_strength"]["min_lower"] == pytest.approx(cut["lower"])
+    # the rule needs a tighter cut below the evaluations' sharp threshold
+    assert d2_at_cut(9.0, 0.5, 0.1, 1.0, parent=below[ROOT], child=below[a])["status"] == "incomplete"
+    smooth = {ROOT: _below(0.8, kind="smooth"), a: _below(0.2)}
+    row = build_claim_table(_report(edges), **_inputs(edges, mass_below=smooth))["edges"][0]
+    assert row["D2_strength"]["status"] == "incomplete" and row["label"] == INCONCLUSIVE
+    other = {ROOT: _below(0.8, threshold=4.0), a: _below(0.2, threshold=4.0)}
+    row = build_claim_table(_report(edges), **_inputs(edges, mass_below=other))["edges"][0]
+    assert row["D2_strength"]["status"] == "incomplete"
+    # a zero fraction cannot be resolved by the samples
+    zero = {ROOT: _below(0.8), a: _below(0.0)}
+    row = build_claim_table(_report(edges), **_inputs(edges, mass_below=zero))["edges"][0]
+    assert row["D2_strength"]["tighter_cuts"][0]["status"] == "incomplete"
+    assert row["D2_strength"]["status"] == "incomplete"
+
+
+def test_d2_passing_at_the_primary_cut_but_failing_at_the_tighter_cut_fails():
+    a = "a" * 64
+    # primary: lower = 5 - 1 - 0.1 = 3.9 >= 3; at 0.9: + ln(0.3/0.9) = -1.10 -> lower 2.80 < 3
+    edges = [_edge(a, 5.0, sigma=0.5, bias=0.1)]
+    below = {ROOT: _below(0.9), a: _below(0.3)}
+    row = build_claim_table(_report(edges), **_inputs(edges, mass_below=below))["edges"][0]
+    d2 = row["D2_strength"]
+    assert d2["primary_status"] == "pass" and d2["lower"] == pytest.approx(3.9)
+    assert d2["tighter_cuts"][0]["status"] == "fail"
+    assert d2["tighter_cuts"][0]["lower"] == pytest.approx(3.9 + math.log(1.0 / 3.0))
+    assert d2["status"] == "fail" and "0.9" in d2["reason"]
+    assert row["label"] == INCONCLUSIVE
+    # both cuts pass -> pass (the child keeps as much mass below the cut as the parent)
+    below = {ROOT: _below(0.5), a: _below(0.5)}
+    row = build_claim_table(_report(edges), **_inputs(edges, mass_below=below))["edges"][0]
+    assert row["D2_strength"]["status"] == "pass" and row["label"] == SUPPORTED
+    # the tighter cut can also rescue nothing: a primary failure is a failure
+    weak = [_edge(a, 3.5, sigma=0.5, bias=0.1)]
+    row = build_claim_table(_report(weak), **_inputs(weak, mass_below={ROOT: _below(0.2), a: _below(0.9)}))["edges"][0]
+    assert row["D2_strength"]["tighter_cuts"][0]["status"] == "pass"
+    assert row["D2_strength"]["status"] == "fail"
+
+
+def test_d2_is_incomplete_without_the_fractions_below_the_cut():
+    a = "a" * 64
+    edges = [_edge(a, 9.0), _edge("c" * 64, -9.0)]
+    table = build_claim_table(_report(edges), **_inputs(edges, mass_below={ROOT: _below()}))
+    row = _row(table, a)
+    assert row["D2_strength"]["status"] == "incomplete"
+    assert row["D2_strength"]["tighter_cuts"][0]["status"] == "missing"
+    assert row["label"] == INCONCLUSIVE and "posterior_mass_below_cut_not_reported" in row["flags"]
+    neg = _row(table, "c" * 64)
+    assert neg["D2_strength"]["disfavoured"] is False
+    assert neg["D2_strength"]["disfavoured_status"] == "incomplete"
+    assert neg["label"] == INCONCLUSIVE
+
+
+def test_fraction_uncertainty_is_added_in_quadrature():
+    from gwpop_search.analysis.claims_v2 import d2_at_cut
+
+    p_p, e_p, p_c, e_c = 0.5, 0.02, 0.4, 0.03
+    out = d2_at_cut(6.0, 0.5, 0.1, 0.9, parent=_below(p_p, e_p), child=_below(p_c, e_c))
+    sigma_fraction = math.hypot(e_c / p_c, e_p / p_p)
+    assert out["sigma_fraction"] == pytest.approx(sigma_fraction)
+    assert out["sigma_total"] == pytest.approx(math.hypot(0.5, sigma_fraction))
+    lnbf = 6.0 + math.log(p_c / p_p)
+    assert out["lower"] == pytest.approx(lnbf - 2.0 * math.hypot(0.5, sigma_fraction) - 0.1)
+    assert out["upper"] == pytest.approx(lnbf + 2.0 * math.hypot(0.5, sigma_fraction) + 0.1)
+    # the fraction error alone can decide: lower(c') just above 3 with exact fractions ...
+    a = "a" * 64
+    edges = [_edge(a, 4.2, sigma=0.5, bias=0.1)]
+    exact = {ROOT: _below(0.5, 0.0), a: _below(0.5, 0.0)}
+    assert build_claim_table(_report(edges), **_inputs(edges, mass_below=exact))["edges"][0][
+        "D2_strength"]["status"] == "pass"
+    # ... and below 3 once their binomial errors (ln-space 0.2 each) are included
+    noisy = {ROOT: _below(0.5, 0.1), a: _below(0.5, 0.1)}
+    row = build_claim_table(_report(edges), **_inputs(edges, mass_below=noisy))["edges"][0]
+    assert row["D2_strength"]["tighter_cuts"][0]["status"] == "fail"
+    assert row["D2_strength"]["status"] == "fail"
+
+
+def test_disfavoured_needs_the_symmetric_condition_at_both_cuts():
+    c = "c" * 64
+    # primary: upper = -5 + 1 + 0.1 = -3.9 <= -3
+    edges = [_edge(c, -5.0, sigma=0.5, bias=0.1)]
+    inputs = dict(ppc={}, taper2=[], alt_roots={})
+    same = {ROOT: _below(0.5), c: _below(0.5)}
+    row = build_claim_table(_report(edges), **_inputs(edges, mass_below=same, **inputs))["edges"][0]
+    assert row["D2_strength"]["disfavoured"] is True and row["label"] == DISFAVOURED
+    # the child keeps more mass below 0.9 than the parent: ln BF(0.9) = -5 + ln 3 -> upper -2.80
+    lifted = {ROOT: _below(0.3), c: _below(0.9)}
+    row = build_claim_table(_report(edges), **_inputs(edges, mass_below=lifted, **inputs))["edges"][0]
+    cut = row["D2_strength"]["tighter_cuts"][0]
+    assert cut["upper"] == pytest.approx(-3.9 + math.log(3.0)) and cut["disfavoured"] is False
+    assert row["D2_strength"]["disfavoured"] is False and row["D2_strength"]["disfavoured_status"] == "fail"
+    assert row["label"] == INCONCLUSIVE
+    # and the other way round: a primary-cut upper bound above -3 is never DISFAVOURED
+    weak = [_edge(c, -3.5, sigma=0.5, bias=0.1)]
+    row = build_claim_table(_report(weak), **_inputs(weak, mass_below={ROOT: _below(0.9), c: _below(0.1)},
+                                                    **inputs))["edges"][0]
+    assert row["D2_strength"]["tighter_cuts"][0]["disfavoured"] is True
+    assert row["label"] == INCONCLUSIVE
+
+
+def test_v2_numerics_and_claims_declare_the_same_tighter_cut():
+    from gwpop_search.analysis.claims_v2 import D2_PRIMARY_CUT, D2_TIGHTER_CUTS
+    from gwpop_search.inference.v2_numerics import V2_POSTERIOR_MASS_BELOW_CUTS, V2_TAPER_THRESHOLD
+
+    assert tuple(D2_TIGHTER_CUTS) == tuple(V2_POSTERIOR_MASS_BELOW_CUTS) == (0.9,)
+    assert D2_PRIMARY_CUT == V2_TAPER_THRESHOLD == 1.0
+
+
+def test_collect_reads_recorded_fractions_and_the_claim_cli_merges_them(tmp_path):
+    from gwpop_search.analysis.claims_v2 import collect_v2_evaluations, mass_below_entry
+    from gwpop_search.analysis.posthoc_cut import POSTHOC_MASS_BELOW_FORMAT, posthoc_report, read_mass_below
+
+    taper = {"kind": "sharp", "threshold": 1.0}
+    pooled = {"taper": taper, "kish_ess": 900.0, "posterior_mass_in_taper_region": 0.4,
+              "posterior_mass_below": {"0.9": {"cut": 0.9, "fraction": 0.55, "error": 0.016, "n_eff": 900.0},
+                                       "1.0": {"cut": 1.0, "fraction": 1.0, "error": 0.0, "n_eff": 900.0}}}
+    for name, block in (("new", pooled), ("old", {k: v for k, v in pooled.items() if k != "posterior_mass_below"})):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "evaluation.json").write_text(json.dumps({
+            "model_hash": name * 2, "fidelity": "F3",
+            "diagnostics": {"passed": True, "taper": {"pooled": block}}}))
+    collected = collect_v2_evaluations([tmp_path])
+    assert set(collected["taper_mass"]) == {"newnew", "oldold"}
+    assert set(collected["mass_below"]) == {"newnew"}
+    entry = collected["mass_below"]["newnew"]
+    assert entry["threshold"] == 1.0 and entry["kind"] == "sharp"
+    assert entry["cuts"]["0.9"]["fraction"] == 0.55 and entry["near_cut_band_mass"] == 0.4
+    assert mass_below_entry({"taper": taper}) is None
+    report = posthoc_report([{"model_hash": "oldold", "entry": entry}], cuts=(0.9,))
+    assert report["format_version"] == POSTHOC_MASS_BELOW_FORMAT
+    assert read_mass_below(json.loads(json.dumps(report))) == {"oldold": entry}
+    with pytest.raises(Exception, match="format"):
+        read_mass_below({"models": {}})
 
 
 def test_trials_count_distinct_models_not_edges():

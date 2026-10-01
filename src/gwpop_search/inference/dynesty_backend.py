@@ -2228,6 +2228,9 @@ def posterior_taper_mass(
     log_likelihood_rtol: float = 1.0e-8,
     log_likelihood_hard_rtol: float = 1.0e-4,
     max_support_mismatch_fraction: float = 1.0e-3,
+    cuts: Sequence[float] = (),
+    max_points_per_run: int | None = None,
+    subsample_seed: int = 0,
 ) -> dict[str, object]:
     """Posterior fraction inside the variance-taper region, per run and pooled.
 
@@ -2249,10 +2252,27 @@ def posterior_taper_mass(
     deviation above ``log_likelihood_hard_rtol`` or support differing on more
     than ``max_support_mismatch_fraction`` of the points, i.e. a different
     likelihood -- raises.
+
+    ``cuts`` adds ``posterior_mass_below`` to every summary: the weighted
+    fraction ``P(sigma^2 <= c)`` with its Kish-ESS binomial error
+    (:func:`gwpop_search.hbi.taper.posterior_mass_below`). Under the sharp cut
+    at ``threshold`` the evidence at a tighter cut ``c' < threshold`` is
+    exactly ``Z(c') = Z(threshold) P(sigma^2 <= c')`` (claims_v2 D2).
+
+    ``max_points_per_run`` (post-hoc use on a slow device; ``None`` evaluates
+    every weighted point, as the evaluator does): a run with more weighted
+    points is summarised on ``max_points_per_run`` systematic-resampling
+    draws of its points (``default_rng([subsample_seed, run index])``),
+    evaluated once per distinct point and weighted by multiplicity. The
+    fraction errors then combine both sampling stages,
+    ``1/n_eff = 1/kish(draws) + 1/kish(full weights)`` (``reference_kish_ess``),
+    and the block records ``subsample``.
     """
-    from gwpop_search.hbi.taper import taper_region_summary
+    from gwpop_search.hbi.taper import normalize_cuts, taper_region_summary
 
     results = tuple(results)
+    if max_points_per_run is not None:
+        max_points_per_run = _as_int("max_points_per_run", max_points_per_run, minimum=1)
     if not results:
         raise ValueError("at least one dynesty result is required")
     taper = getattr(loglike, "variance_taper", None)
@@ -2260,7 +2280,8 @@ def posterior_taper_mass(
         raise ValueError("posterior_taper_mass needs a likelihood with a variance taper")
     names = tuple(loglike.names)
     requested = _without_chunk_size(loglike.likelihood_identity())
-    variances, weights, runs = [], [], []
+    variances, weights, runs, full_weights = [], [], [], []
+    subsampled = False
     worst = 0.0
     reproduces = True
     support_mismatches = 0
@@ -2276,8 +2297,25 @@ def posterior_taper_mass(
                 f"run {index} sampled a different likelihood than the one supplied; "
                 f"differing keys: {diffs}"
             )
-        comps = loglike.components(result.samples)
-        stored_logl = np.asarray(result.log_likelihoods, dtype=float)
+        w_full = np.asarray(result.weights, dtype=float)
+        full_weights.append(w_full / w_full.sum() / len(results))
+        points = np.arange(w_full.size)
+        w = w_full
+        reference = None
+        subsample = None
+        if max_points_per_run is not None and w_full.size > max_points_per_run:
+            draws = equal_weight_resample(
+                points, w_full, max_points_per_run, np.random.default_rng([int(subsample_seed), index])
+            )
+            points, counts = np.unique(draws, return_counts=True)
+            w = counts.astype(float)
+            reference = float(1.0 / np.sum((w_full / w_full.sum()) ** 2))
+            subsample = {"n_draws": int(max_points_per_run), "n_distinct_points": int(points.size),
+                         "n_points_full": int(w_full.size), "kish_ess_full": reference,
+                         "seed": [int(subsample_seed), int(index)]}
+            subsampled = True
+        comps = loglike.components(np.asarray(result.samples)[points])
+        stored_logl = np.asarray(result.log_likelihoods, dtype=float)[points]
         finite = np.isfinite(stored_logl) & np.isfinite(comps["log_likelihood"])
         n_mismatch = int(np.sum(np.isfinite(stored_logl) != np.isfinite(comps["log_likelihood"])))
         support_mismatches += n_mismatch
@@ -2301,13 +2339,25 @@ def posterior_taper_mass(
                     f"run {index}: re-evaluated tapered log-likelihood deviates from the "
                     f"sampled one by {run_worst:.3g} (relative): not the sampled likelihood"
                 )
-        w = result.weights
-        summary = taper_region_summary(comps["variance"], w, taper)
+        summary = taper_region_summary(comps["variance"], w, taper, cuts=cuts, reference_kish_ess=reference)
         summary["repeat"] = index
+        if subsample is not None:
+            summary["subsample"] = subsample
         runs.append(summary)
         variances.append(comps["variance"])
-        weights.append(w / len(results))
-    pooled = taper_region_summary(np.concatenate(variances), np.concatenate(weights), taper)
+        weights.append(w / w.sum() / len(results))
+    pooled_reference = None
+    if subsampled:
+        pooled_full = np.concatenate(full_weights)
+        pooled_reference = float(1.0 / np.sum(pooled_full**2))
+    pooled = taper_region_summary(
+        np.concatenate(variances), np.concatenate(weights), taper, cuts=cuts,
+        reference_kish_ess=pooled_reference,
+    )
+    if subsampled:
+        pooled["subsample"] = {"kish_ess_full": pooled_reference,
+                               "max_points_per_run": int(max_points_per_run),
+                               "seed": int(subsample_seed)}
     return {
         "taper": taper.to_dict(),
         "definition": (
@@ -2322,6 +2372,14 @@ def posterior_taper_mass(
                                    "hard_rtol": float(log_likelihood_hard_rtol)},
         "support_mismatches": int(support_mismatches),
         "reevaluation_backend": _jax_backend_name(),
+        **({} if not cuts else {
+            "posterior_mass_below_cuts": [float(c) for c in normalize_cuts(cuts)],
+            "posterior_mass_below_definition": (
+                "P(sigma^2 <= c) over the importance-weighted dead + live points; error "
+                "sqrt(p (1 - p) / n_eff), n_eff the Kish ESS of the weights. Under the sharp cut at "
+                "the threshold, ln Z(c') = ln Z(threshold) + ln P(sigma^2 <= c') for c' < threshold"
+            ),
+        }),
     }
 
 

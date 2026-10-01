@@ -354,9 +354,10 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
                      "but give different evidences for Z2 and for the whole A2 suite",
     },
     "taper.form": {
-        "prior": "sharp cut: ln L -> -inf where sigma^2_lnL > 1 (sigma^2 = 1 kept); D3 sensitivity rerun at 2. "
-                 "Taper-mass diagnostic region: sigma^2 > 0.95 (band 5% below the cut, the assumed relative MC "
-                 "error of sigma^2_hat; DRAFT)",
+        "prior": "sharp cut: ln L -> -inf where sigma^2_lnL > 1 (sigma^2 = 1 kept); D3 sensitivity rerun at 4. "
+                 "D2 cut bracketing: D2 must also hold at sigma^2 <= 0.9, from Z(0.9) = Z(1) P_post(sigma^2 <= "
+                 "0.9) (exact for the sharp cut; the fractions are recorded by every evaluation). The near-cut "
+                 "band mass sigma^2 > 0.95 is reported, not gating",
         "source": "operator decision 1 (2026-09-30): adopt the exact LVK GWTC-5 form. gwpopulation @b3a34f9 "
                   "hyperpe.py L185-189 (ln_l -= inf * (maximum_uncertainty < variance)), passed by "
                   "gwpopulation_pipe @88c2e2944b data_analysis.py L232-254 (--maximum-uncertainty); GWTC-5 "
@@ -364,9 +365,12 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
                   "sigma^2 = 1 - 5.9e-6 with 0 of 8200 samples above (staging/v2/TAPER_FORM.md)",
         "rationale": "R0 ports the gwpopulation BP2P Default fit, whose guard is this cut. The Callister & Farr "
                      "S(x) = 1/(1 + x^-30) acts on N_eff^inj/(4 N_obs), not on sigma^2; it stays available as "
-                     "VarianceTaper(kind='smooth') for diagnostics only. The LVK relaxed run uses variance 4; "
-                     "v2's D3 uses 2. The 5% band and TAPER_MASS_D2_LIMIT = 0.10 are OPEN: the LVK Default "
-                     "posterior has 67% of its mass at sigma^2 > 0.95",
+                     "VarianceTaper(kind='smooth') for diagnostics only. The LVK relaxed run uses variance 4, as "
+                     "does v2's D3 (operator decision 2026-10-01). The DRAFT near-cut mass limit (0.10 at "
+                     "sigma^2 > 0.95) is replaced by the direct tighter-cut measurement (operator decision "
+                     "2026-10-01): the LVK Default posterior has 67% of its mass at sigma^2 > 0.95, so a mass "
+                     "limit would block every edge, while ln BF(0.9) = ln BF(1) + ln P_child - ln P_parent "
+                     "measures what the cut does to each edge",
     },
     "support.q_floor": {
         "prior": "0.001 (fixed support; truncate and renormalise p(q | m1) on [max(0.001, mlow_2/m1), 1]; "

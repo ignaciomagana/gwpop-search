@@ -25,7 +25,15 @@ Numerics decided for v2 (plan ``scalable-stargazing-shamir``, "Numerics"):
   importance-sampling checks (ESS, maximum weights, ``Var[ln L]``) are
   reported but non-binding, because the taper (not a post-hoc gate) now
   handles an unreliable Monte-Carlo estimate; the posterior mass inside the
-  taper region is always reported.
+  taper region (the near-cut band ``sigma^2 > 0.95``) is always reported.
+* Cut bracketing (D2; operator decision 2026-10-01): every tapered evaluation
+  records the posterior fraction ``P(sigma^2 <= c)`` at the pre-declared
+  cuts :data:`V2_POSTERIOR_MASS_BELOW_CUTS` (default 0.9) and at the primary
+  cut 1 (and at the run's own threshold), with the Kish ESS of the weights.
+  Under the sharp cut the evidence at a tighter cut is exactly
+  ``Z(c') = Z(c) P_post(sigma^2 <= c' | cut c)``, so D2 is checked at
+  ``c = 1`` and ``c' = 0.9`` without a rerun; with the cut-4 D3 rerun this
+  brackets the cut. This replaces the DRAFT near-cut mass limit (0.10).
 """
 from __future__ import annotations
 
@@ -58,6 +66,11 @@ V2_TAPER_THRESHOLD = 1.0
 V2_TAPER_SENSITIVITY_THRESHOLD = 4.0
 #: The LVK GWTC-5 variance guard (gwpopulation maximum_uncertainty): a sharp cut.
 V2_TAPER_KIND = "sharp"
+#: Pre-declared tighter variance cuts at which every tapered evaluation records
+#: P(sigma^2 <= c) (D2 is checked at the primary cut and at each of these;
+#: operator decision 2026-10-01). The primary cut V2_TAPER_THRESHOLD and the
+#: run's own threshold are always added to the recorded list.
+V2_POSTERIOR_MASS_BELOW_CUTS: tuple[float, ...] = (0.9,)
 V2_NLIVE = 500
 V2_DLOGZ = 0.1
 #: F0 taper-support gate (DRAFT): the sharp cut must keep at least this
@@ -228,7 +241,7 @@ class SeedPolicy:
 
 
 def v2_variance_taper(threshold: float = V2_TAPER_THRESHOLD, *, kind: str = V2_TAPER_KIND) -> VarianceTaper:
-    """The v2 variance guard at ``threshold`` (1; 2 for D3): the LVK sharp cut.
+    """The v2 variance guard at ``threshold`` (1; 4 for D3): the LVK sharp cut.
 
     ``kind="smooth"`` gives the Callister & Farr-form diagnostic alternative
     (p = 30; not the LVK Default form, see :mod:`gwpop_search.hbi.taper`).
@@ -239,13 +252,22 @@ def v2_variance_taper(threshold: float = V2_TAPER_THRESHOLD, *, kind: str = V2_T
     return VarianceTaper(kind=kind, threshold=threshold)
 
 
-def v2_criteria(*, repeats: int) -> NumericalCriteria:
+def v2_posterior_mass_below_cuts(cuts: Sequence[float] | None = None) -> tuple[float, ...]:
+    """Recorded cuts: ``cuts`` (default :data:`V2_POSTERIOR_MASS_BELOW_CUTS`) plus the primary cut 1."""
+    cuts = V2_POSTERIOR_MASS_BELOW_CUTS if cuts is None else tuple(cuts)
+    return tuple(sorted({*(float(c) for c in cuts), float(V2_TAPER_THRESHOLD)}))
+
+
+def v2_criteria(*, repeats: int, posterior_mass_below_cuts: Sequence[float] | None = None) -> NumericalCriteria:
     """v2 criteria: nested-sampling/evidence binding; importance reported, non-binding.
 
     ``repeats >= 2`` (the second-seed rung) adds the cross-run gates.
     DRAFT thresholds: Kish ESS 250 per run (half of v1's F3 value, as nlive
     halves); evidence error 0.5 (the D2 sigma budget); importance thresholds
-    kept at v1 F3 values for the advisory record.
+    kept at v1 F3 values for the advisory record. ``posterior_mass_below_cuts``
+    (default :data:`V2_POSTERIOR_MASS_BELOW_CUTS`; the primary cut 1 is
+    always added) are the reported ``P(sigma^2 <= c)`` cuts of the D2 cut
+    bracketing.
     """
     multi = int(repeats) >= 2
     return NumericalCriteria(
@@ -263,6 +285,7 @@ def v2_criteria(*, repeats: int) -> NumericalCriteria:
         max_shape_log_likelihood_variance=V2_TAPER_THRESHOLD,
         binding={name: False for name in V2_NON_BINDING_FAMILIES},
         max_posterior_taper_mass=None,
+        posterior_mass_below_cuts=v2_posterior_mass_below_cuts(posterior_mass_below_cuts),
     )
 
 
@@ -331,9 +354,21 @@ def v2_campaign_numerics(
                 "Callister & Farr 2024 (PRX 14, 021005) S(x) = 1/(1 + x^-30) acts on N_eff^inj/(4 N_obs), "
                 "not on sigma^2; available as VarianceTaper(kind='smooth') for diagnostics only"
             ),
-            "lvk_relaxed_cut": "GWTC-5 relaxed run uses variance 4; the v2 D3 sensitivity uses 2",
+            "lvk_relaxed_cut": "GWTC-5 relaxed run uses variance 4; the v2 D3 sensitivity uses 4 too",
             "sensitivity_taper": sensitivity.hbi.variance_taper.to_dict(),
-            "sensitivity_applies_to": "claimed edges (D3: the cut-at-2 rerun keeps the sign)",
+            "sensitivity_applies_to": "claimed edges (D3: the cut-at-4 rerun keeps the sign)",
+            "tighter_cuts_reported": list(primary.f3_criteria.posterior_mass_below_cuts),
+            "tighter_cut_identity": (
+                "sharp cut: Z(c') = Z(c) P_post(sigma^2 <= c' | cut c) for c' < c, so per edge "
+                "ln BF(c') = ln BF(c) + ln P_child(sigma^2 <= c') - ln P_parent(sigma^2 <= c'); "
+                "P is the importance-weighted dead + live point fraction, its binomial error "
+                "sqrt(p (1 - p) / Kish ESS) is added to sigma_total in quadrature"
+            ),
+            "d2_cut_bracketing": (
+                "D2 (and DISFAVOURED) must hold at c = 1 and at c' = 0.9 (operator decision "
+                "2026-10-01); the cut-4 D3 rerun brackets the cut from above. The near-cut band "
+                "mass (sigma^2 > 0.95) is reported, not gating (replaces the DRAFT 0.10 limit)"
+            ),
         },
         "fidelity": {
             "primary": {
@@ -368,7 +403,10 @@ def v2_campaign_numerics(
         "binding": {
             "binding": "every nested-sampling and evidence check (D1)",
             "non_binding_reported": list(V2_NON_BINDING_FAMILIES),
-            "reported": "posterior mass inside the taper region (per run and pooled)",
+            "reported": (
+                "posterior mass inside the taper region (per run and pooled) and P(sigma^2 <= c) "
+                "at the recorded cuts with the Kish ESS"
+            ),
         },
         "nulls": "none (trials factor = number of atoms tried, disclosed with every claim)",
     }

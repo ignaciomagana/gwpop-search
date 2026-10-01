@@ -70,7 +70,10 @@ Monte-Carlo fluctuation of the taper itself is not negligible:
   Monte-Carlo error of ``sigma^2_hat``). Under a sharp cut no posterior mass
   lies above the threshold; mass within the band can flip in or out of the
   cut under a different Monte-Carlo realisation, which the first-order
-  (cut-free) error of ``ln Z`` does not include.
+  (cut-free) error of ``ln Z`` does not include. The band mass is reported,
+  not gating: the v2 claim criteria instead measure the effect of the cut
+  directly, from ``Z(c') = Z(c) P_post(sigma^2 <= c' | cut c)`` for a sharp
+  cut (:func:`posterior_mass_below`; D2 at ``c = 1`` and ``c' = 0.9``).
 """
 from __future__ import annotations
 
@@ -244,17 +247,84 @@ def log_taper_jax(variance, taper: VarianceTaper):
     return jnp.where(positive, smooth, jnp.where(ok, 0.0, -jnp.inf))
 
 
+def cut_key(cut: float) -> str:
+    """JSON key of a variance cut in ``posterior_mass_below`` (``repr`` of the float: ``"0.9"``, ``"1.0"``)."""
+    return repr(float(cut))
+
+
+def normalize_cuts(cuts) -> tuple[float, ...]:
+    """Sorted, de-duplicated, finite positive variance cuts."""
+    out = []
+    for cut in cuts or ():
+        value = _real("variance cut", cut)
+        if not value > 0.0:
+            raise ValueError(f"variance cuts must be positive; got {value}")
+        out.append(value)
+    return tuple(sorted(set(out)))
+
+
+def posterior_mass_below(
+    variance,
+    weights,
+    cuts,
+    *,
+    reference_kish_ess: float | None = None,
+) -> dict[str, dict[str, float]]:
+    """Weighted posterior fraction ``P(sigma^2 <= c)`` for each cut ``c``, with its error.
+
+    Under a sharp cut at ``c`` (likelihood ``x 1[sigma^2 <= c]``) the evidence
+    at a tighter cut ``c' < c`` is exactly ``Z(c') = Z(c) P_post(sigma^2 <= c'
+    | cut c)``, so these fractions give the evidence at the tighter cuts
+    without a rerun (claims_v2 D2). ``sigma^2 = NaN`` counts as above every
+    cut (it is cut by the likelihood).
+
+    The Monte-Carlo (binomial) error is ``sqrt(p (1 - p) / n_eff)`` with
+    ``n_eff`` the Kish ESS of ``weights``; when the points are a resampled
+    subset of a weighted sample whose Kish ESS is ``reference_kish_ess``, the
+    two sampling stages add, ``1/n_eff = 1/kish(subset) + 1/reference``.
+    Returns ``{cut_key(c): {"cut", "fraction", "error", "n_eff"}}``.
+    """
+    v = np.asarray(variance, dtype=float).reshape(-1)
+    w = np.asarray(weights, dtype=float).reshape(-1)
+    if v.shape != w.shape:
+        raise ValueError("variance and weights must have the same length")
+    if not np.all(np.isfinite(w)) or np.any(w < 0) or not w.sum() > 0:
+        raise ValueError("weights must be finite, non-negative and not all zero")
+    w = w / w.sum()
+    n_eff = float(1.0 / np.sum(w**2))
+    if reference_kish_ess is not None:
+        reference = _real("reference_kish_ess", reference_kish_ess)
+        if not reference > 0.0:
+            raise ValueError("reference_kish_ess must be positive")
+        n_eff = float(1.0 / (1.0 / n_eff + 1.0 / reference))
+    out = {}
+    for cut in normalize_cuts(cuts):
+        p = float(min(1.0, max(0.0, np.sum(w[v <= cut]))))
+        out[cut_key(cut)] = {
+            "cut": float(cut),
+            "fraction": p,
+            "error": float(math.sqrt(p * (1.0 - p) / n_eff)),
+            "n_eff": n_eff,
+        }
+    return out
+
+
 def taper_region_summary(
     variance,
     weights,
     taper: VarianceTaper,
+    *,
+    cuts=(),
+    reference_kish_ess: float | None = None,
 ) -> dict[str, object]:
     """Posterior taper-mass diagnostic from per-sample ``sigma^2`` and weights.
 
     ``weights`` are (unnormalised, non-negative) posterior weights of the
     samples, e.g. dynesty importance weights. Returns the posterior fraction
     inside the taper region, the fraction above the threshold, the posterior
-    mean of ``T`` and quantiles of ``sigma^2``.
+    mean of ``T`` and quantiles of ``sigma^2``. With ``cuts``, also
+    ``posterior_mass_below`` (:func:`posterior_mass_below`: ``P(sigma^2 <= c)``
+    with its Kish-ESS binomial error, per cut).
     """
     v = np.asarray(variance, dtype=float).reshape(-1)
     w = np.asarray(weights, dtype=float).reshape(-1)
@@ -275,7 +345,7 @@ def taper_region_summary(
         return float(finite_v[order][min(index, v.size - 1)])
 
     kish = float(1.0 / np.sum(w**2))
-    return {
+    out = {
         "taper": taper.to_dict(),
         "region_onset_variance": taper.region_onset,
         "posterior_mass_in_taper_region": float(np.sum(w[inside])),
@@ -290,3 +360,8 @@ def taper_region_summary(
         "n_samples": int(v.size),
         "kish_ess": kish,
     }
+    if cuts:
+        out["posterior_mass_below"] = posterior_mass_below(
+            v, w, cuts, reference_kish_ess=reference_kish_ess
+        )
+    return out
