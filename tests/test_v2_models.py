@@ -22,7 +22,11 @@ from gwpop_search.grammar import (  # noqa: E402
     enumerate_v2_depth1,
     v2_root_model_spec,
 )
-from gwpop_search.grammar.v2_structure import required_hyperparameters  # noqa: E402
+from gwpop_search.grammar.v2 import V2_SUPERSEDED_HASHES_FD73DA8, v2_alternative_roots  # noqa: E402
+from gwpop_search.grammar.v2_structure import (  # noqa: E402
+    KAPPA_M1_CONVENTION_OPTION,
+    required_hyperparameters,
+)
 from gwpop_search.models import (  # noqa: E402
     FlatLambdaCDM,
     compile_model_spec,
@@ -231,16 +235,167 @@ def test_kappa_table_matches_direct_quadrature_and_normalises():
     assert np.isneginf(out[0])
 
 
-def test_kappa_of_m1_conditional_redshift_normalises_per_m1():
-    spec = atom(v2_root_model_spec(), "Z2")
-    model = compile_model_spec(spec)
+# kappa(m1) (atom Z2, alternative root A2): the local mass function convention
+# R(m1, z) = R(m1, 0) (1+z)^kappa(m1) (operator decision 2026-10-01).
+
+
+def _gauss_legendre(lo, hi, n=200):
+    x, w = np.polynomial.legendre.leggauss(n)
+    return 0.5 * (hi - lo) * (x + 1.0) + lo, 0.5 * (hi - lo) * w
+
+
+def _direct_log_norm(cosmo, kappa, zq, wq):
+    """ln N(kappa) = ln int dVc/dz (1+z)^(kappa-1) dz by direct quadrature (NumPy)."""
+    dvc = np.asarray(cosmo.dVc_dz(jnp.asarray(zq)))
+    a = np.log(dvc)[None, :] + (np.atleast_1d(kappa)[:, None] - 1.0) * np.log1p(zq)[None, :] + np.log(wq)[None, :]
+    top = a.max(axis=1, keepdims=True)
+    return top[:, 0] + np.log(np.exp(a - top).sum(axis=1))
+
+
+def _z2_pieces(slope, **overrides):
     from gwpop_search.models.declarative import _v2_redshift_logpdf
 
-    hp = v2_physical_hyperparameters(spec, hyper(spec, kappa_log_m1_slope=3.0))
+    spec = atom(v2_root_model_spec(), "Z2")
+    model = compile_model_spec(spec)
+    hp = v2_physical_hyperparameters(spec, hyper(spec, kappa_log_m1_slope=slope, **overrides))
+
+    def factor(m1, z):
+        return np.asarray(_v2_redshift_logpdf(model, jnp.asarray(z), jnp.log(jnp.asarray(m1)), hp))
+
+    return spec, model, hp, factor
+
+
+@pytest.mark.parametrize("slope", [3.0, -4.0, 0.7, 0.0])
+def test_kappa_of_m1_joint_m1_z_density_normalises(slope):
+    """One normalisation over (m1, z): int int p(m1, z) dz dm1 = 1 (not per m1)."""
+    spec, model, hp, factor = _z2_pieces(slope)
+    zq, wq = _gauss_legendre(0.0, 1.9)
+    g, mass = model._v2.grid, model._v2.mass
+    # exact on the model's own m1 normalisation nodes
+    m = np.asarray(g.m1s)
+    p_m = np.exp(np.asarray(mass.log_prob(g.m1s, g.log_m1s, hp)))
+    mm, zz = np.meshgrid(m, zq, indexing="ij")
+    z_integral = np.sum(np.exp(factor(mm, zz)) * wq[None, :], axis=1)  # N(kappa(m1)) / Z
+    assert abs(float(np.sum(np.asarray(g.w_m1) * p_m * z_integral)) - 1.0) < 1e-8
+    # and to the trapezoid accuracy of the 1000-node grid on a fine m1 grid (as the mass block itself)
+    m = fine_m1(n=8001)
+    p_m = np.exp(np.asarray(mass.log_prob(jnp.asarray(m), jnp.log(jnp.asarray(m)), hp)))
+    mm, zz = np.meshgrid(m, zq, indexing="ij")
+    z_integral = np.sum(np.exp(factor(mm, zz)) * wq[None, :], axis=1)
+    assert abs(_trapz(p_m * z_integral, m) - 1.0) < 2e-4
+    # the N(kappa(m1)) division is gone: p(z | m1) alone is not normalised unless slope == 0
+    spread = np.ptp(z_integral[p_m > 0])
+    assert spread < 1e-8 if slope == 0.0 else spread > 0.1
+
+
+def test_kappa_of_m1_normalisation_uses_the_mass_nodes_with_or_without_the_taper():
+    """With delta_m_1 == 0 the mass block is normalised analytically (Z_m1 = 1); the kappa(m1)
+    mean is self-normalised on the nodes, so the (m1, z) mass on the nodes equals the m1 mass."""
+    zq, wq = _gauss_legendre(0.0, 1.9)
+    for delta_m_1 in (3.5, 0.0):
+        spec, model, hp, factor = _z2_pieces(-2.0, delta_m_1=delta_m_1)
+        g, mass = model._v2.grid, model._v2.mass
+        p_m = np.exp(np.asarray(mass.log_prob(g.m1s, g.log_m1s, hp)))
+        mm, zz = np.meshgrid(np.asarray(g.m1s), zq, indexing="ij")
+        z_integral = np.sum(np.exp(factor(mm, zz)) * wq[None, :], axis=1)
+        joint = float(np.sum(np.asarray(g.w_m1) * p_m * z_integral))
+        m1_mass = float(np.sum(np.asarray(g.w_m1) * p_m))
+        assert abs(joint - m1_mass) < 1e-8
+        # the hard-edged density sums to 1 on the nodes only to the trapezoid accuracy of the grid
+        assert abs(m1_mass - 1.0) < (1e-12 if delta_m_1 else 2e-3)
+
+
+@pytest.mark.parametrize("slope", [3.0, -2.5])
+def test_kappa_of_m1_mass_block_is_the_local_mass_function(slope):
+    """p(m1, z) = p_m(m1) dVc/dz (1+z)^(kappa(m1)-1) / Z with one constant Z = int p_m N(kappa(m1)) dm1."""
+    spec, model, hp, factor = _z2_pieces(slope)
+    cosmo = model.cosmology
+    m1 = np.array([4.0, 9.9, 30.0, 47.3, 120.0, 250.0])
+    z = np.array([1e-3, 0.05, 0.5, 1.2, 1.9])
+    mm, zz = np.meshgrid(m1, z, indexing="ij")
+    kappa = float(hp["kappa"]) + slope * np.log(mm / 30.0)
+    rate = np.log(np.asarray(cosmo.dVc_dz(jnp.asarray(zz)))) + (kappa - 1.0) * np.log1p(zz)
+    log_z = rate - factor(mm, zz)
+    # the same constant at every (m1, z): R(m1, z) / R(m1, 0) = (1+z)^kappa(m1) exactly
+    assert np.ptp(log_z) < 1e-11
+    # ... equal to the p_m-weighted mean of N(kappa(m1)), by an independent quadrature
+    zq, wq = _gauss_legendre(0.0, 1.9)
+    g = model._v2.grid
+    nodes = np.asarray(g.m1s)
+    p_m = np.exp(np.asarray(model._v2.mass.log_prob(g.m1s, g.log_m1s, hp)))
+    log_n = _direct_log_norm(cosmo, float(hp["kappa"]) + slope * np.log(nodes / 30.0), zq, wq)
+    expect = np.log(np.sum(np.asarray(g.w_m1) * p_m * np.exp(log_n)))
+    assert abs(float(log_z.mean()) - expect) < 1e-8
+    # at z -> 0 the mass spectrum is the mass block: p(m1, z) / [dVc/dz (1+z)^(kappa(m1)-1)] has
+    # no m1 dependence besides p_m, i.e. the m1 marginal over z is NOT p_m but p_m N(kappa(m1)) / Z
+    marginal_ratio = np.exp(_direct_log_norm(cosmo, kappa[:, 0], zq, wq) - log_z.mean())
+    assert np.ptp(marginal_ratio) > 0.1
+
+
+def _detector_samples(n=3000, seed=17):
+    rng = np.random.default_rng(seed)
+    return {
+        "m1_detector": rng.uniform(4.0, 250.0, n),
+        "q": rng.uniform(0.05, 1.0, n),
+        "luminosity_distance": rng.uniform(50.0, 15000.0, n),
+        "chi_eff": rng.uniform(-0.9, 0.9, n),
+    }
+
+
+def test_kappa_of_m1_at_slope_zero_is_the_root_exactly():
+    """Z2 (= root A2) with slope 0 is R0: the two extra terms are identically zero."""
+    root = v2_root_model_spec()
+    a2 = v2_alternative_roots(root)["A2"]
+    assert a2 == atom(root, "Z2")
+    samples = _detector_samples()
+    r0, z2 = compile_model_spec(root), compile_model_spec(a2)
+    for kappa in (2.5, -7.3, 9.9):
+        a = np.asarray(r0(samples, hyper(root, kappa=kappa)))
+        b = np.asarray(z2(samples, hyper(a2, kappa=kappa, kappa_log_m1_slope=0.0)))
+        assert np.isfinite(a).mean() > 0.5
+        assert np.array_equal(a, b)  # bit for bit, including the -inf support pattern
+    # and it is a different model away from the null
+    c = np.asarray(z2(samples, hyper(a2, kappa_log_m1_slope=1.0)))
+    fin = np.isfinite(a)
+    assert np.array_equal(np.isfinite(c), fin) and np.max(np.abs(c[fin] - a[fin])) > 0.1
+
+
+@pytest.mark.parametrize("aid", ["C2", "C4", "S1", "M1", "P2"])
+def test_a2_suite_at_slope_zero_is_the_same_atom_on_the_root(aid):
+    """Every model built on A2 reduces to the same atom on R0 at kappa slope 0."""
+    root = v2_root_model_spec()
+    a2 = v2_alternative_roots(root)["A2"]
+    on_root, on_a2 = atom(root, aid), atom(a2, aid)
+    assert on_a2.redshift.options[KAPPA_M1_CONVENTION_OPTION] == "local_mass_function"
+    samples = _detector_samples(n=1500)
+    hp = hyper(on_root)
+    a = np.asarray(compile_model_spec(on_root)(samples, hp))
+    b = np.asarray(compile_model_spec(on_a2)(samples, {**hp, "kappa_log_m1_slope": 0.0}))
+    assert np.isfinite(a).mean() > 0.5 and np.array_equal(a, b)
+
+
+def test_fd73da8_kappa_of_m1_spec_keeps_its_per_m1_normalisation():
+    """A Z2 spec written by fd73da8 (no convention option) still loads and keeps the density
+    its hash was defined with; the grammar no longer produces it."""
+    from gwpop_search.models.declarative import _v2_redshift_logpdf
+
+    new = atom(v2_root_model_spec(), "Z2")
+    options = {k: v for k, v in new.redshift.options.items() if k != KAPPA_M1_CONVENTION_OPTION}
+    old = replace(new, redshift=replace(new.redshift, options=options))
+    DEFAULT_COMPONENT_REGISTRY.validate_model(old)
+    assert old.model_hash == V2_SUPERSEDED_HASHES_FD73DA8["Z2"] != new.model_hash
+    model = compile_model_spec(old)
+    hp = v2_physical_hyperparameters(old, hyper(old, kappa_log_m1_slope=3.0))
     z = np.linspace(0.0, 1.9, 50001)
     for m1 in (4.0, 30.0, 250.0):
         lp = _v2_redshift_logpdf(model, jnp.asarray(z), jnp.log(jnp.full_like(jnp.asarray(z), m1)), hp)
         assert abs(_trapz(np.exp(np.asarray(lp)), z) - 1.0) < 1e-8
+    # the convention option is meaningless for a constant kappa
+    root = v2_root_model_spec()
+    bad = replace(root, redshift=replace(root.redshift, options={
+        **root.redshift.options, KAPPA_M1_CONVENTION_OPTION: "local_mass_function"}))
+    with pytest.raises(ValueError, match="only defined with kappa_dependence"):
+        DEFAULT_COMPONENT_REGISTRY.validate_model(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +428,53 @@ def test_chi_eff_families_normalise_with_every_correlation(aid, corr):
     outside = _v2_chieff_logpdf(spec, jnp.asarray([-1.01, 1.01]), hp, q=jnp.ones(2), z=jnp.zeros(2),
                                 log_m1=jnp.full(2, math.log(30.0)))
     assert np.all(np.isneginf(np.asarray(outside)))
+
+
+# chi_eff - z atoms C3 (mean) and C4 (ln width): pivot z = 0.5 (operator decision 2026-10-01)
+
+
+@pytest.mark.parametrize("aid, slope_name", [("C3", "chi_mu_z_slope"), ("C4", "chi_log_sigma_z_slope")])
+def test_chi_eff_z_atoms_pivot_at_z_half(aid, slope_name):
+    from gwpop_search.models.declarative import _v2_chi_moments
+
+    root = v2_root_model_spec()
+    spec = atom(root, aid)
+    assert spec.chieff.options["z_pivot"] == 0.5
+    assert root.chieff.options["z_pivot"] == 0.0  # inert family default (no z slope): R0 hash unchanged
+    slope = 0.6
+    hp = hyper(spec, **{slope_name: slope})
+    z = jnp.asarray([0.0, 0.25, 0.5, 1.0, 1.9])
+    mu, log_sigma = _v2_chi_moments(spec, hp, q=jnp.ones_like(z), z=z, log_m1=jnp.full_like(z, math.log(30.0)))
+    moved, fixed = (mu, log_sigma) if aid == "C3" else (log_sigma, mu)
+    intercept = hp["chi_mu"] if aid == "C3" else hp["chi_log_sigma"]
+    # the intercept is the value at z = 0.5; the slope multiplies (z - 0.5)
+    assert float(moved[2]) == intercept
+    assert np.allclose(np.asarray(moved), intercept + slope * (np.asarray(z) - 0.5), rtol=0, atol=1e-15)
+    assert np.all(np.asarray(fixed) == (hp["chi_log_sigma"] if aid == "C3" else hp["chi_mu"]))
+    # the superseded z = 0 pivot of fd73da8 is the same family of densities, reparameterised:
+    # mu(z) = mu_0 + s z = (mu_0 + 0.5 s) + s (z - 0.5)
+    old = replace(spec, chieff=replace(spec.chieff, options={**spec.chieff.options, "z_pivot": 0.0}))
+    assert old.model_hash == V2_SUPERSEDED_HASHES_FD73DA8[aid] != spec.model_hash
+    name = "chi_mu" if aid == "C3" else "chi_log_sigma"
+    samples = _detector_samples(n=1500)
+    a = np.asarray(compile_model_spec(spec)(samples, hp))
+    b = np.asarray(compile_model_spec(old)(samples, {**hp, name: hp[name] - 0.5 * slope}))
+    fin = np.isfinite(a)
+    assert fin.mean() > 0.5 and np.array_equal(np.isfinite(b), fin)
+    assert np.max(np.abs(a[fin] - b[fin])) < 1e-10
+
+
+@pytest.mark.parametrize("aid, slope_name", [("C3", "chi_mu_z_slope"), ("C4", "chi_log_sigma_z_slope")])
+def test_chi_eff_z_atoms_at_slope_zero_are_the_root_exactly(aid, slope_name):
+    root = v2_root_model_spec()
+    spec = atom(root, aid)
+    samples = _detector_samples()
+    hp = hyper(root)
+    a = np.asarray(compile_model_spec(root)(samples, hp))
+    b = np.asarray(compile_model_spec(spec)(samples, {**hp, slope_name: 0.0}))
+    assert np.isfinite(a).mean() > 0.5 and np.array_equal(a, b)
+    c = np.asarray(compile_model_spec(spec)(samples, {**hp, slope_name: 0.5}))
+    assert np.max(np.abs(c[np.isfinite(a)] - a[np.isfinite(a)])) > 0.01
 
 
 def test_skew_normal_at_zero_skew_is_the_truncated_gaussian_even_off_the_interval():
@@ -405,8 +607,9 @@ GWTC4_BBH = Path("/hildafs/home/magana/tmp_ondemand_hildafs_phy220048p_symlink/s
 def test_linear_correlation_matches_the_lvk_mean_and_width_curves(fname, option, pivot):
     """mu(x) and sigma(x) of the LVK linear model: intercept at the pivot, ln width.
 
-    The GWTC-4 q release pivots at q = 1 (as v2); the z release pivots at
-    z = 0.5, whereas the v2 spec intercept is at z = 0 (the z_pivot option).
+    The GWTC-4 q release pivots at q = 1 and the z release at z = 0.5; the v2
+    atoms use the same pivots (C3/C4 at z = 0.5 since the operator decision of
+    2026-10-01), so the release hyperparameters are the v2 hyperparameters.
     """
     h5py = pytest.importorskip("h5py")
     from gwpop_search.models.declarative import _v2_chi_moments
@@ -419,7 +622,7 @@ def test_linear_correlation_matches_the_lvk_mean_and_width_curves(fname, option,
         mu_rel = f["posterior/rates_on_grids/mu_chieff/rates"][:100]
         sig_rel = f["posterior/rates_on_grids/sigma_chieff/rates"][:100]
     spec = atom(atom(v2_root_model_spec(), "C1" if option == "q" else "C3"), "C2" if option == "q" else "C4")
-    spec = replace(spec, chieff=replace(spec.chieff, options={**spec.chieff.options, f"{option}_pivot": pivot}))
+    assert spec.chieff.options[f"{option}_pivot"] == pivot  # the atoms' own pivot, not overridden
     for i in range(x.shape[0]):
         hp = {"chi_mu": x[i, col["mu_chieff_0"]], "chi_log_sigma": x[i, col["ln_sigma_chieff_0"]],
               f"chi_mu_{option}_slope": x[i, col["mu_chieff_1"]],

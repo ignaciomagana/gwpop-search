@@ -216,11 +216,25 @@ class ModelSpec:
         return cls.from_dict(json.loads(text))
 
 
+def _auxiliary_options(block_name: str, family: str) -> frozenset[str]:
+    """Options of ``block_name.family`` that are parameterisation constants, not axes."""
+    from .v2_structure import V2_AUXILIARY_OPTIONS  # v2_structure imports this module
+
+    return V2_AUXILIARY_OPTIONS.get((block_name, family), frozenset())
+
+
 def structural_diff_axes(parent: ModelSpec, child: ModelSpec) -> tuple[str, ...]:
     """Return semantic structure axes changed between two models.
 
     A family replacement is one atomic structural axis for that block; its new
     family-default options do not count as additional mutations.
+
+    Auxiliary options of the v2 families (``grammar.v2_structure.
+    V2_AUXILIARY_OPTIONS``: the correlation pivots and the kappa(m1)
+    convention) are part of the model hash but are not structural axes: they
+    are written together with the switch that uses them (e.g. the z pivot with
+    the chi_eff - z atoms C3/C4) and are inert while that switch is constant.
+    No v1 family has auxiliary options.
     """
     axes: list[str] = []
     for key in sorted(set(parent.support) | set(child.support)):
@@ -233,7 +247,7 @@ def structural_diff_axes(parent: ModelSpec, child: ModelSpec) -> tuple[str, ...]
             axes.append(f"{block_name}.family")
             continue
 
-        option_keys = set(a.options) | set(b.options)
+        option_keys = (set(a.options) | set(b.options)) - _auxiliary_options(block_name, a.family)
         for key in sorted(option_keys):
             if a.options.get(key) != b.options.get(key):
                 axes.append(f"{block_name}.options.{key}")

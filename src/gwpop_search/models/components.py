@@ -836,12 +836,25 @@ class BrokenPowerLawPeaksMass:
     def log_taper(self, m, p):
         return log_planck_taper(m, p["mlow_1"], self.grid.mmax, p["delta_m_1"])
 
+    def log_unnormalised_nodes(self, p):
+        """ln of the tapered, unnormalised primary density at the m1 nodes."""
+        g = self.grid
+        return log_mix(self.log_component_terms(g.m1s, g.log_m1s, p)) + self.log_taper(g.m1s, p)
+
     def log_norm(self, p):
         """log Z_m1 = log trapz over the m1 nodes (0 when delta_m_1 == 0)."""
-        g = self.grid
-        lp = log_mix(self.log_component_terms(g.m1s, g.log_m1s, p)) + self.log_taper(g.m1s, p)
-        z = _trapz_w(jnp.exp(lp), g.w_m1)
+        z = _trapz_w(jnp.exp(self.log_unnormalised_nodes(p)), self.grid.w_m1)
         return jnp.where(p["delta_m_1"] != 0, _log_z_from_linear(z), 0.0)
+
+    def log_node_measure(self, p):
+        """ln[w_k p~(m_k)]: the unnormalised p(m1) dm1 measure of the m1 nodes.
+
+        ``sum_k exp(.) f(m_k) / sum_k exp(.)`` is the p(m1)-weighted mean of f
+        on the model's own normalisation nodes (trapezoid rule); the ratio
+        does not depend on Z_m1, so it is the same whether the density is
+        normalised on the nodes or analytically (delta_m_1 == 0).
+        """
+        return self.log_unnormalised_nodes(p) + jnp.log(self.grid.w_m1)
 
     def log_prob_from_terms(self, m, terms, p):
         return log_mix(terms) + self.log_taper(m, p) - self.log_norm(p)
@@ -967,7 +980,9 @@ def _dvc_dz_float64(cosmology, z) -> np.ndarray:
 class PowerLawRedshiftNormTable:
     """ln N(kappa) = ln int_0^zmax dVc/dz (1+z)^(kappa-1) dz on a fixed kappa grid.
 
-    Used by the kappa(m1) redshift model, whose normalisation differs per sample.
+    Used by the kappa(m1) redshift model: N(kappa(m1)) at every m1 node enters
+    the one normalisation of the joint (m1, z) density
+    (:func:`redshift_powerlaw_local_mass_function_logpdf`).
     Values and derivatives d ln N / d kappa = E[ln(1+z)] are tabulated once
     (Gauss-Legendre in z, float64) and interpolated with a cubic Hermite
     spline; outside [kappa_low, kappa_high] the density is -inf.
@@ -1013,12 +1028,84 @@ class PowerLawRedshiftNormTable:
 
 
 def redshift_powerlaw_conditional_logpdf(z, kappa, *, zmax, cosmology, norm_table):
-    """p(z | kappa) = dVc/dz (1+z)^(kappa-1) / N(kappa) with per-sample kappa."""
+    """p(z | kappa) = dVc/dz (1+z)^(kappa-1) / N(kappa) with per-sample kappa.
+
+    The per-sample normalised power-law redshift density. With kappa =
+    kappa(m1) it is the DRAFT kappa(m1) convention of fd73da8 (the mass block
+    is then the spectrum integrated over the volume to zmax). The operator
+    decision of 2026-10-01 replaced it by
+    :func:`redshift_powerlaw_local_mass_function_logpdf`; it is kept for specs
+    written by fd73da8 (no ``kappa_m1_convention`` option), whose hash must
+    keep denoting the density it was defined with, and as a check of the
+    table against the direct quadrature.
+    """
     z = jnp.asarray(z)
     safe_z = jnp.where(z >= 0.0, z, 0.0)
     log_norm = norm_table(kappa)
     val = jnp.log(cosmology.dVc_dz(safe_z)) + (kappa - 1.0) * jnp.log1p(safe_z) - log_norm
     valid = (z >= 0.0) & (z <= zmax) & jnp.isfinite(log_norm) & jnp.isfinite(val)
+    return jnp.where(valid, val, NEG_INF)
+
+
+def redshift_powerlaw_local_mass_function_logpdf(
+    z, *, kappa, delta_kappa, delta_kappa_nodes, log_node_measure, zmax, cosmology, norm_table,
+    quadrature_order=96,
+):
+    """Redshift factor of the kappa(m1) model in the local mass function convention.
+
+    The merger rate density is R(m1, z) = R(m1, 0) (1 + z)^kappa(m1) with
+    kappa(m1) = ``kappa`` + ``delta_kappa`` (the per-sample excess over the
+    pivot value), so the mass block p_m is the z = 0 mass spectrum and the
+    joint source-frame density is
+
+        p(m1, z) = p_m(m1) dVc/dz (1 + z)^(kappa(m1) - 1) / Z,
+        Z = int p_m(m1) N(kappa(m1)) dm1,
+        N(k) = int_0^zmax dVc/dz (1 + z)^(k - 1) dz.
+
+    This function returns ln[p(m1, z) / p_m(m1)]. It is *not* a conditional
+    density: its z integral at fixed m1 is N(kappa(m1)) / Z, which is 1 only
+    for a mass-independent kappa. (The DRAFT form of fd73da8 divided by
+    N(kappa(m1)) instead, :func:`redshift_powerlaw_conditional_logpdf`; then
+    p_m was the mass spectrum integrated over the volume to zmax.)
+
+    It is evaluated as
+
+        ln p_R0(z | kappa) + delta_kappa ln(1 + z) - ln <N(kappa(m1)) / N(kappa)>,
+
+    where p_R0 is the root's redshift density (:func:`redshift_rate_logpdf`)
+    and <.> is the p_m-weighted mean over the model's m1 normalisation nodes
+    (``log_node_measure`` = ln[w_k p~_m(m_k)], ``delta_kappa_nodes`` =
+    kappa(m_k) - kappa; ln N from ``norm_table``). With delta_kappa = 0
+    everywhere the last two terms are exactly zero, so the model reduces to
+    the root bit for bit (the Savage-Dickey null of the Z2 edge). The value is
+    -inf outside [0, zmax], when kappa(m_k) leaves the table at a node that
+    carries mass, or when no node carries mass.
+
+    Accuracy. The mean uses the same m1 nodes as Z_m1, so the (m1, z) mass on
+    the nodes equals the m1 mass on the nodes exactly, and the true integral
+    is 1 to the accuracy of the mass block's own normalisation. Over 1000
+    prior draws of the Z2 model (reference: panelled Gauss-Legendre in m1)
+    |int int p dz dm1 - 1| has median 3.5e-6 and 90% quantile 1.1e-5, against
+    3.5e-6 and 6.9e-6 for |int p_m dm1 - 1| of the mass block alone. The
+    remaining draws with a large error (99% quantile 3e-2, against 4e-2 for the
+    mass block) all have a peak narrower than the m1 node spacing (sigma <~
+    0.05 Msun), where the LVK grid normalisation Z_m1 itself fails: inherited
+    from the LVK convention, as for every v2 model.
+    """
+    z = jnp.asarray(z)
+    inside = (z >= 0.0) & (z <= zmax)
+    safe_z = jnp.where(inside, z, 0.0)
+    base = redshift_rate_logpdf(safe_z, kappa=kappa, zmax=zmax, cosmology=cosmology,
+                                quadrature_order=quadrature_order)
+    carries = jnp.isfinite(log_node_measure)
+    # ln[N(kappa(m_k)) / N(kappa)]; nodes without mass do not enter the mean
+    kappa_nodes = jnp.where(carries, kappa + delta_kappa_nodes, kappa)
+    excess = norm_table(kappa_nodes) - norm_table(kappa)
+    measure = jnp.where(carries, log_node_measure, NEG_INF)
+    log_mean = (jax.scipy.special.logsumexp(measure + excess)
+                - jax.scipy.special.logsumexp(measure))
+    val = base + delta_kappa * jnp.log1p(safe_z) - log_mean
+    valid = inside & jnp.isfinite(log_mean) & jnp.isfinite(val)
     return jnp.where(valid, val, NEG_INF)
 
 

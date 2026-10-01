@@ -46,6 +46,8 @@ SUPPORTED requires all six:
   ``bound_consistent``. A disagreement blocks SUPPORTED and is flagged.
 * **D5 alternative roots.** The sign of ``ln BF`` holds on both alternative
   roots, A1 = BP2P + beta per mass component and A2 = BP2P + kappa(m1)
+  (local mass function convention R(m1, z) = R(m1, 0) (1+z)^kappa(m1): BP2P is
+  the z = 0 mass spectrum; operator decision 2026-10-01)
   (``--alt-root A1=<suite or scenario summary>``). An edge whose mutation is
   inapplicable on an alternative root (it is already part of that root) is
   ``not_applicable`` there. PSIS-LOO is reported, not binding. Event-drop
@@ -91,7 +93,7 @@ D2_PRIMARY_CUT = 1.0
 D2_TIGHTER_CUTS = (0.9,)
 ALT_ROOT_DESCRIPTIONS = {
     "A1": "BP2P + beta per mass component (LVK 'Extended' pairing)",
-    "A2": "BP2P + kappa(m1)",
+    "A2": "BP2P + kappa(m1), R(m1, z) = R(m1, 0) (1+z)^kappa(m1) (BP2P = z = 0 mass spectrum)",
 }
 SUPPORTED, DISFAVOURED, INCONCLUSIVE = "SUPPORTED", "DISFAVOURED", "INCONCLUSIVE"
 _D4_OK = ("agree", "not_applicable", "bound_consistent")

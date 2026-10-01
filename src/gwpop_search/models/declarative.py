@@ -21,6 +21,8 @@ from gwpop_search.grammar import (
 from gwpop_search.grammar.v2_structure import (
     CHIEFF_CORRELATION_COVARIATE,
     CHIEFF_CORRELATION_OPTIONS,
+    KAPPA_M1_CONVENTION,
+    KAPPA_M1_CONVENTION_OPTION,
     V2_MASS_FAMILIES,
     is_v2_model,
     mass_components,
@@ -34,6 +36,8 @@ from .components import (
     TaperedPowerLawPairing,
     log_eps_skewnorm,
     log_mix,
+    redshift_powerlaw_conditional_logpdf,
+    redshift_powerlaw_local_mass_function_logpdf,
     redshift_madau_dickinson_psi_logpdf,
     truncated_normal_logpdf,
     truncated_student_t_logpdf,
@@ -381,6 +385,18 @@ class _V2Compiled:
 
 
 def _v2_redshift_logpdf(model, z, log_m1, hp):
+    """ln[p(m1, q, z) / p(m1, q)]: the redshift factor of the source-frame density.
+
+    For Madau-Dickinson and a constant kappa it is the normalised p(z). For
+    kappa(m1) (atom Z2, root A2) it is the local mass function form
+    R(m1, z) = R(m1, 0) (1+z)^kappa(m1), normalised once over (m1, z) with the
+    mass block: not a conditional density in z (see
+    :func:`~.components.redshift_powerlaw_local_mass_function_logpdf`;
+    operator decision 2026-10-01). A kappa(m1) spec without the
+    ``kappa_m1_convention`` option was written by fd73da8 and keeps the DRAFT
+    per-m1 normalised p(z | m1) it was defined (and hashed) with; the grammar
+    no longer produces such a spec.
+    """
     spec = model.spec
     if spec.redshift.family == "madau_dickinson_psi":
         return redshift_madau_dickinson_psi_logpdf(
@@ -393,12 +409,25 @@ def _v2_redshift_logpdf(model, z, log_m1, hp):
             z, kappa=hp["kappa"], zmax=model.zmax, cosmology=model.cosmology,
             quadrature_order=model.redshift_quadrature_order,
         )
-    from .components import redshift_powerlaw_conditional_logpdf
-
-    pivot = float(spec.redshift.options["m1_pivot"])
-    kappa = hp["kappa"] + hp["kappa_log_m1_slope"] * (log_m1 - jnp.log(pivot))
-    return redshift_powerlaw_conditional_logpdf(
-        z, kappa, zmax=model.zmax, cosmology=model.cosmology, norm_table=model._v2.kappa_table
+    compiled = model._v2
+    log_pivot = jnp.log(float(spec.redshift.options["m1_pivot"]))
+    slope = hp["kappa_log_m1_slope"]
+    convention = spec.redshift.options.get(KAPPA_M1_CONVENTION_OPTION)
+    if convention is None:  # fd73da8 DRAFT spec: p(z | m1) normalised per m1
+        return redshift_powerlaw_conditional_logpdf(
+            z, hp["kappa"] + slope * (log_m1 - log_pivot), zmax=model.zmax,
+            cosmology=model.cosmology, norm_table=compiled.kappa_table,
+        )
+    if convention != KAPPA_M1_CONVENTION:  # pragma: no cover - the registry rejects it
+        raise ValueError(f"unsupported {KAPPA_M1_CONVENTION_OPTION} {convention!r}")
+    return redshift_powerlaw_local_mass_function_logpdf(
+        z,
+        kappa=hp["kappa"],
+        delta_kappa=slope * (log_m1 - log_pivot),
+        delta_kappa_nodes=slope * (compiled.grid.log_m1s - log_pivot),
+        log_node_measure=compiled.mass.log_node_measure(hp),
+        zmax=model.zmax, cosmology=model.cosmology, norm_table=compiled.kappa_table,
+        quadrature_order=model.redshift_quadrature_order,
     )
 
 
@@ -466,7 +495,12 @@ def lvk_default_coordinates(params: Mapping[str, Any], *, mmin: float = 3.0) -> 
 
 
 def v2_source_frame_logpdf(model, *, m1, q, z, chi_eff, hyperparameters):
-    """Normalised v2 source-frame density ln p(m1, q, z, chi_eff | Lambda)."""
+    """Normalised v2 source-frame density ln p(m1, q, z, chi_eff | Lambda).
+
+    p(m1) p(q | m1) [redshift factor] p(chi_eff | q, z, m1). The redshift
+    factor is p(z) except for kappa(m1), where (m1, z) are normalised jointly
+    (the mass block is then the z = 0 mass spectrum; ``_v2_redshift_logpdf``).
+    """
     spec = model.spec
     hp = v2_physical_hyperparameters(spec, hyperparameters)
     z = jnp.asarray(z)

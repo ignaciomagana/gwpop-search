@@ -7,7 +7,23 @@ densities are compiled by ``gwpop_search.models.declarative``.
 
 Status: **DRAFT** until the operator freezes the v2 pre-registration. Every
 prior the spec marks "set in the pre-registration draft" is listed in
-:data:`V2_DRAFT_PRIORS` with its source and rationale.
+:data:`V2_DRAFT_PRIORS` with its source, rationale and decision status. The
+operator decided all of them on 2026-10-01 (:data:`V2_OPERATOR_DECISIONS`):
+the draft priors are approved as drafted, with two changes of convention:
+
+* Z2 and the alternative root A2 (kappa(m1)) use the **local mass function**
+  convention R(m1, z) = R(m1, 0) (1+z)^kappa(m1): the mass block is the z = 0
+  mass spectrum and the joint (m1, z) density is normalised once, not per m1
+  (:data:`.v2_structure.KAPPA_M1_CONVENTION`);
+* the chi_eff - z atoms C3 and C4 pivot at **z = 0.5** (the LVK GWTC-4 release
+  convention), not z = 0 (:data:`.v2_structure.V2_Z_PIVOT`).
+
+Model hashes relative to fd73da8 (the pilot code): C3, C4, Z2 (= root A2) and
+every model built on them (their depth-2 compositions, the whole A2 suite, C3
+and C4 on A1) change; R0 and the other 16 depth-1 nodes do not. The pilot (b)
+C4 runs at fd73da8 used the z = 0 pivot, which is a reparameterisation of the
+same densities (the intercept prior refers to a different redshift); the pilot
+tests the machinery and is not rerun for this.
 
 Root R0 ("LVK Default BBH + Gaussian chi_eff"; GWTC-5 Table 5 priors):
 
@@ -33,8 +49,12 @@ from .registry import DEFAULT_COMPONENT_REGISTRY, ComponentRegistry
 from .schema import ModelSpec, PriorConfig, structural_diff_axes
 from .v2_structure import (
     CHIEFF_CORRELATION_OPTIONS,
+    CHIEFF_PIVOT_OPTIONS,
+    KAPPA_M1_CONVENTION,
+    KAPPA_M1_CONVENTION_OPTION,
     V2_MASS_FAMILIES,
     V2_CHIEFF_FAMILIES,
+    V2_Z_PIVOT,
     mass_components,
 )
 
@@ -157,11 +177,14 @@ def _mass(mid, family, description, *, removals=(), updates=None, added=(), drop
     )
 
 
-def _corr(mid, option, prior, description):
+def _corr(mid, option, prior, description, *, pivot=None):
+    """A chi_eff correlation atom. ``pivot`` overwrites the pivot option(s) of
+    the covariate it switches on (C3/C4: ``z_pivot = 0.5``)."""
     return MutationSpec(
         mid, "chieff", "set_option", "linear", option=option,
         requires_any_family=V2_CHIEFF_FAMILIES,
         prior_updates={CHIEFF_CORRELATION_OPTIONS[option]: prior}, description=description,
+        companion_overrides=dict(pivot or {}),
     )
 
 
@@ -169,7 +192,10 @@ def _shape(mid, family, updates, description, *, family_options=None):
     return MutationSpec(
         mid, "chieff", "change_family", family, requires_family="linear_gaussian",
         prior_removals=_SHAPE_EXTRA, prior_updates=dict(updates),
-        family_options=dict(family_options or {}), carry_options=_CORRELATION_SWITCHES,
+        # the pivots travel with the switches (C3/C4 set z_pivot = 0.5), so a
+        # shape atom and a correlation atom commute
+        family_options=dict(family_options or {}),
+        carry_options=_CORRELATION_SWITCHES + CHIEFF_PIVOT_OPTIONS,
         description=description,
     )
 
@@ -192,9 +218,9 @@ V2_MUTATIONS: tuple[MutationSpec, ...] = (
     _corr("v2.chieff.log_sigma_q", "log_sigma_q", _u(-12.0, 4.0),
           "C2: chi_eff ln-width linear in q (intercept at q = 1)"),
     _corr("v2.chieff.mean_z", "mean_z", _u(-1.0, 1.0),
-          "C3: chi_eff mean linear in z (intercept at z = 0)"),
+          "C3: chi_eff mean linear in z (intercept at z = 0.5)", pivot={"z_pivot": V2_Z_PIVOT}),
     _corr("v2.chieff.log_sigma_z", "log_sigma_z", _u(-3.0, 5.0),
-          "C4: chi_eff ln-width linear in z (intercept at z = 0)"),
+          "C4: chi_eff ln-width linear in z (intercept at z = 0.5)", pivot={"z_pivot": V2_Z_PIVOT}),
     _corr("v2.chieff.mean_log_m1", "mean_log_m1", _u(-2.0 / 3.0, 2.0 / 3.0),
           "C5: chi_eff mean linear in ln(m1 / 30 Msun)"),
     _corr("v2.chieff.log_sigma_log_m1", "log_sigma_log_m1", _u(-4.0, 4.0),
@@ -246,8 +272,11 @@ V2_MUTATIONS: tuple[MutationSpec, ...] = (
     MutationSpec(
         "v2.redshift.kappa_log_m1", "redshift", "set_option", "linear_log_m1",
         option="kappa_dependence", requires_family="powerlaw_1pz",
+        # the convention is part of the hash (operator decision 2026-10-01)
+        companion_options={KAPPA_M1_CONVENTION_OPTION: KAPPA_M1_CONVENTION},
         prior_updates={"kappa_log_m1_slope": _u(-4.0, 4.0)},
-        description="Z2: kappa linear in ln(m1 / 30 Msun)",
+        description="Z2: kappa linear in ln(m1 / 30 Msun); R(m1, z) = R(m1, 0) (1+z)^kappa(m1) "
+                    "(the mass block is the z = 0 mass spectrum)",
     ),
 )
 V2_MUTATION_TABLE: dict[str, MutationSpec] = {m.mutation_id: m for m in V2_MUTATIONS}
@@ -279,9 +308,14 @@ V2_MUTATION_ATOM = {mid: aid for aid, mid in V2_ATOM_IDS.items()}
 CHIEFF_ATOMS = ("C1", "C2", "C3", "C4", "C5", "C6", "S1", "S2", "S3", "S4")
 MASS_ATOMS = ("M1", "M2", "M3", "M4", "M5")
 
-#: Priors the spec leaves to the pre-registration draft (and the two support
-#: choices that are interpretations), with sources. All DRAFT: the operator
-#: approves them at freeze.
+#: Decision status of the entries of :data:`V2_DRAFT_PRIORS` decided on 2026-10-01.
+_APPROVED = "approved by operator 2026-10-01"
+
+#: Priors the spec leaves to the pre-registration draft (and the support and
+#: convention choices that are interpretations), with sources. Every entry
+#: carries its ``status`` and the ``decision`` taken; the operator decided the
+#: open ones on 2026-10-01 (``staging/v2/FREEZE_DECISIONS_PENDING.md`` items
+#: 1-10). The graph itself stays DRAFT until the freeze.
 V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
     "C5.chi_mu_log_m1_slope": {
         "prior": "U(-2/3, 2/3) per e-fold of m1",
@@ -289,7 +323,10 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
         "rationale": "over ln m1 in [ln 5, ln 100] (~3 e-folds, where the events are) it spans the same |d mu| <= 2 "
                      "as the q slope over q in [0, 1]. Over the full population support [3, 300] Msun (4.6 e-folds) "
                      "it spans |d mu| <= 3.1 (the q slope spans 2.0 over q in [0.001, 1]); the alternative that "
-                     "matches over the full support is U(-0.43, 0.43). OPERATOR CHOICE at freeze",
+                     "matches over the full support is U(-0.43, 0.43)",
+        "status": _APPROVED,
+        "decision": "item 1: keep the drafted U(-2/3, 2/3) (matched where the events are); the full-support "
+                    "alternative U(-0.43, 0.43) is not adopted",
     },
     "C6.chi_log_sigma_log_m1_slope": {
         "prior": "U(-4, 4) per e-fold of m1",
@@ -297,61 +334,89 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
         "rationale": "|d ln sigma| <= 12 over ~3 e-folds of m1 (5-100 Msun, where the events are), the largest excursion "
                      "of the q-slope prior; symmetric because the sign is not predicted. Over the full support [3, 300] "
                      "Msun (4.6 e-folds) it spans |d ln sigma| <= 18.4 versus 12.0 for the q slope over q in [0.001, 1]; "
-                     "the alternative that matches over the full support is U(-2.6, 2.6). OPERATOR CHOICE at freeze",
+                     "the alternative that matches over the full support is U(-2.6, 2.6)",
+        "status": _APPROVED,
+        "decision": "item 2: keep the drafted U(-4, 4); the full-support alternative U(-2.6, 2.6) is not adopted",
     },
     "S1.chi_mu_2_frac": {
         "prior": "U(0, 1): mu_2 = mu_1 + f (1 - mu_1), i.e. mu_2 | mu_1 ~ U(mu_1, 1)",
         "source": "spec 'ordered means'; v1 second component at chi_eff ~ 0.45; Hussain+26",
         "rationale": "orders the components (label-switching free) and keeps mu_2 inside [-1, 1]",
+        "status": _APPROVED,
+        "decision": "item 3: accepted as drafted (ordered means)",
     },
     "S1.chi_log_sigma_2": {
         "prior": "U(-5, 0)",
         "source": "root ln sigma prior (GWTC-5 Table 5 style)",
         "rationale": "same width range as the bulk component",
+        "status": _APPROVED,
+        "decision": "item 3: accepted as drafted",
     },
     "S2.chi_fraction_low/high": {
         "prior": "U(0, 1) each",
         "source": "spec (f_low -> f_high)",
         "rationale": "fraction of component 2 below / above the transition",
+        "status": _APPROVED,
+        "decision": "item 4: accepted as drafted",
     },
     "S2.chi_fraction_m_t": {
         "prior": "LU(10, 100) Msun",
         "source": "Antonini+24 (transition ~45 Msun), Plunkett+26, Flanagan+26 mass regimes, Li+25",
         "rationale": "brackets the proposed transitions with a scale-free prior",
+        "status": _APPROVED,
+        "decision": "item 4: accepted as drafted",
     },
     "S2.chi_fraction_width": {
         "prior": "LU(0.05, 1) in ln m1",
         "source": "draft choice",
         "rationale": "from a sharp step (5% in mass) to a transition spread over a factor e",
+        "status": _APPROVED,
+        "decision": "item 4: accepted as drafted",
     },
     "P1.beta_m_t": {
         "prior": "LU(10, 100) Msun",
         "source": "Flanagan+26; marked-transition q steepening at 42.7 Msun",
         "rationale": "scale-free, brackets the proposed pairing transitions",
+        "status": _APPROVED,
+        "decision": "item 5: accepted as drafted",
     },
     "P1.beta_width": {
         "prior": "LU(0.05, 1) in ln m1",
         "source": "draft choice (as S2)",
         "rationale": "sharp to broad transition",
+        "status": _APPROVED,
+        "decision": "item 5: accepted as drafted",
     },
     "Z1.md_gamma/md_kappa/md_z_peak": {
         "prior": "gamma ~ U(-10, 10), kappa ~ U(0, 10), z_peak ~ U(0, 4)",
         "source": "Madau & Dickinson 2014 (2.7, 5.6, 1.9); GWTC-5 MD posterior (3.0, 4.2, 1.6)",
         "rationale": "gamma shares the root kappa prior so kappa_MD = 0 is the exact power-law null",
+        "status": _APPROVED,
+        "decision": "item 6: accepted as drafted",
     },
     "Z2.kappa_log_m1_slope": {
         "prior": "U(-4, 4) per e-fold of m1",
         "source": "draft choice",
         "rationale": "kappa changes by up to ~4.4 between 10 and 30 Msun, several times the GWTC-5 kappa width",
+        "status": _APPROVED,
+        "decision": "item 7: accepted as drafted",
     },
     "Z2.normalisation": {
-        "prior": "p(z | m1) = dVc/dz (1+z)^(kappa(m1)-1) / N(kappa(m1)), normalised per m1 (implemented)",
-        "source": "draft choice; OPEN OPERATOR DECISION",
-        "rationale": "with the per-m1 normalisation BP2P is the mass spectrum integrated over the volume to z < 1.9. "
-                     "The usual mass-dependent-evolution convention R(m1, z) = R(m1, 0) (1+z)^kappa(m1) (BP2P = the "
-                     "local, z = 0, mass function) drops the N(kappa(m1)) division (the shape likelihood is invariant "
-                     "to a Lambda-dependent constant). Both reduce exactly to R0 at slope 0 (SDDR exact either way) "
-                     "but give different evidences for Z2 and for the whole A2 suite",
+        "prior": "local mass function: R(m1, z) = R(m1, 0) (1+z)^kappa(m1); p(m1, z) = p_m(m1) dVc/dz "
+                 "(1+z)^(kappa(m1)-1) / Z with Z = int p_m(m1) N(kappa(m1)) dm1 (one normalisation over (m1, z); "
+                 "no division by N(kappa(m1)))",
+        "source": "operator decision 2026-10-01 (the usual mass-dependent-evolution convention); it replaces the "
+                  "DRAFT per-m1 form p(z | m1) = dVc/dz (1+z)^(kappa(m1)-1) / N(kappa(m1)) of fd73da8",
+        "rationale": "the mass block (BP2P and its atoms) is the local, z = 0, mass spectrum, as in R0, where the "
+                     "mass spectrum is the same at every redshift. With the per-m1 normalisation it was the "
+                     "spectrum integrated over the volume to z < 1.9. Both reduce exactly to R0 at slope 0 (Z = "
+                     "N(kappa); the Savage-Dickey null is exact either way) but they are different models away "
+                     "from it, with different evidences for Z2 and for the whole A2 suite. Z is the p_m-weighted "
+                     "mean of N(kappa(m1)) on the model's m1 normalisation nodes",
+        "status": _APPROVED,
+        "decision": "item 8: local mass function convention (not the per-m1 normalised p(z | m1)); applies to Z2, "
+                    "to the alternative root A2 and to everything built on them. Recorded in the redshift option "
+                    "kappa_m1_convention = 'local_mass_function', so the Z2 / A2 hashes change relative to fd73da8",
     },
     "taper.form": {
         "prior": "sharp cut: ln L -> -inf where sigma^2_lnL > 1 (sigma^2 = 1 kept); D3 sensitivity rerun at 4. "
@@ -371,6 +436,8 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
                      "2026-10-01): the LVK Default posterior has 67% of its mass at sigma^2 > 0.95, so a mass "
                      "limit would block every edge, while ln BF(0.9) = ln BF(1) + ln P_child - ln P_parent "
                      "measures what the cut does to each edge",
+        "status": "settled: operator decisions 2026-09-30 (cut form) and 2026-10-01 (D3 at 4, D2 bracketing)",
+        "decision": "sharp cut at sigma^2 = 1; D3 rerun at 4; D2 checked at cuts 1 and 0.9",
     },
     "support.q_floor": {
         "prior": "0.001 (fixed support; truncate and renormalise p(q | m1) on [max(0.001, mlow_2/m1), 1]; "
@@ -382,6 +449,8 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
                      "XPHM-SpinTaylor PE prior support; the population mass there is small (LVK rate fraction "
                      "<= 1.5e-6 at the release draws tested, more for beta < 0) and found injections with "
                      "q < 0.05 now carry weight",
+        "status": "settled: operator decision 2 (2026-09-30)",
+        "decision": "q_floor = 0.001",
     },
     "A1.mass_atoms.beta_c": {
         "prior": "beta_p3 ~ U(-10, 13) added with M3/M4 on A1; beta_p35 / beta_p10 removed with M1 / M2",
@@ -389,17 +458,73 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
         "rationale": "on the per-component pairing root each mass component carries its own pairing slope, so "
                      "adding/dropping a component adds/drops its slope (same structural axis; the SDDR null "
                      "lam_u_c = 0 leaves beta_c unidentified). Also makes mass x P2 depth-2 pairs commute",
+        "status": "settled (recorded for the freeze in staging/v2/FREEZE_DECISIONS_PENDING.md)",
+        "decision": "mass atoms add or remove the per-component pairing slope on A1",
     },
     "C3/C4.z_pivot": {
-        "prior": "0.0 (intercept at z = 0)",
-        "source": "operator spec 2026-09-30",
-        "rationale": "NOTE: the LVK GWTC-4 release (BBHCorr_zchieffLinearCorrelationModel) uses an intercept at z = 0.5",
+        "prior": "0.5 (the intercepts chi_mu ~ U(-1, 1) and ln sigma ~ U(-5, 0) are the values at z = 0.5; "
+                 "slopes unchanged: delta_mu|z ~ U(-1, 1), delta ln sigma|z ~ U(-3, 5))",
+        "source": "operator decision 2026-10-01: the LVK GWTC-4 release convention "
+                  "(BBHCorr_zchieffLinearCorrelationModel, intercept at z = 0.5); it replaces the z = 0 "
+                  "intercept of the operator spec of 2026-09-30",
+        "rationale": "LVK-comparable intercepts, at a redshift where there are events. A pivot only "
+                     "reparameterises the model (mu(z) = mu_0.5 + slope (z - 0.5)), but the intercept prior "
+                     "stays as specified and now refers to z = 0.5, so the prior over densities, and with it "
+                     "the evidence, changes slightly. At slope 0 the model is R0 for any pivot (the "
+                     "Savage-Dickey null is exact). The pilot (b) C4 runs (code fd73da8) used the z = 0 pivot; "
+                     "the pilot tests the machinery and is not rerun",
+        "status": _APPROVED,
+        "decision": "item 9: pivot z = 0.5 (not z = 0). Written by the C3/C4 atoms as the chi_eff option "
+                    "z_pivot = 0.5, so the C3 / C4 hashes change relative to fd73da8; models without a z slope "
+                    "keep the inert family default and their hashes",
     },
     "S4.form": {
         "prior": "location-scale Student-t truncated to [-1, 1], nu ~ LU(1, 100)",
         "source": "spec; LVK Student-t release not available on disk",
         "rationale": "form not verified against an LVK release",
+        "status": _APPROVED,
+        "decision": "item 10: accepted as drafted, noting that the form was not checked against an LVK release",
     },
+}
+
+#: Hashes of the models whose definition changed on 2026-10-01, as they were at
+#: fd73da8 (the pilot code; ``staging/v2/pilot/fd73da8/hashes.env``). Z2 is also
+#: the alternative root A2. Tests pin that the current hashes differ from these
+#: and that every other depth-1 hash is unchanged.
+V2_SUPERSEDED_HASHES_FD73DA8: dict[str, str] = {
+    "C3": "17e5627e76c7cf180830aaf2e3314ba24e0f05de983193caf3efefe3916b4841",
+    "C4": "b4588f07ee67156afba96b235ceb780b489c152ba148b4e4742b9ac76029a519",
+    "Z2": "f3e52d4a5ae853a1f257b486ff4071c5f6d755a456fa49a8df2b5af9a98292e8",
+}
+
+#: The operator decisions of 2026-10-01 on the open freeze items (written into
+#: the graph metadata).
+V2_OPERATOR_DECISIONS: dict[str, object] = {
+    "date": "2026-10-01",
+    "source": "staging/v2/FREEZE_DECISIONS_PENDING.md items 1-10",
+    "decisions": {
+        "Z2.normalisation": "local mass function convention R(m1, z) = R(m1, 0) (1+z)^kappa(m1): the mass "
+                            "block is the z = 0 mass spectrum; one normalisation over (m1, z), no division by "
+                            "N(kappa(m1)). Applies to Z2, the alternative root A2 and everything built on them",
+        "C3/C4.z_pivot": "z = 0.5 (LVK GWTC-4 release convention) instead of z = 0; intercept priors as "
+                         "specified, now at z = 0.5; slope priors unchanged",
+        "other_draft_priors": "approved as drafted: C5 U(-2/3, 2/3) and C6 U(-4, 4) per e-fold of m1; S1 ordered "
+                              "means with ln sigma_2 ~ U(-5, 0); S2 f_low, f_high ~ U(0, 1), m_t ~ LU(10, 100), "
+                              "width ~ LU(0.05, 1); P1 m_t ~ LU(10, 100), width ~ LU(0.05, 1); Z1 gamma ~ "
+                              "U(-10, 10), kappa ~ U(0, 10), z_peak ~ U(0, 4); Z2 slope ~ U(-4, 4); S4 truncated "
+                              "location-scale Student-t with nu ~ LU(1, 100)",
+    },
+    "hash_changes": {
+        "relative_to": "fd73da8",
+        "changed": "C3, C4, Z2 (= alternative root A2) and every model built on them: their depth-2 "
+                   "compositions, the whole A2 suite, and C3 / C4 on A1",
+        "unchanged": "R0 and the other 16 depth-1 nodes (M1-M5, C1, C2, C5, C6, S1-S4, P1, P2 = A1, Z1)",
+        "superseded_hashes": dict(V2_SUPERSEDED_HASHES_FD73DA8),
+    },
+    "pilot_note": "the pilot (b) C4 runs (code fd73da8, staging/v2/pilot/fd73da8) used the z = 0 pivot: a "
+                  "reparameterisation of the same family of densities (the intercept prior refers to z = 0 "
+                  "instead of z = 0.5). The pilot tests the machinery; it is not rerun. The pilot ran no Z2 "
+                  "or A2 model",
 }
 
 
@@ -732,6 +857,13 @@ def v2_graph_payload(graph: ModelGraph, *, depth2: Depth2Plan | None = None) -> 
                   for aid, mid in V2_ATOM_IDS.items()},
         "edge_atoms": atom_of_edge,
         "draft_priors": V2_DRAFT_PRIORS,
+        "operator_decisions": V2_OPERATOR_DECISIONS,
+        "conventions": {
+            "chieff_z_pivot": V2_Z_PIVOT,
+            "chieff_q_pivot": 1.0,
+            "m1_pivot": 30.0,
+            KAPPA_M1_CONVENTION_OPTION: KAPPA_M1_CONVENTION,
+        },
         "depth2": None if depth2 is None else depth2.to_dict(),
         "depth2_rule": {
             "cap": V2_DEPTH2_CAP,

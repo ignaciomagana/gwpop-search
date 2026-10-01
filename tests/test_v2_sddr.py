@@ -88,6 +88,52 @@ def test_exact_embeddings_reproduce_the_smaller_model_numerically():
     assert checked == 15
 
 
+def test_decided_conventions_keep_the_null_embeddings_exact():
+    """C3/C4 (pivot z = 0.5) and Z2 (local mass function): slope 0 is the parent, to rounding."""
+    graph = enumerate_v2_depth1()
+    by_hash = graph.by_hash
+    rows = {V2_MUTATION_ATOM[r.mutation_id]: (e, r) for e, r in zip(graph.edges, classify_graph_edges(graph))}
+    for aid in ("C3", "C4", "Z2"):
+        edge, row = rows[aid]
+        assert row.classification == "exact" and row.larger_model == "child"
+        assert row.embeddings[0].null_value == 0.0 and not row.vw_required
+        result = verify_nesting(row, by_hash[edge.parent_hash], by_hash[edge.child_hash],
+                                n_checks=4, n_samples=400, seed=11, rtol=1e-13)
+        assert result["all_nested"], (aid, result)
+        assert result["embeddings"][0]["support_pattern_mismatches"] == 0
+
+
+def test_a2_suite_edges_stay_exactly_nested():
+    """On the alternative root A2 (kappa(m1), local mass function) every atom's edge classifies
+    as on R0, and the exact ones reproduce A2 at the null."""
+    from gwpop_search.grammar import InapplicableMutation
+    from gwpop_search.grammar.v2 import v2_alternative_roots
+
+    a2 = v2_alternative_roots()["A2"]
+    checked = 0
+    for aid, (cls, larger, tested) in EXPECTED.items():
+        mutation = V2_MUTATION_TABLE[V2_ATOM_IDS[aid]]
+        try:
+            child = apply_mutation(a2, mutation)
+        except InapplicableMutation:
+            assert aid in ("Z1", "Z2")
+            continue
+        row = classify_edge(a2, child, mutation.mutation_id)
+        assert (row.classification, row.larger_model) == (cls, larger), (aid, row.reason)
+        if cls != "exact" or aid not in ("M1", "M5", "C2", "C3", "C4", "S1", "S3", "P1"):
+            continue
+        assert row.embeddings[0].tested_parameter == tested
+        result = verify_nesting(row, a2, child, n_checks=2, n_samples=300, seed=5)
+        assert result["all_nested"], (aid, result)
+        checked += 1
+    assert checked == 8
+    # the A2 root edge itself (R0 -> A2 is the Z2 edge)
+    root = v2_root_model_spec()
+    row = classify_edge(root, a2, V2_ATOM_IDS["Z2"])
+    assert row.classification == "exact" and row.embeddings[0].tested_parameter == "kappa_log_m1_slope"
+    assert verify_nesting(row, root, a2, n_checks=3, n_samples=300, seed=6, rtol=1e-13)["all_nested"]
+
+
 def test_depth2_edges_are_classified_by_their_single_axis():
     root = v2_root_model_spec()
     c2 = apply_mutation(root, V2_MUTATION_TABLE[V2_ATOM_IDS["C2"]])

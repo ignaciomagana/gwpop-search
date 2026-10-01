@@ -8,8 +8,17 @@ Without ``--depth2-passing`` the graph is the depth-1 graph (root R0 + the 19
 atoms: 20 nodes, 19 edges); the depth-2 slots are conditional on the depth-1
 results and are only added once the passing edges are known. The JSON is
 ``load_model_graph`` compatible and carries a ``metadata`` block (status DRAFT,
-atom ids, draft priors, depth-2 rule, alternative roots) and the G12 model
-checks. It refuses to write under a ``frozen`` directory.
+atom ids, draft priors with their decision status, the operator decisions of
+2026-10-01, the pivot / kappa(m1) conventions, depth-2 rule, alternative
+roots) and the G12 model checks. It refuses to write under a ``frozen``
+directory.
+
+Hashes: since the operator decisions of 2026-10-01 (C3/C4 pivot z = 0.5; Z2 and
+root A2 in the local mass function convention) the hashes of C3, C4, Z2 (= A2)
+and of every model built on them differ from the graphs written by fd73da8
+(the pilot code); R0 and the other 16 depth-1 nodes are unchanged
+(``metadata.operator_decisions.hash_changes``). The pilot (b) C4 runs used the
+z = 0 pivot (a reparameterisation; the pilot tests the machinery).
 """
 
 from __future__ import annotations

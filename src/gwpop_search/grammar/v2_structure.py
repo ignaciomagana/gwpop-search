@@ -63,7 +63,8 @@ V2_MIXTURE_FAMILIES = ("single",)
 
 #: chi_eff correlation switches (each its own structural axis) -> slope parameter.
 #: Mean and ln-width are linear in (q - q_pivot), (z - z_pivot) and
-#: ln(m1 / m1_pivot) (the LVK "linear correlation" form; m1 in log).
+#: ln(m1 / m1_pivot) (the LVK "linear correlation" form; m1 in log). Pivots:
+#: q = 1, z = 0.5 (V2_Z_PIVOT, written by C3/C4), m1 = 30 Msun.
 CHIEFF_CORRELATION_OPTIONS: dict[str, str] = {
     "mean_q": "chi_mu_q_slope",
     "mean_z": "chi_mu_z_slope",
@@ -80,15 +81,59 @@ CHIEFF_CORRELATION_COVARIATE = {
     "log_sigma_z": "z",
     "log_sigma_log_m1": "log_m1",
 }
+#: z pivot of the chi_eff - z atoms C3 (mean) and C4 (ln width): the intercepts
+#: ``chi_mu`` / ``chi_log_sigma`` are the values at z = 0.5, the LVK GWTC-4
+#: release convention (BBHCorr_zchieffLinearCorrelationModel). Operator decision
+#: 2026-10-01 (it replaces the z = 0 intercept of the 2026-09-30 spec; a
+#: reparameterisation of the same family of densities that moves the intercept
+#: prior, so the evidence changes slightly).
+V2_Z_PIVOT = 0.5
+#: Pivot options of the chi_eff correlation block.
+CHIEFF_PIVOT_OPTIONS = ("q_pivot", "z_pivot", "m1_pivot")
 _CORRELATION_DEFAULTS: dict[str, JsonValue] = {
     **{name: "constant" for name in CHIEFF_CORRELATION_OPTIONS},
-    # LVK linear form: intercepts at q = 1 and z = 0 (operator spec
-    # 2026-09-30), m1 pivot 30 Msun in ln m1.
+    # LVK linear form: intercept at q = 1, m1 pivot 30 Msun in ln m1.
     "q_pivot": 1.0,
+    # Family default only. A pivot is inert while its slope switch is
+    # "constant"; the C3/C4 atoms overwrite it with V2_Z_PIVOT = 0.5 when they
+    # switch a z slope on (grammar.v2, MutationSpec.companion_overrides). The
+    # default stays 0.0 so that the hash of every model without a z slope
+    # (R0 and the 16 other depth-1 nodes of fd73da8) is unchanged.
     "z_pivot": 0.0,
     "m1_pivot": 30.0,
 }
 _CORRELATION_CHOICES = {name: ("constant", "linear") for name in CHIEFF_CORRELATION_OPTIONS}
+
+#: kappa(m1) convention of the redshift block (atom Z2 and the D5 root A2).
+#: ``"local_mass_function"`` (operator decision 2026-10-01):
+#:
+#:     R(m1, z) = R(m1, 0) (1 + z)^kappa(m1),  kappa(m1) = kappa + slope ln(m1 / m1_pivot),
+#:
+#: so the mass block (BP2P and its atoms) is the z = 0 mass spectrum and the
+#: joint density is
+#:
+#:     p(m1, z) = p_m(m1) dVc/dz (1 + z)^(kappa(m1) - 1) / Z,
+#:     Z = int p_m(m1) N(kappa(m1)) dm1,  N(k) = int_0^zmax dVc/dz (1 + z)^(k - 1) dz,
+#:
+#: normalised once over (m1, z) (not per m1). It replaces the DRAFT convention
+#: of fd73da8, p(z | m1) = dVc/dz (1+z)^(kappa(m1)-1) / N(kappa(m1)), in which
+#: the mass block was the spectrum integrated over the volume to zmax. The
+#: option is written by the Z2 atom, so the convention is part of the model
+#: hash. A kappa(m1) spec *without* the option is a spec written by fd73da8:
+#: it still loads and compiles to the per-m1 density its hash was defined
+#: with (so graphs and results of the fd73da8 pilot stay readable), but the
+#: grammar no longer produces it.
+KAPPA_M1_CONVENTION_OPTION = "kappa_m1_convention"
+KAPPA_M1_CONVENTION = "local_mass_function"
+
+#: (block, family) -> options that are part of the hash but are not structural
+#: axes (``schema.structural_diff_axes`` skips them): parameterisation
+#: constants written together with, and only meaningful with, the switch that
+#: uses them.
+V2_AUXILIARY_OPTIONS: dict[tuple[str, str], frozenset[str]] = {
+    **{("chieff", family): frozenset(CHIEFF_PIVOT_OPTIONS) for family in V2_CHIEFF_FAMILIES},
+    ("redshift", "powerlaw_1pz"): frozenset({"m1_pivot", KAPPA_M1_CONVENTION_OPTION}),
+}
 
 #: Required keys of ``ModelSpec.support`` for a v2 model.
 V2_SUPPORT_KEYS = (
@@ -140,7 +185,10 @@ def v2_family_definitions():
             "redshift",
             "powerlaw_1pz",
             {"kappa_dependence": "constant", "m1_pivot": 30.0},
-            {"kappa_dependence": ("constant", "linear_log_m1")},
+            {"kappa_dependence": ("constant", "linear_log_m1"),
+             KAPPA_M1_CONVENTION_OPTION: (KAPPA_M1_CONVENTION,)},
+            # Not a default option (the R0 hash is unchanged); written by Z2.
+            optional_options=(KAPPA_M1_CONVENTION_OPTION,),
         )
     )
     defs.append(FamilyDefinition("redshift", "madau_dickinson_psi"))
@@ -276,6 +324,12 @@ def validate_v2_model(model: ModelSpec) -> None:
         raise ValueError(
             "v2 model priors must equal its hyperparameters exactly: "
             f"missing={sorted(required - declared)} unused={sorted(declared - required)}"
+        )
+    if (model.redshift.family == "powerlaw_1pz"
+            and model.redshift.options["kappa_dependence"] == "constant"
+            and KAPPA_M1_CONVENTION_OPTION in model.redshift.options):
+        raise ValueError(
+            f"redshift option {KAPPA_M1_CONVENTION_OPTION!r} is only defined with kappa_dependence='linear_log_m1'"
         )
     mmin = float(model.support["mmin"])
     mmax = float(model.support["mmax"])
