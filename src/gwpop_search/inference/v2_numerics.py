@@ -44,6 +44,7 @@ from .evidence_campaign import EvidenceCampaignConfig
 from .fidelity import (
     REQUIRED_BOUND,
     REQUIRED_SAMPLE,
+    F0SanityConfig,
     FidelityRunConfig,
     NumericalCriteria,
     fidelity_config_sha256,
@@ -57,6 +58,15 @@ V2_TAPER_SENSITIVITY_THRESHOLD = 2.0
 V2_TAPER_KIND = "sharp"
 V2_NLIVE = 500
 V2_DLOGZ = 0.1
+#: F0 taper-support gate (DRAFT): the sharp cut must keep at least this
+#: fraction of the prior. dynesty 3.1.0 needs min(nlive - 20, 100) = 100
+#: finite initial live points within 1000 batches of nlive = 500 draws (a
+#: kept fraction >= 2e-4, below which the run fails with NoFiniteSupportError);
+#: the gate asks for twice that, i.e. <= 500 initialization batches.
+V2_F0_MIN_TAPER_KEPT_FRACTION = 4.0e-4
+#: draws of the sequential F0 kept-fraction scan: ~26 kept draws expected at
+#: the gate, so the gate decision is resolved
+V2_F0_TAPER_SUPPORT_MAX_DRAWS = 65536
 
 # Importance-sampling check families: reported, non-binding in v2 (see module doc).
 V2_NON_BINDING_FAMILIES = (
@@ -273,6 +283,10 @@ def v2_fidelity_run_config(threshold: float = V2_TAPER_THRESHOLD) -> FidelityRun
     cut at ``threshold`` (the LVK form).
     """
     return FidelityRunConfig(
+        f0=F0SanityConfig(
+            min_taper_finite_fraction=V2_F0_MIN_TAPER_KEPT_FRACTION,
+            taper_support_max_draws=V2_F0_TAPER_SUPPORT_MAX_DRAWS,
+        ),
         f3_evidence=v2_evidence(repeats=1),
         f4_evidence=v2_evidence(repeats=2),
         f3_criteria=v2_criteria(repeats=1),

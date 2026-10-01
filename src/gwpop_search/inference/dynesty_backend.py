@@ -179,6 +179,24 @@ class PoolCancelledError(RuntimeError):
     """A pooled task was abandoned because another task in the same map failed."""
 
 
+class InsufficientFiniteSupportError(RuntimeError):
+    """dynesty's initialization found finite log-likelihoods, but fewer than it needs.
+
+    dynesty 3.1.0 draws batches of ``nlive`` prior points until it holds
+    ``min(nlive, max(ndim + 1, min(nlive - 20, 100)))`` finite ones. After
+    1000 batches it raises only when it found none; with 1..min-1 it warns
+    once and keeps drawing without limit. :func:`_new_sampler` turns that
+    warning into this error (re-raised by the evidence layer as
+    ``NoFiniteSupportError``), so a sharp variance cut that keeps a prior
+    fraction below ``min_npoints / (1000 nlive)`` is a typed failure, not an
+    unbounded loop.
+    """
+
+
+#: dynesty 3.1.0's warning when initialization stalls with some finite points
+_DYNESTY_INIT_STALL_WARNING = r"After \d+ attempts, we could not find at least"
+
+
 class DirtyCodeWarning(UserWarning):
     """The package sources have uncommitted changes, so ``git_commit`` does not
     identify the code; the run is identified by ``code.source_sha256``.
@@ -1972,23 +1990,31 @@ def _new_sampler(
     if tally is None:
         tally = _RunTally()
         tally.bind(pool, time.perf_counter())
-    sampler = dynesty.NestedSampler(
-        pool.point_loglikelihood,
-        prior_transform,
-        ndim,
-        nlive=config.nlive,
-        bound=config.bound,
-        sample=config.sample,
-        update_interval=config.update_interval,
-        rstate=np.random.default_rng(seed),
-        queue_size=config.batch_size,
-        pool=pool,
-        use_pool=dict(_USE_POOL),
-        walks=config.walks,
-        slices=config.slices,
-        bootstrap=config.bootstrap,
-        enlarge=config.enlarge,
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=_DYNESTY_INIT_STALL_WARNING)
+        try:
+            sampler = dynesty.NestedSampler(
+                pool.point_loglikelihood,
+                prior_transform,
+                ndim,
+                nlive=config.nlive,
+                bound=config.bound,
+                sample=config.sample,
+                update_interval=config.update_interval,
+                rstate=np.random.default_rng(seed),
+                queue_size=config.batch_size,
+                pool=pool,
+                use_pool=dict(_USE_POOL),
+                walks=config.walks,
+                slices=config.slices,
+                bootstrap=config.bootstrap,
+                enlarge=config.enlarge,
+            )
+        except UserWarning as exc:
+            raise InsufficientFiniteSupportError(
+                f"dynesty initialization stalled: {exc} (the likelihood keeps less than "
+                f"about min(nlive - 20, 100) / (1000 nlive) of the prior, nlive={config.nlive})"
+            ) from exc
     setattr(sampler, _CHECKPOINT_META_ATTR, _checkpoint_meta(names, seed, config, identity))
     setattr(sampler, _TALLY_ATTR, tally)
     return sampler
@@ -2088,6 +2114,30 @@ def _queued_evaluations(sampler) -> int | None:
         return None
 
 
+def initial_volume_uncertainty(logvol_init: float, *, n_finite_initial: int, nlive: int) -> dict:
+    """Relative (= ln Z) error of dynesty's initial kept-volume estimate.
+
+    dynesty 3.1.0 stops initialization after ``N = exp(-logvol_init)``
+    batches of ``nlive`` prior draws holding ``k`` finite points (the rest of
+    the live set is a ``-inf`` plateau, removed with exact volume steps), so
+    the finite prior volume is estimated as ``k / (nlive N)`` with binomial
+    relative variance ``1/k - 1/(nlive N)`` (0 when every draw is finite).
+    """
+    n_batches = int(round(math.exp(-float(logvol_init))))
+    k = int(n_finite_initial)
+    if k <= 0 or n_batches <= 0:
+        raise ValueError(f"invalid initialization record: k={k}, batches={n_batches}")
+    variance = max(0.0, 1.0 / k - 1.0 / (float(nlive) * n_batches))
+    return {
+        "logvol_init": float(logvol_init),
+        "n_init_batches": n_batches,
+        "n_finite_initial": k,
+        "nlive": int(nlive),
+        "kept_fraction_estimate": k / (float(nlive) * n_batches),
+        "log_evidence_error": float(math.sqrt(variance)),
+    }
+
+
 def _result_from_sampler(
     sampler,
     *,
@@ -2129,6 +2179,20 @@ def _result_from_sampler(
         info["final_delta_logz"] = final_delta
         info["converged"] = bool(final_delta < config.dlogz)
     info["n_zero_likelihood_points"] = int(np.count_nonzero(zero))
+    # Initial-volume noise: with -inf regions (e.g. a sharp variance cut)
+    # dynesty estimates the kept prior fraction from its initialization
+    # (k finite of N batches x nlive draws; logvol_init = -ln N), and the
+    # evidence inherits its relative error sqrt(1/k - 1/(nlive N)), which
+    # dynesty's logzerr omits. It is added in quadrature (cf.
+    # gwpopulation_pipe scale_evidences_by_cut, frac_uncertainty).
+    initial_volume = initial_volume_uncertainty(
+        float(getattr(sampler, "logvol_init", 0.0)),
+        n_finite_initial=int(config.nlive) - int(np.count_nonzero(zero)),
+        nlive=int(config.nlive),
+    )
+    initial_volume["dynesty_logzerr"] = log_evidence_error
+    info["initial_volume"] = initial_volume
+    log_evidence_error = float(math.hypot(log_evidence_error, initial_volume["log_evidence_error"]))
     info["n_queued_evaluations"] = _queued_evaluations(sampler)
     info["cumulative"] = dict(totals)
     return DynestyResult(

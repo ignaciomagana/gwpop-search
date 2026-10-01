@@ -104,6 +104,11 @@ def test_adapter_pair_feeds_the_v2_model_and_matches_its_support(pair, model):
     names = {c["name"] for c in report["checks"]}
     assert {"sky.pe", "sky.selection", "zmax.selection_declared",
             "support.every_event_has_supported_samples"} <= names
+    # the q edge tested is the population's reachable one, max(q_floor, mmin / mmax)
+    assert report["reported"]["population_q_lower_edge"] == pytest.approx(3.0 / 300.0)
+    q_edge = next(c for c in report["checks"] if c["name"] == "draw_support.found_edge.q_lower")
+    if "edge" in q_edge:
+        assert q_edge["edge"] == pytest.approx(0.01)
     from gwpop_search.hbi.jax_backend import build_shape_log_likelihood_components
 
     hp = {k: jax.numpy.asarray(v) for k, v in HP.items()}
@@ -470,8 +475,10 @@ def test_declared_draw_support_must_contain_the_population_support(pair, model):
     # a finite-draw maximum just below zmax (O3: 1.896) is within the 1% tolerance
     assert v2_data_support_report(model, pe, sel, draw_support={"z_max": 1.896})["pass"]
     assert not v2_data_support_report(model, pe, sel, draw_support={"z_max": 1.66})["pass"]
-    # injections drawn above the population floor q_floor = 0.001 do not cover it
-    assert not v2_data_support_report(model, pe, sel, draw_support={"q_min": 0.01})["pass"]
+    # the population's reachable q edge is max(q_floor, mmin / mmax) = 0.01 (m2 >= 3):
+    # injections drawn down to it cover the population, injections drawn above it do not
+    assert v2_data_support_report(model, pe, sel, draw_support={"q_min": 0.01})["pass"]
+    assert not v2_data_support_report(model, pe, sel, draw_support={"q_min": 0.02})["pass"]
 
 
 def test_write_v2_draft_configs_refuses_frozen(tmp_path):

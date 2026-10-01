@@ -144,6 +144,7 @@ def v2_data_support_report(model, posterior, selection, *, policy=None,
     zmax = float(support["zmax"])
     q_floor = float(support["q_floor"])
     mmin, mmax = float(support["mmin"]), float(support["mmax"])
+    q_edge = max(q_floor, mmin / mmax)
     sky = str(support["sky"])
     checks: list[dict[str, object]] = []
 
@@ -200,7 +201,7 @@ def v2_data_support_report(model, posterior, selection, *, policy=None,
         draw_status = "declared"
         needs = {
             "m1_source_min": ("<=", mmin), "m1_source_max": (">=", mmax),
-            "q_min": ("<=", q_floor),
+            "q_min": ("<=", q_edge),
             "z_max": (">=", zmax * (1.0 - EDGE_REACH_TOLERANCE)),
         }
         for key, value in declared.items():
@@ -210,7 +211,9 @@ def v2_data_support_report(model, posterior, selection, *, policy=None,
     edges = {
         "m1_upper": _edge_test(s_m1, mmax, "upper"),
         "m1_lower": _edge_test(s_m1, mmin, "lower"),
-        "q_lower": _edge_test(s_q, q_floor, "lower"),
+        # the population's lowest reachable q is max(q_floor, mmin / mmax)
+        # (m2 >= mmin), not q_floor itself
+        "q_lower": _edge_test(s_q, q_edge, "lower"),
         "z_upper": _edge_test(s_z, zmax, "upper"),
     }
     for name, row in edges.items():
@@ -231,6 +234,7 @@ def v2_data_support_report(model, posterior, selection, *, policy=None,
             "selection_rows": int(selection.n_selected),
             "selection_rows_above_zmax": int(np.sum(s_z > zmax)),
             "selection_rows_below_q_floor": int(np.sum(s_q < q_floor)),
+            "population_q_lower_edge": float(q_edge),
             "selection_fraction_in_support": float(np.mean(s_inside)),
             "draw_support_declaration": draw_status,
         },

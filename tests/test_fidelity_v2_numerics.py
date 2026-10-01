@@ -237,6 +237,57 @@ def test_f0_parity_holds_for_the_tapered_likelihood(dataset, tmp_path):  # noqa:
         assert point["variance_rel_diff"] <= 1e-9 and point["tapered_rel_diff"] == 0.0
 
 
+def _f0_with_taper_gate(dataset, tmp_path, taper, *, min_kept, max_draws, name):  # noqa: F811
+    from gwpop_search.inference.fidelity import F0SanityConfig
+
+    f0 = F0SanityConfig(
+        prior_draws=128, batch_size=16, parity_pe_samples_per_event=16,
+        parity_selected_per_campaign=128, min_taper_finite_fraction=min_kept,
+        taper_support_max_draws=max_draws,
+    )
+    evaluator = DeterministicHBIEvaluator(
+        dataset.posterior,
+        dataset.selection,
+        config=_small_config(hbi=HBIConfig(selection_chunk_size=None, variance_taper=taper), f0=f0),
+        dataset_identity="synthetic-test",
+    )
+    record = evaluator.evaluate(baseline_model_spec(), Fidelity.F0_SANITY, seed=123, run_dir=tmp_path / name)
+    return record, read_evaluation(tmp_path / name / "evaluation.json")["diagnostics"]
+
+
+def test_f0_gates_the_fraction_of_the_prior_a_sharp_cut_keeps(dataset, tmp_path):  # noqa: F811
+    from gwpop_search.inference.fidelity import F0_TAPER_SUPPORT_TARGET_FINITE, F0SanityConfig
+
+    # a cut no prior draw passes: population support is fine, but dynesty could
+    # never start -> the scan extends to its maximum and the gate fails
+    record, diag = _f0_with_taper_gate(
+        dataset, tmp_path, VarianceTaper(kind="sharp", threshold=1e-12),
+        min_kept=1e-3, max_draws=512, name="cut_all",
+    )
+    scan = diag["support"]["taper"]["kept_fraction_scan"]
+    assert scan["n_kept"] == 0 and scan["n_draws"] == 512 and scan["extension_rounds"] == 3
+    assert diag["support"]["finite_fraction"] > 0.0  # untapered support is unaffected
+    gate = [c for c in diag["checks"] if c["name"] == "f0.taper_kept_fraction"]
+    assert gate and not gate[0]["passed"] and not record.diagnostics_pass
+    # a generous cut: enough kept draws in the first scan, no extension, gate passes
+    record, diag = _f0_with_taper_gate(
+        dataset, tmp_path, VarianceTaper(kind="sharp", threshold=1e6),
+        min_kept=1e-3, max_draws=512, name="keep_all",
+    )
+    scan = diag["support"]["taper"]["kept_fraction_scan"]
+    assert scan["n_kept"] >= F0_TAPER_SUPPORT_TARGET_FINITE and scan["extension_rounds"] == 0
+    assert scan["n_draws"] == 128
+    assert [c for c in diag["checks"] if c["name"] == "f0.taper_kept_fraction"][0]["passed"]
+    # the gate is off unless configured, and its fields stay out of pre-v2 hashes
+    assert "min_taper_finite_fraction" not in F0SanityConfig().to_dict()
+    with pytest.raises(ValueError, match="together"):
+        F0SanityConfig(min_taper_finite_fraction=1e-3)
+    with pytest.raises(ValueError, match=">= prior_draws"):
+        F0SanityConfig(prior_draws=128, min_taper_finite_fraction=1e-3, taper_support_max_draws=64)
+    v2 = v2_fidelity_run_config().f0
+    assert v2.min_taper_finite_fraction == 4.0e-4 and v2.taper_support_max_draws == 65536
+
+
 # ---------------------------------------------------------------------------
 # v2 seed rules and fidelity configuration
 # ---------------------------------------------------------------------------

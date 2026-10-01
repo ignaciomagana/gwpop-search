@@ -109,6 +109,8 @@ REQUIRED_BOUND = "multi"
 REQUIRED_SAMPLE = "rslice"
 
 _F0_STREAM = 0x46305341  # "F0SA"
+#: kept (finite tapered ln L) prior draws the F0 taper-support scan aims for
+F0_TAPER_SUPPORT_TARGET_FINITE = 25
 _IMPORTANCE_STREAM = 0x494D5054  # "IMPT"
 
 
@@ -400,6 +402,19 @@ class F0SanityConfig:
     NumPy parity uses a thinned pair (``parity_pe_samples_per_event`` PE
     samples per event, ``parity_selected_per_campaign`` injections per
     campaign) at up to ``parity_points`` draws with finite thinned likelihood.
+
+    Taper-support gate (only with a variance taper, and only when set; ``None``
+    keeps pre-v2 configuration hashes and disables the gate): the fraction of
+    prior draws the taper keeps (finite *tapered* ``ln L``) must be
+    ``>= min_taper_finite_fraction``. When the ``prior_draws`` scan holds fewer
+    than :data:`F0_TAPER_SUPPORT_TARGET_FINITE` kept draws, further prior draws
+    (same seeded stream, ``prior_draws`` per round) are evaluated until it
+    does or ``taper_support_max_draws`` draws are reached, so that fractions
+    near the threshold are resolved. dynesty 3.1.0 starts only after it has
+    ``min(nlive - 20, 100)`` finite live points and gives up (here: a typed
+    :class:`~gwpop_search.inference.evidence.NoFiniteSupportError`) after
+    1000 batches of ``nlive`` draws, i.e. below a kept fraction of
+    ``100 / (1000 nlive)`` (2e-4 at nlive 500).
     """
 
     prior_draws: int = 4096
@@ -410,6 +425,8 @@ class F0SanityConfig:
     parity_selected_per_campaign: int = 512
     parity_points: int = 2
     parity_rtol: float = 1.0e-9
+    min_taper_finite_fraction: float | None = None
+    taper_support_max_draws: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -432,9 +449,27 @@ class F0SanityConfig:
         if not (math.isfinite(rtol) and rtol > 0.0):
             raise ValueError("parity_rtol must be finite and positive")
         object.__setattr__(self, "parity_rtol", rtol)
+        if (self.min_taper_finite_fraction is None) != (self.taper_support_max_draws is None):
+            raise ValueError(
+                "min_taper_finite_fraction and taper_support_max_draws are set together or not at all"
+            )
+        if self.min_taper_finite_fraction is not None:
+            kept = _as_float("min_taper_finite_fraction", self.min_taper_finite_fraction)
+            if not 0.0 < kept <= 1.0:
+                raise ValueError("min_taper_finite_fraction must lie in (0, 1]")
+            object.__setattr__(self, "min_taper_finite_fraction", kept)
+            draws = _as_positive_int("taper_support_max_draws", self.taper_support_max_draws)
+            if draws < self.prior_draws:
+                raise ValueError("taper_support_max_draws must be >= prior_draws")
+            object.__setattr__(self, "taper_support_max_draws", draws)
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        # the taper-support fields appear only when set (pre-v2 hashes unchanged)
+        payload = asdict(self)
+        for name in ("min_taper_finite_fraction", "taper_support_max_draws"):
+            if payload[name] is None:
+                del payload[name]
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "F0SanityConfig":
@@ -1386,13 +1421,38 @@ def run_f0_sanity(
     supported = np.isfinite(untapered_values)
     finite_fraction = float(np.mean(supported))
     taper_support = None
+    taper_gate = None
     if tapered:
         variance_values = np.concatenate([first[2], rest[2]])
         taper = hbi_config.variance_taper
+        # Sequential extension of the kept-fraction estimate (same seeded
+        # stream, continued): only the count of finite tapered values is used.
+        n_kept, n_scanned, rounds = int(np.count_nonzero(finite)), int(finite.size), 0
+        if config.min_taper_finite_fraction is not None:
+            while (
+                n_kept < F0_TAPER_SUPPORT_TARGET_FINITE
+                and n_scanned < config.taper_support_max_draws
+            ):
+                size = min(config.prior_draws, config.taper_support_max_draws - n_scanned)
+                extra = np.asarray(transform(rng.random((size, len(names)))), dtype=float)
+                extra_values = _evaluate(loglike, extra)[0]
+                n_kept += int(np.count_nonzero(np.isfinite(extra_values)))
+                n_scanned += size
+                rounds += 1
+            taper_gate = n_kept / n_scanned
         taper_support = {
             "taper": taper.to_dict(),
             "n_finite_tapered": int(np.count_nonzero(finite)),
             "finite_fraction_tapered": float(np.mean(finite)),
+            "kept_fraction_scan": {
+                "n_draws": n_scanned,
+                "n_kept": n_kept,
+                "kept_fraction": n_kept / n_scanned,
+                "extension_rounds": rounds,
+                "target_kept": F0_TAPER_SUPPORT_TARGET_FINITE,
+                "max_draws": config.taper_support_max_draws,
+                "min_kept_fraction": config.min_taper_finite_fraction,
+            },
             "n_supported_above_threshold": int(
                 np.count_nonzero(supported & ~(variance_values <= taper.threshold))
             ),
@@ -1534,6 +1594,15 @@ def run_f0_sanity(
             comparison="le",
         ),
     ]
+    if taper_gate is not None:
+        checks.append(
+            _check(
+                "f0.taper_kept_fraction",
+                taper_gate,
+                config.min_taper_finite_fraction,
+                comparison="ge",
+            )
+        )
     throughput = {
         "batch_size": int(config.batch_size),
         "n_draws": int(theta.shape[0]),
