@@ -475,3 +475,15 @@ def test_v2_grids_stay_float64_when_compiled_before_x64():
     np.testing.assert_array_equal(np.asarray(grid.m1s), np.geomspace(3.0, 300.0, 1000))
     assert table.log_norm.dtype == np.float64
     np.testing.assert_array_equal(np.asarray(table.log_norm), np.asarray(reference.log_norm))
+
+
+def test_draw_support_edge_test_tolerates_a_sparse_tail_at_the_true_edge():
+    """Draws that end exactly at q_floor with few detections there are not a cliff
+    (the smoke mock: found q minimum 0.0509 for a 0.05 draw floor)."""
+    from gwpop_search.models.data_support import _edge_test
+
+    rng = np.random.default_rng(1)
+    q = rng.uniform(0.05, 1.0, 200000)
+    found = q[rng.random(q.size) < q ** 3]  # detection favours equal masses
+    assert found.min() > 0.05
+    assert _edge_test(found, 0.05, "lower")["passed"] is True

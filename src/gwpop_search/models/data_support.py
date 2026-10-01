@@ -27,7 +27,8 @@ sky-marginal density basis, the :class:`~gwpop_search.data.v2_policy.GwcatV2Data
     (the v2r2 canonical selection records none);
   - *found-injection edges* (always): at each support edge (``m1`` in
     ``[mmin, mmax]``, ``q >= q_floor``, ``z <= zmax``) the found injections
-    either reach the edge (within 1%) or thin out smoothly before it. A
+    either reach the edge (within 1%, or within the 2% test window of the found
+    range) or thin out smoothly before it. A
     found-injection density that stops inside the support at a cliff (the
     density in the last 2% of the found range at least 10% of the mean)
     means the draws, not the detector, end there, and fails (not evaluated
@@ -107,15 +108,17 @@ def _edge_test(values, edge: float, side: str) -> dict[str, object]:
         return {"edge": float(edge), "side": side, "n_found": int(values.size),
                 "found_extent": hi if side == "upper" else lo, "reached": None, "cliff": None,
                 "passed": True, "note": f"not evaluated: fewer than {EDGE_MIN_FOUND} found injections"}
+    width = hi - lo
+    # "reached": the gap to the edge is within 1% of the edge or within the
+    # test window (finite sampling cannot resolve a smaller gap)
+    slack = max(EDGE_REACH_TOLERANCE * abs(edge), EDGE_WINDOW_FRACTION * width)
     if side == "upper":
         extent = hi
-        reached = hi >= edge * (1.0 - EDGE_REACH_TOLERANCE)
-        width = hi - lo
+        reached = hi >= edge - slack
         in_window = values >= hi - EDGE_WINDOW_FRACTION * width
     else:
         extent = lo
-        reached = lo <= edge * (1.0 + EDGE_REACH_TOLERANCE)
-        width = hi - lo
+        reached = lo <= edge + slack
         in_window = values <= lo + EDGE_WINDOW_FRACTION * width
     ratio = float(np.mean(in_window) / EDGE_WINDOW_FRACTION) if width > 0 else float("inf")
     cliff = (not reached) and ratio >= EDGE_CLIFF_DENSITY_RATIO
