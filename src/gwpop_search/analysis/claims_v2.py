@@ -25,7 +25,7 @@ SUPPORTED requires all six:
   one, or -- where neither is valid -- an explicit rerun, ``--d3-reruns``)
   keeps ``ln BF >= 1`` with the same sign; every model-prior variant keeps the
   child's probability relative to its parent ``p_c / (p_c + p_p) >= 0.75``;
-  and the taper-at-2 rerun (``--taper2``) keeps the sign.
+  and the cut-at-4 rerun (``--taper2``) keeps the sign.
 * **D4 SDDR.** For nested edges the Savage-Dickey estimate agrees with the
   evidence ratio within ``max(0.5, 2 sigma)``,
   ``sigma = hypot(sigma_total, sigma_SDDR)``. Family changes are
@@ -634,8 +634,9 @@ def _evidence_evaluations(paths):
         yield path, payload
 
 
-#: D3: the taper-at-2 sensitivity rerun (plan 2026-09-30, Numerics)
-TAPER2_THRESHOLD = 2.0
+#: D3: the variance-cut sensitivity rerun at 4 (the LVK relaxed-cut release; operator decision
+#: 2026-10-01; the flag keeps its historical name ``--taper2``).
+TAPER2_THRESHOLD = 4.0
 #: ... under the same taper form as the primary runs (the LVK sharp cut).
 TAPER2_KIND = "sharp"
 

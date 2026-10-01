@@ -853,7 +853,7 @@ def register_analysis_subcommands(subparsers) -> None:
     claims.add_argument("--d3-reruns", help="JSON {rows: [...]} of halved/doubled-prior reruns")
     claims.add_argument("--taper2", help="JSON {rows: [{parent_hash, child_hash, log_bayes_factor, valid}]}")
     claims.add_argument("--taper2-evaluations", action="append",
-                        help="evaluation.json file or directory of the taper-at-2 reruns "
+                        help="evaluation.json file or directory of the cut-at-4 sensitivity reruns "
                         "(rows are built per graph edge; needs --graph); repeatable")
     claims.add_argument("--alt-root", action="append", help="A1=<summary.json> / A2=<summary.json>")
     claims.add_argument("--ppc", action="append", help="run-ppc output; repeatable")

@@ -422,15 +422,15 @@ def test_taper2_rows_from_rerun_evaluations(tmp_path):
             "passed": passed, "evidence": {"log_evidence_mean": ln_z, "conservative_error": 0.2},
             "taper": {"pooled": {"taper": {"kind": kind, "threshold": threshold}}}}}))
 
-    write(edge.parent_hash, 10.0, 2.0)
-    write(edge.child_hash, 14.5, 2.0)
-    rows = taper2_rows_from_evaluations(graph, [tmp_path / "2.0"])
+    write(edge.parent_hash, 10.0, 4.0)
+    write(edge.child_hash, 14.5, 4.0)
+    rows = taper2_rows_from_evaluations(graph, [tmp_path / "4.0"])
     assert len(rows) == 1 and rows[0]["log_bayes_factor"] == pytest.approx(4.5) and rows[0]["valid"]
     claim = {"parent_hash": edge.parent_hash, "child_hash": edge.child_hash, "mutation_id": edge.mutation_id}
     assert d3_prior(claim, [], 5.0, taper2=rows)["taper2_status"] == "pass"
     assert d3_prior(claim, [], -5.0, taper2=rows)["taper2_status"] == "fail"
     write(edge.parent_hash, 10.0, 1.0)
-    with pytest.raises(AnalysisInputError, match="taper-at-2"):
+    with pytest.raises(AnalysisInputError, match="taper-at-4"):
         taper2_rows_from_evaluations(graph, [tmp_path / "1.0"])
     # a rerun under another taper form than the primary sharp cut is refused
     smooth_dir = tmp_path / "smooth"
@@ -439,7 +439,7 @@ def test_taper2_rows_from_rerun_evaluations(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"model_hash": model_hash, "fidelity": "F3", "diagnostics": {
             "passed": True, "evidence": {"log_evidence_mean": ln_z, "conservative_error": 0.2},
-            "taper": {"pooled": {"taper": {"kind": "smooth", "threshold": 2.0}}}}}))
+            "taper": {"pooled": {"taper": {"kind": "smooth", "threshold": 4.0}}}}}))
     with pytest.raises(AnalysisInputError, match="primary 'sharp'"):
         taper2_rows_from_evaluations(graph, [smooth_dir])
     assert len(taper2_rows_from_evaluations(graph, [smooth_dir], kind=None)) == 1

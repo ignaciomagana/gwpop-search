@@ -36,6 +36,7 @@ from gwpop_search.inference.fidelity import (  # noqa: E402
     summarize_dynesty_fit,
 )
 from gwpop_search.inference.v2_numerics import (  # noqa: E402
+    V2_TAPER_SENSITIVITY_THRESHOLD,
     V2_NON_BINDING_FAMILIES,
     PilotSeedScatterRule,
     SecondSeedRule,
@@ -357,8 +358,9 @@ def test_v2_fidelity_config_is_valid_and_round_trips(tmp_path):
     payload = json.loads(json.dumps(fidelity_run_config_to_dict(config)))
     assert payload["hbi"]["variance_taper"]["threshold"] == 1.0
     assert fidelity_run_config_from_dict(payload) == config
-    sensitivity = v2_fidelity_run_config(2.0)
-    assert sensitivity.hbi.variance_taper.threshold == 2.0
+    sensitivity = v2_fidelity_run_config(V2_TAPER_SENSITIVITY_THRESHOLD)
+    assert V2_TAPER_SENSITIVITY_THRESHOLD == 4.0  # LVK relaxed-cut release (operator 2026-10-01)
+    assert sensitivity.hbi.variance_taper.threshold == 4.0
     assert fidelity_config_sha256(sensitivity) != fidelity_config_sha256(config)
 
     files = write_v2_draft_configs(tmp_path)

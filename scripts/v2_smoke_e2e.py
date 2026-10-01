@@ -16,7 +16,7 @@ are shrunk):
    SMOKE-sized nested sampler (small nlive);
 4. F0 and one short F3 dynesty evaluation per model for the root R0 and one
    atom (C2, ln-width linear in q) via ``run-fidelity-evaluation``, and the
-   same two F3 runs under the taper-at-2 sensitivity configuration (D3);
+   same two F3 runs under the cut-at-4 sensitivity configuration (D3);
 5. analysis: ``collect-v2-evaluations`` (D1 gates + taper mass),
    ``analyze-edge-mc-error``, ``analyze-sddr``, ``analyze-prior-sensitivity``,
    ``run-psis-loo-influence``, ``analyze-model-comparison``, ``run-ppc``,

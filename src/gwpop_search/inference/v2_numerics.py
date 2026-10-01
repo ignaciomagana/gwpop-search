@@ -10,8 +10,9 @@ Numerics decided for v2 (plan ``scalable-stargazing-shamir``, "Numerics"):
   implementation (arXiv:2605.27226 Sec. III; gwpopulation ``hyperpe.py``
   L185-189 via gwpopulation_pipe ``--maximum-uncertainty``; verified on the
   GWTC-5 Default release posteriors, staging/v2/TAPER_FORM.md; operator
-  decision 1, 2026-09-30). Claimed edges are re-run with the cut at 2
-  (sensitivity; D3). The smooth (Callister & Farr form) taper stays available
+  decision 1, 2026-09-30). Claimed edges are re-run with the cut at 4
+  (sensitivity; D3), the LVK relaxed-cut release value (operator decision
+  2026-10-01). The smooth (Callister & Farr form) taper stays available
   as a diagnostic alternative.
 * One dynesty run per model: nlive 500, bound ``multi``, sample ``rslice``,
   dlogz 0.1 (``F3`` rung, one repeat).
@@ -53,7 +54,8 @@ from .fidelity import (
 
 V2_NUMERICS_FORMAT_VERSION = "gwpop-search-v2-numerics-draft-1.0"
 V2_TAPER_THRESHOLD = 1.0
-V2_TAPER_SENSITIVITY_THRESHOLD = 2.0
+#: D3 sensitivity: the LVK GWTC-5 relaxed-cut release uses 4 (operator decision 2026-10-01).
+V2_TAPER_SENSITIVITY_THRESHOLD = 4.0
 #: The LVK GWTC-5 variance guard (gwpopulation maximum_uncertainty): a sharp cut.
 V2_TAPER_KIND = "sharp"
 V2_NLIVE = 500
@@ -383,7 +385,7 @@ def write_v2_draft_configs(out_dir: str | Path) -> dict[str, str]:
     out.mkdir(parents=True, exist_ok=True)
     files = {
         "primary": "fidelity_v2_DRAFT.json",
-        "taper_sensitivity": "fidelity_v2_taper2_DRAFT.json",
+        "taper_sensitivity": "fidelity_v2_cut4_DRAFT.json",
     }
     for key, threshold in (
         ("primary", V2_TAPER_THRESHOLD),
