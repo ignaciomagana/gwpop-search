@@ -40,17 +40,35 @@ rule 4). Instead the mock campaign is **calibrated to the canonical one**:
 per run, the SNR amplitude ``A_k`` reproduces the median redshift of the
 canonical detected R0 population, and the run time ``T_k`` its share of the
 detections (:data:`CANONICAL_RUN_TARGETS`); one global detector-frame
-total-mass roll-off reproduces the canonical pooled m1 90 % quantile. The
-x_obs widths are calibrated to the median per-event posterior widths of the
-real 259-event catalog (:data:`REAL_PE_WIDTH_MEDIANS`); the luminosity
-distance is informed only by the amplitude datum (with the projection
-marginalised), so its posterior width is an outcome, not a calibration.
+total-mass roll-off (1 + (M/M_ro)^3)^(-p/3) reproduces the canonical pooled
+m1 90 % quantile (M_ro) and the detected fraction above m1 = 100 (p), which
+also brings the 99 % quantile and P(m1 > 200) to the canonical values
+(:data:`CANONICAL_POOLED_TARGETS`). The x_obs widths are calibrated to the
+median per-event posterior widths of the real 259-event catalog
+(:data:`REAL_PE_WIDTH_MEDIANS`); the luminosity distance is informed only by
+the amplitude datum (with the projection marginalised), so its posterior
+width is an outcome, not a calibration.
+
+Selection Monte-Carlo variance: 80 % of the injections are drawn from a
+population proxy (the R0 fiducial (m1, q) density tabulated on a grid, its
+redshift evolution, a broad chi_eff normal), so the weights p_pop / p_draw at
+the truths are nearly constant; sigma^2_lnL at the truth must sit well inside
+the v2 sharp cut (gate iv of :func:`build_mock`).
+
+Gates b-0 (:func:`build_mock`): (i) the delta-PE C2-slope profile over an
+ensemble of same-pool catalogs (machinery check; binding) with the realised
+catalog reported against the pre-declared representativeness rule
+|MLE - truth| <= 3 sd_ens; (ii) draw-support and PE-box coverage; (iii) G12 on
+every depth-1 node; (iv) sigma^2_lnL at the truth <= 0.5 x the cut threshold
+and the per-event term <= 1.5 x the canonical catalog's.
 
 Known simplifications (a mock, not a waveform model): one projection factor
 (single-interferometer antenna pattern) for every run, the SNR scaling of
 :func:`snr_unit`, Gaussian x_obs in (ln m1_det, q, chi_eff), the same
 threshold rho_obs > 10 in every run (the canonical O1/O2 rule; O3/O4 use
-FAR < 1/yr), and the PE prior ∝ m1_det d_L^2 with a uniform chi_eff prior.
+FAR < 1/yr), the PE prior ∝ m1_det d_L^2 (d_L <= d_L(z_max)) with a uniform
+chi_eff prior, and a RAW_DRAW selection (frozen-selection null replays need
+an estimator-ready set, so a mock campaign runs with no null replays).
 """
 
 from __future__ import annotations
@@ -91,25 +109,26 @@ C2_MUTATION_ID = "v2.chieff.log_sigma_q"
 C2_SLOPE = "chi_log_sigma_q_slope"
 
 #: Canonical (real) detected R0 population per run, from
-#: staging/v2/canonical/selection.h5 (sha256 below) with run labels from
+#: staging/v2/canonical/selection.h5 with run labels from
 #: gwcat/build/v2r2/selection_row_subsets_index.h5, weights p_pop / p_draw at
-#: the R0 fiducial with chi_eff N(0.03, 0.08) (2026-09-30). ``share`` is the
-#: run's fraction of sum(p_pop / p_draw); ``z`` the weighted 10/50/90 %
-#: quantiles of the found-injection redshift. Recompute with
+#: the null truth (R0 fiducial, q_floor 0.001, chi_eff N(0.03, 0.09)),
+#: recomputed 2026-09-30 at the q_floor-0.001 root. ``share`` is the run's
+#: fraction of sum(p_pop / p_draw); the lists are the weighted 10/50/90 %
+#: quantiles of the found injections. Recompute with
 #: :func:`canonical_run_targets`.
 CANONICAL_RUN_TARGETS: dict[str, dict[str, object]] = {
-    "O1": {"share": 0.005627703616347835, "z": [0.0609, 0.1677, 0.3669], "m1_source": [10.21, 32.60, 53.36],
-           "q": [0.560, 0.831, 0.971], "chi_eff": [-0.068, 0.036, 0.135]},
-    "O2": {"share": 0.025523314137665745, "z": [0.0764, 0.2036, 0.4498], "m1_source": [9.97, 32.82, 53.99],
-           "q": [0.563, 0.830, 0.970], "chi_eff": [-0.067, 0.034, 0.138]},
-    "O3a": {"share": 0.12035247013469419, "z": [0.1166, 0.3240, 0.7033], "m1_source": [10.05, 32.13, 49.67],
-            "q": [0.570, 0.830, 0.970], "chi_eff": [-0.068, 0.033, 0.137]},
-    "O3b": {"share": 0.11233453249639039, "z": [0.1193, 0.3375, 0.7353], "m1_source": [10.00, 32.30, 49.87],
-            "q": [0.565, 0.832, 0.971], "chi_eff": [-0.067, 0.035, 0.138]},
-    "O4a": {"share": 0.327651594307621, "z": [0.1575, 0.4646, 1.0339], "m1_source": [10.27, 32.62, 49.00],
-            "q": [0.565, 0.831, 0.971], "chi_eff": [-0.067, 0.036, 0.139]},
-    "O4b": {"share": 0.4085103853072808, "z": [0.1634, 0.4850, 1.1040], "m1_source": [10.31, 32.78, 48.92],
-            "q": [0.564, 0.829, 0.970], "chi_eff": [-0.068, 0.037, 0.138]},
+    "O1": {"share": 0.005617650603793581, "z": [0.061, 0.1679, 0.3672], "m1_source": [10.16, 32.63, 53.4],
+           "q": [0.56, 0.831, 0.972], "chi_eff": [-0.081, 0.037, 0.149]},
+    "O2": {"share": 0.025501241771420262, "z": [0.0763, 0.2039, 0.4501], "m1_source": [9.98, 32.83, 53.99],
+           "q": [0.563, 0.83, 0.97], "chi_eff": [-0.079, 0.035, 0.151]},
+    "O3a": {"share": 0.12024133498023182, "z": [0.1167, 0.3243, 0.7048], "m1_source": [10.05, 32.15, 49.68],
+           "q": [0.569, 0.83, 0.971], "chi_eff": [-0.079, 0.034, 0.152]},
+    "O3b": {"share": 0.11230558491280278, "z": [0.1195, 0.3379, 0.7368], "m1_source": [10.02, 32.35, 49.92],
+           "q": [0.565, 0.832, 0.971], "chi_eff": [-0.078, 0.036, 0.153]},
+    "O4a": {"share": 0.3275946946095048, "z": [0.1578, 0.4651, 1.0354], "m1_source": [10.28, 32.64, 49.01],
+           "q": [0.565, 0.831, 0.971], "chi_eff": [-0.078, 0.037, 0.153]},
+    "O4b": {"share": 0.40873949312224667, "z": [0.1634, 0.4855, 1.1054], "m1_source": [10.31, 32.77, 48.94],
+           "q": [0.564, 0.829, 0.971], "chi_eff": [-0.079, 0.038, 0.153]},
 }
 RUN_LABELS = tuple(CANONICAL_RUN_TARGETS)
 #: canonical selection T_obs_yr (sum of the per-component analysis times)
@@ -135,6 +154,11 @@ PE_CORRELATION = ((1.0, -0.839, 0.391), (-0.839, 1.0, 0.063), (0.391, 0.063, 1.0
 X_WIDTH_TARGETS = tuple(REAL_PE_WIDTH_MEDIANS[k] for k in X_NAMES)
 
 SNR_THRESHOLD = 10.0
+#: sharpness s of the SNR mass roll-off (1 + (M_det / M_ro)^s)^(-p/s): with s = 3
+#: the calibrated (M_ro, p) reproduce the canonical detected m1 q90, q99 and
+#: P(m1 > 100) together (s = 1 cannot: P(m1 > 100) stays >= 2x canonical for
+#: any p; review B item 4)
+MASS_ROLLOFF_SHARPNESS = 3.0
 #: aligned-spin SNR factor (1 + SPIN_SNR_SLOPE chi_eff): aligned spins are louder
 SPIN_SNR_SLOPE = 0.2
 #: widths are c_j rho_thr / max(rho_obs, RHO_WIDTH_FLOOR) (the floor only
@@ -142,21 +166,36 @@ SPIN_SNR_SLOPE = 0.2
 RHO_WIDTH_FLOOR = 5.0
 
 #: Uniform-in-(m1_det, m2_det) and Euclidean-volume PE prior on a box:
-#: pi(m1_det, q, d_L, chi_eff) ∝ m1_det d_L^2 (chi_eff uniform).
+#: pi(m1_det, q, d_L, chi_eff) ∝ m1_det d_L^2 (chi_eff uniform). The d_L upper
+#: edge used for the mocks is d_L(z_max = 1.9) (:func:`pe_box`), so the PE
+#: carries no sample above the declared z_max (review B item 9).
 PE_BOX = {"m1_detector": (2.0, 2000.0), "q": (0.001, 1.0),
           "luminosity_distance": (1.0, 30000.0), "chi_eff": (-1.0, 1.0)}
+
+
+def pe_box(cosmo) -> dict:
+    """PE_BOX with the d_L upper edge at d_L(DRAW_ZMAX)."""
+    box = dict(PE_BOX)
+    box["luminosity_distance"] = (PE_BOX["luminosity_distance"][0], float(cosmo.dL_of_z(DRAW_ZMAX)))
+    return box
 
 #: Injection draw distribution (source frame). Its support contains the fixed
 #: v2 population support for every q_floor in [0.001, 0.05].
 DRAW_M1 = (3.0, 300.0)
 DRAW_Q_LO = 0.001
 DRAW_ZMAX = 1.9
-#: Proxy settings chosen so the selection ESS at the two truths (about 104k /
-#: 117k of 1.5M rows, closure / null) is comparable to the canonical set's
-#: (:data:`CANONICAL_SELECTION_ESS`); the broad component keeps full support.
+#: Population-proxy component (fraction DRAW_PROXY_FRACTION of the draws): the
+#: R0 fiducial (null truth) (m1, q) density tabulated on a (ln m1, q) grid
+#: (piecewise constant, exact density), z ∝ dVc/dz (1+z)^(kappa-1) at the
+#: fiducial kappa, and a chi_eff normal broader than either truth (it must also
+#: cover the closure's q-dependent width, sigma(q=0.3) = 0.23). It brings the
+#: injection weights p_pop/p_draw at the truths close to constant, so the
+#: selection Monte-Carlo variance is small for the same number of found
+#: injections (review B item 1); the broad component keeps full support.
 DRAW_PROXY_FRACTION = 0.8
-DRAW_PROXY = {"ln_m1_mu": math.log(25.0), "ln_m1_sigma": 0.6, "q_power": 1.0,
-              "chi_mu": 0.03, "chi_sigma": 0.08}
+DRAW_PROXY = {"population": "R0 fiducial (null truth) (m1, q) on a (ln m1, q) grid",
+              "grid_ln_m1": 600, "grid_q": 400, "z_kappa": LVK_GWTC5_FIDUCIAL_MEDIANS["lamb"],
+              "chi_mu": 0.03, "chi_sigma": 0.15}
 #: Kish ESS of the canonical selection (1,566,112 rows) at the two truths
 CANONICAL_SELECTION_ESS = {"closure_widthq": 78795.2, "null": 96499.0}
 
@@ -293,26 +332,71 @@ def _truncnorm_logpdf(x, mu, sigma, lo, hi):
     return np.where((x >= lo) & (x <= hi), out, -np.inf)
 
 
+class _GridZ:
+    """z on [0, DRAW_ZMAX] with density ∝ f(z), sampled and evaluated exactly.
+
+    The CDF is tabulated by the trapezoid rule on a fine grid and inverted by
+    linear interpolation, so the sampled density is piecewise constant
+    between grid nodes; :meth:`log_pdf` returns exactly that density.
+    """
+
+    def __init__(self, f, n: int = 40001):
+        z = np.linspace(0.0, DRAW_ZMAX, n)
+        pz = f(z)
+        cdf = np.concatenate([[0.0], np.cumsum(0.5 * (pz[1:] + pz[:-1]) * np.diff(z))])
+        self.z, self.cdf = z, cdf / cdf[-1]
+        self._log_dens = np.log(np.diff(self.cdf) / np.diff(z))
+
+    def sample(self, rng, n):
+        return np.interp(rng.uniform(size=n), self.cdf, self.z)
+
+    def log_pdf(self, z):
+        k = np.clip(np.searchsorted(self.z, z, side="right") - 1, 0, len(self._log_dens) - 1)
+        inside = (z > 0.0) & (z <= DRAW_ZMAX)
+        return np.where(inside, self._log_dens[k], -np.inf)
+
+
 class DrawDistribution:
     """Exact source-frame draw density, a broad + population-proxy mixture.
 
-    z ~ dVc/dz / (1 + z) on [0, 1.9] in both components; broad: m1
-    log-uniform on [3, 300], q uniform on [0.001, 1], chi_eff uniform on
-    [-1, 1]; proxy: ln m1 truncated normal, q ∝ q, chi_eff truncated normal.
-    The density is evaluated in the detector basis (m1_det, q, d_L, chi_eff)
-    with the exact Jacobian 1 / ((1 + z) d d_L / dz).
+    broad (1 - f): m1 log-uniform on [3, 300], q uniform on [0.001, 1],
+    chi_eff uniform on [-1, 1], z ∝ dVc/dz / (1 + z); proxy (f): (m1, q) from
+    the R0 fiducial density tabulated on a (ln m1, q) grid (uniform within a
+    cell), chi_eff truncated normal, z ∝ dVc/dz (1 + z)^(kappa - 1). The
+    density is evaluated in the detector basis (m1_det, q, d_L, chi_eff) with
+    the exact Jacobian 1 / ((1 + z) d d_L / dz).
     """
 
     def __init__(self, cosmo: NumpyCosmology, *, proxy_fraction: float = DRAW_PROXY_FRACTION):
         self.cosmo = cosmo
         self.f_p = float(proxy_fraction)
-        z = np.linspace(0.0, DRAW_ZMAX, 40001)
-        pz = cosmo.dVc_dz(z) / (1.0 + z)
-        cdf = np.concatenate([[0.0], np.cumsum(0.5 * (pz[1:] + pz[:-1]) * np.diff(z))])
-        self._z, self._cdf = z, cdf / cdf[-1]
-        self._log_pz_norm = float(np.log(cdf[-1]))
+        kappa = float(DRAW_PROXY["z_kappa"])
+        self._zb = _GridZ(lambda z: cosmo.dVc_dz(z) / (1.0 + z))
+        self._zp = _GridZ(lambda z: cosmo.dVc_dz(z) * (1.0 + z) ** (kappa - 1.0))
         lo, hi = math.log(DRAW_M1[0]), math.log(DRAW_M1[1])
         self._lnm_bounds = (lo, hi)
+        self._build_mq_grid()
+
+    def _build_mq_grid(self):
+        spec, hp = truth_model("null")
+        nm, nq = int(DRAW_PROXY["grid_ln_m1"]), int(DRAW_PROXY["grid_q"])
+        lo, hi = self._lnm_bounds
+        self._dlnm = (hi - lo) / nm
+        self._dq = (1.0 - DRAW_Q_LO) / nq
+        lnm_c = lo + (np.arange(nm) + 0.5) * self._dlnm
+        q_c = DRAW_Q_LO + (np.arange(nq) + 0.5) * self._dq
+        L, Q = np.meshgrid(lnm_c, q_c, indexing="ij")
+        z0, chi0 = 0.5, float(hp["chi_mu"])
+        cols = {"m1_detector": np.exp(L.ravel()) * (1.0 + z0), "q": Q.ravel(),
+                "luminosity_distance": np.full(L.size, float(self.cosmo.dL_of_z(z0))),
+                "chi_eff": np.full(L.size, chi0)}
+        # p(m1, q) up to a constant (the model factorises; z and chi_eff fixed)
+        logp = LogDensity(spec)(cols, hp).reshape(nm, nq)
+        log_cell = np.where(np.isfinite(logp), logp + L, -np.inf)  # x m1 (cell area in ln m1)
+        log_cell = log_cell - logsumexp(log_cell)
+        self._log_cell = log_cell
+        self._cell_cdf = np.cumsum(np.exp(log_cell).ravel())
+        self._cell_cdf /= self._cell_cdf[-1]
 
     def support(self) -> dict[str, float]:
         return {"m1_source_min": DRAW_M1[0], "m1_source_max": DRAW_M1[1], "q_min": DRAW_Q_LO,
@@ -326,34 +410,44 @@ class DrawDistribution:
         lnm = np.empty(n)
         q = np.empty(n)
         chi = np.empty(n)
+        z = np.empty(n)
         lnm[~proxy] = rng.uniform(lo, hi, n_b)
         q[~proxy] = rng.uniform(DRAW_Q_LO, 1.0, n_b)
         chi[~proxy] = rng.uniform(-1.0, 1.0, n_b)
-        lnm[proxy] = _truncnorm_sample(rng, n_p, DRAW_PROXY["ln_m1_mu"], DRAW_PROXY["ln_m1_sigma"], lo, hi)
-        k = DRAW_PROXY["q_power"] + 1.0
-        q[proxy] = (DRAW_Q_LO ** k + rng.uniform(size=n_p) * (1.0 - DRAW_Q_LO ** k)) ** (1.0 / k)
+        z[~proxy] = self._zb.sample(rng, n_b)
+        cell = np.minimum(np.searchsorted(self._cell_cdf, rng.uniform(size=n_p), side="right"),
+                          self._cell_cdf.size - 1)
+        i, j = np.divmod(cell, self._log_cell.shape[1])
+        lnm[proxy] = lo + (i + rng.uniform(size=n_p)) * self._dlnm
+        q[proxy] = DRAW_Q_LO + (j + rng.uniform(size=n_p)) * self._dq
         chi[proxy] = _truncnorm_sample(rng, n_p, DRAW_PROXY["chi_mu"], DRAW_PROXY["chi_sigma"], -1.0, 1.0)
-        z = np.interp(rng.uniform(size=n), self._cdf, self._z)
+        z[proxy] = self._zp.sample(rng, n_p)
         return {"m1_source": np.exp(lnm), "q": q, "z": z, "chi_eff": chi}
 
     def log_density_source(self, m1, q, z, chi):
         """ln p_draw(m1_source, q, z, chi_eff)."""
         lo, hi = self._lnm_bounds
+        m1, q, z, chi = (np.asarray(x, dtype=float) for x in (m1, q, z, chi))
         lnm = np.log(m1)
         in_m = (lnm >= lo) & (lnm <= hi)
         in_q = (q >= DRAW_Q_LO) & (q <= 1.0)
         in_c = (chi >= -1.0) & (chi <= 1.0)
         in_z = (z > 0.0) & (z <= DRAW_ZMAX)
-        log_b = -lnm - math.log(hi - lo) - math.log(1.0 - DRAW_Q_LO) - math.log(2.0)
-        k = DRAW_PROXY["q_power"] + 1.0
-        log_qp = math.log(k) + (k - 1.0) * np.log(np.where(q > 0, q, 1.0)) - math.log(1.0 - DRAW_Q_LO ** k)
-        log_p = (_truncnorm_logpdf(lnm, DRAW_PROXY["ln_m1_mu"], DRAW_PROXY["ln_m1_sigma"], lo, hi) - lnm
-                 + log_qp + _truncnorm_logpdf(chi, DRAW_PROXY["chi_mu"], DRAW_PROXY["chi_sigma"], -1.0, 1.0))
+        log_b = (-lnm - math.log(hi - lo) - math.log(1.0 - DRAW_Q_LO) - math.log(2.0)
+                 + self._zb.log_pdf(z))
+        nm, nq = self._log_cell.shape
+        with np.errstate(invalid="ignore"):
+            fi = np.nan_to_num(np.floor((lnm - lo) / self._dlnm), nan=0.0, posinf=0.0, neginf=0.0)
+            fj = np.nan_to_num(np.floor((q - DRAW_Q_LO) / self._dq), nan=0.0, posinf=0.0, neginf=0.0)
+        i = np.clip(fi, 0, nm - 1).astype(np.int64)
+        j = np.clip(fj, 0, nq - 1).astype(np.int64)
+        with np.errstate(invalid="ignore"):
+            log_p = (self._log_cell[i, j] - math.log(self._dlnm) - math.log(self._dq) - lnm
+                     + _truncnorm_logpdf(chi, DRAW_PROXY["chi_mu"], DRAW_PROXY["chi_sigma"], -1.0, 1.0)
+                     + self._zp.log_pdf(z))
         log_mix = np.logaddexp(math.log1p(-self.f_p) + log_b, math.log(self.f_p) + log_p)
-        safe_z = np.where(in_z, z, 0.5)
-        log_z = np.log(self.cosmo.dVc_dz(safe_z)) - np.log1p(safe_z) - self._log_pz_norm
         ok = in_m & in_q & in_c & in_z
-        return np.where(ok, log_mix + log_z, -np.inf)
+        return np.where(ok, log_mix, -np.inf)
 
     def log_density_detector(self, m1, q, z, chi):
         """ln p_draw in dm1_detector dq dd_L dchi_eff (the gwcat-v2 basis)."""
@@ -383,18 +477,25 @@ def projection_factor(rng, n: int) -> np.ndarray:
     return np.sqrt(fp ** 2 * (1.0 + ci ** 2) ** 2 / 4.0 + fx ** 2 * ci ** 2)
 
 
-def snr_unit(m1_det, q, d_l, chi, m_rolloff):
+def rolloff_factor(m_tot_det, m_rolloff, power: float = 5.0 / 6.0, sharpness: float = 1.0):
+    """R(M) = (1 + (M_det / M_ro)^s)^(-p / s) <= 1 (decreasing in M_det)."""
+    return (1.0 + (m_tot_det / m_rolloff) ** float(sharpness)) ** (-float(power) / float(sharpness))
+
+
+def snr_unit(m1_det, q, d_l, chi, m_rolloff, power: float = 5.0 / 6.0, sharpness: float = 1.0):
     """g(theta) at unit amplitude and Theta = 1.
 
-    (Mc_det / 10)^(5/6) (1000 Mpc / d_L) (1 + k chi_eff) (1 + M_det / M_ro)^(-5/6):
-    the inspiral chirp-mass/distance scaling, louder for aligned spins, and a
-    roll-off above the detector-frame total mass M_ro (merger leaving the
-    band; for M_det >> M_ro the SNR no longer grows with mass).
+    (Mc_det / 10)^(5/6) (1000 Mpc / d_L) (1 + k chi_eff) R(M_det): the inspiral
+    chirp-mass/distance scaling, louder for aligned spins, and a roll-off
+    R = (1 + (M_det / M_ro)^s)^(-p/s) above the detector-frame total mass M_ro
+    (merger leaving the band). With p > 5/6 the SNR *falls* for M_det >> M_ro,
+    as for real detectors; the mocks use s = 3 (:data:`MASS_ROLLOFF_SHARPNESS`)
+    with M_ro and p calibrated to the canonical selection (:func:`calibrate`).
     """
     mc = m1_det * q ** 0.6 / (1.0 + q) ** 0.2
     m_tot = m1_det * (1.0 + q)
     return ((mc / 10.0) ** (5.0 / 6.0) * (1000.0 / d_l) * (1.0 + SPIN_SNR_SLOPE * chi)
-            * (1.0 + m_tot / m_rolloff) ** (-5.0 / 6.0))
+            * rolloff_factor(m_tot, m_rolloff, power, sharpness))
 
 
 @dataclass(frozen=True)
@@ -407,6 +508,9 @@ class Calibration:
     mass_rolloff: float
     labels: tuple[str, ...] = RUN_LABELS
     report: dict = field(default_factory=dict, compare=False)
+    #: exponent p and sharpness s of the mass roll-off (:func:`rolloff_factor`)
+    mass_rolloff_power: float = 5.0 / 6.0
+    mass_rolloff_sharpness: float = 1.0
 
     @property
     def run_probability(self) -> np.ndarray:
@@ -420,13 +524,17 @@ class Calibration:
     def to_dict(self) -> dict:
         return {"labels": list(self.labels), "amplitude": list(self.amplitude),
                 "run_time_yr": list(self.run_time_yr), "width_scale": list(self.width_scale),
-                "mass_rolloff": float(self.mass_rolloff), "report": self.report}
+                "mass_rolloff": float(self.mass_rolloff),
+                "mass_rolloff_power": float(self.mass_rolloff_power),
+                "mass_rolloff_sharpness": float(self.mass_rolloff_sharpness), "report": self.report}
 
     @classmethod
     def from_dict(cls, d: Mapping) -> "Calibration":
         return cls(tuple(float(x) for x in d["amplitude"]), tuple(float(x) for x in d["run_time_yr"]),
                    tuple(float(x) for x in d["width_scale"]), float(d["mass_rolloff"]),
-                   tuple(d.get("labels", RUN_LABELS)), dict(d.get("report", {})))
+                   tuple(d.get("labels", RUN_LABELS)), dict(d.get("report", {})),
+                   float(d.get("mass_rolloff_power", 5.0 / 6.0)),
+                   float(d.get("mass_rolloff_sharpness", 1.0)))
 
 
 def simulate_detections(draw: DrawDistribution, cal: Calibration, rng, n_draw: int,
@@ -453,7 +561,8 @@ def simulate_detections(draw: DrawDistribution, cal: Calibration, rng, n_draw: i
         noise = rng.standard_normal(n)
         d_l = cosmo.dL_of_z(s["z"])
         m1_det = s["m1_source"] * (1.0 + s["z"])
-        rho_opt = amp[run] * theta * snr_unit(m1_det, s["q"], d_l, s["chi_eff"], cal.mass_rolloff)
+        rho_opt = amp[run] * theta * snr_unit(m1_det, s["q"], d_l, s["chi_eff"], cal.mass_rolloff,
+                                              cal.mass_rolloff_power, cal.mass_rolloff_sharpness)
         rho_obs = rho_opt + noise
         found = rho_obs > SNR_THRESHOLD
         out["m1_source"].append(s["m1_source"][found])
@@ -511,9 +620,9 @@ def observe(rng, x_true: np.ndarray, rho_obs: float, width_scale) -> np.ndarray:
     return x_true + np.linalg.cholesky(cov) @ rng.standard_normal(3)
 
 
-def _log_c(m1_det, q, chi, amplitude, m_rolloff):
+def _log_c(m1_det, q, chi, amplitude, m_rolloff, power: float = 5.0 / 6.0, sharpness: float = 1.0):
     """ln[A d_L g(theta)], so that rho_opt = Theta exp(c) / d_L (see :func:`snr_unit`)."""
-    return np.log(amplitude * snr_unit(m1_det, q, 1000.0, chi, m_rolloff)) + math.log(1000.0)
+    return np.log(amplitude * snr_unit(m1_det, q, 1000.0, chi, m_rolloff, power, sharpness)) + math.log(1000.0)
 
 
 def rho_lower_cut(rho_obs: float) -> float:
@@ -543,7 +652,8 @@ def _sample_theta_cubed(rng, n: int) -> np.ndarray:
 
 def sample_pe(rng, x_obs: np.ndarray, rho_obs: float, amplitude: float, n_samples: int,
               width_scale, m_rolloff: float, *, box: Mapping | None = None, batch: int = 32_768,
-              max_proposals: int = 200_000_000):
+              max_proposals: int = 200_000_000, rolloff_power: float = 5.0 / 6.0,
+              rolloff_sharpness: float = 1.0):
     """Exact posterior draws of (m1_det, q, d_L, chi_eff) given d = (rho_obs, x_obs).
 
     With y_r = (ln m1_det, q, chi_eff), y2 = ln d_L, c(y_r) as in :func:`_log_c`
@@ -558,7 +668,7 @@ def sample_pe(rng, x_obs: np.ndarray, rho_obs: float, amplitude: float, n_sample
         p ∝ [N(x_obs; y_r, Sigma) e^{2 y0} e^{3 c(y_r)}] [Theta^3 p(Theta)] [r^-4 N(rho_obs; r, 1)]
 
     three independent factors. e^{3c} ∝ e^{2.5 y0} h(q) (1 + k chi)^3 R(M)^3
-    with h(q) = q^1.5 (1 + q)^-0.5 <= h(1) and R(M) = (1 + M_det / M_ro)^(-5/6)
+    with h(q) = q^1.5 (1 + q)^-0.5 <= h(1) and R(M) = :func:`rolloff_factor`
     <= 1, so y_r is drawn from N(x_obs + Sigma (4.5, 0, 0), Sigma) and accepted
     with probability [h(q) / h(1)] [(1 + k chi) / (1 + k)]^3 R(M)^3; Theta by
     rejection; r on a fine
@@ -585,14 +695,14 @@ def sample_pe(rng, x_obs: np.ndarray, rho_obs: float, amplitude: float, n_sample
         q, chi = y[:, 1], y[:, 2]
         acc = ((q ** 1.5 * (1.0 + q) ** -0.5 / h1)
                * ((1.0 + SPIN_SNR_SLOPE * chi) / (1.0 + SPIN_SNR_SLOPE)) ** 3
-               * (1.0 + np.exp(y[:, 0]) * (1.0 + q) / m_rolloff) ** -2.5)
+               * rolloff_factor(np.exp(y[:, 0]) * (1.0 + q), m_rolloff, rolloff_power, rolloff_sharpness) ** 3)
         y = y[rng.uniform(size=len(y)) < acc]
         if len(y) == 0:
             continue
         m1 = np.exp(y[:, 0])
         theta = _sample_theta_cubed(rng, len(y))
         r = _sample_rho_opt(rng, rho_obs, len(y))
-        d_l = np.exp(_log_c(m1, y[:, 1], y[:, 2], amplitude, m_rolloff)) * theta / r
+        d_l = np.exp(_log_c(m1, y[:, 1], y[:, 2], amplitude, m_rolloff, rolloff_power, rolloff_sharpness)) * theta / r
         ok = (d_l >= d_lo) & (d_l <= d_hi)
         kept["m1_detector"].append(m1[ok])
         kept["q"].append(y[ok, 1])
@@ -604,12 +714,13 @@ def sample_pe(rng, x_obs: np.ndarray, rho_obs: float, amplitude: float, n_sample
 
 
 def pe_log_likelihood_unmarginalised(x_obs, rho_obs, amplitude, width_scale, m_rolloff, *,
-                                     m1_det, q, d_l, chi, theta):
+                                     m1_det, q, d_l, chi, theta, rolloff_power: float = 5.0 / 6.0,
+                                     rolloff_sharpness: float = 1.0):
     """ln L(d | theta, Theta) up to a constant (for tests)."""
     cov = pe_covariance(rho_obs, width_scale)
     r = x_of(m1_det, q, chi) - x_obs
     quad = np.einsum("...i,ij,...j->...", r, np.linalg.inv(cov), r)
-    rho = theta * np.exp(_log_c(m1_det, q, chi, amplitude, m_rolloff)) / d_l
+    rho = theta * np.exp(_log_c(m1_det, q, chi, amplitude, m_rolloff, rolloff_power, rolloff_sharpness)) / d_l
     return -0.5 * quad - 0.5 * (rho_obs - rho) ** 2
 
 
@@ -624,9 +735,24 @@ def weighted_quantiles(x, w, qs=(0.1, 0.5, 0.9)):
     return [float(np.interp(q, c, x[o])) for q in qs]
 
 
-#: canonical pooled (all runs) detected R0 m1_source 90 % quantile: the
-#: roll-off calibration target
-CANONICAL_POOLED_M1_Q90 = 49.287
+#: canonical pooled (all runs) detected R0 (null truth) mass statistics: the
+#: roll-off calibration targets (q90 for M_ro, P(m1 > 100) for the power p) and
+#: reported tail checks. Recompute with :func:`canonical_pooled_targets`.
+CANONICAL_POOLED_TARGETS: dict[str, float] = {
+    "m1_source_q90": 49.303657647743265,
+    "m1_source_q99": 83.68457794189453,
+    "p_m1_source_gt_100": 0.0038052795349319706,
+    "p_m1_source_gt_200": 4.077543597947834e-05,
+    "p_mtot_detector_gt_1000": 0.0,
+}
+
+#: sigma^2_lnL of the canonical (real) pair at the two truths with the
+#: pipeline's estimator (:func:`taper_variance_at_truth`); recompute with
+#: :func:`canonical_taper_variance`.
+CANONICAL_TAPER_VARIANCE: dict[str, dict[str, float]] = {
+    "closure_widthq": {"events": 0.2722, "selection": 0.8513, "total": 1.1235},
+    "null": {"events": 0.2431, "selection": 0.6951, "total": 0.9382},
+}
 
 
 class _SortedQuantile:
@@ -654,36 +780,66 @@ def _calibration_pool(draw, rng, n):
     return s
 
 
-def _calibrate_amplitudes(pool, w, m_rolloff, targets, zq):
-    unit = pool["base"] * (1.0 + pool["m_tot"] / m_rolloff) ** (-5.0 / 6.0)
+def _calibrate_amplitudes(pool, w, m_rolloff, targets, zq, power: float = 5.0 / 6.0, start=None,
+                          *, steps: int = 40, half_width: float | None = None,
+                          sharpness: float = 1.0):
+    """Per-run A_k matching the canonical median detected redshift (bisection in ln A)."""
+    unit = pool["base"] * rolloff_factor(pool["m_tot"], m_rolloff, power, sharpness)
     amps, dets = [], []
-    for label in RUN_LABELS:
+    cold = (0.0, math.log(5.0e5))
+    for k, label in enumerate(RUN_LABELS):
         target = float(targets[label]["z"][1])
-        lo, hi = 0.0, math.log(5000.0)
-        for _ in range(45):
-            mid = 0.5 * (lo + hi)
-            det = math.exp(mid) * unit + pool["noise"] > SNR_THRESHOLD
-            if zq(w * det, 0.5) < target:
-                lo = mid
-            else:
-                hi = mid
+        warm = start is not None and half_width is not None
+        lo, hi = (math.log(start[k]) - half_width, math.log(start[k]) + half_width) if warm else cold
+        n = steps
+        while True:
+            lo0, hi0 = lo, hi
+            for _ in range(n):
+                mid = 0.5 * (lo + hi)
+                det = math.exp(mid) * unit + pool["noise"] > SNR_THRESHOLD
+                if zq(w * det, 0.5) < target:
+                    lo = mid
+                else:
+                    hi = mid
+            # a warm bracket that the solution left: redo with the cold bracket
+            if warm and (lo == lo0 or hi == hi0):
+                warm, (lo, hi), n = False, cold, 40
+                continue
+            break
         a = math.exp(0.5 * (lo + hi))
         amps.append(a)
         dets.append(a * unit + pool["noise"] > SNR_THRESHOLD)
     return amps, dets
 
 
+def _pooled_tail_stats(pool, mix, mq) -> dict:
+    """Detected-population mass statistics of the run mixture ``mix`` (weights)."""
+    tot = float(np.sum(mix))
+    return {
+        "m1_source_q90": mq(mix, 0.9), "m1_source_q99": mq(mix, 0.99),
+        "p_m1_source_gt_100": float(np.sum(mix[pool["m1_source"] > 100.0]) / tot),
+        "p_m1_source_gt_200": float(np.sum(mix[pool["m1_source"] > 200.0]) / tot),
+        "p_mtot_detector_gt_1000": float(np.sum(mix[pool["m_tot"] > 1000.0]) / tot),
+    }
+
+
 def calibrate(draw: DrawDistribution, *, n_pool: int = 3_000_000, n_width_events: int = 200,
               n_width_samples: int = 1024, width_iterations: int = 5, seed: int = CALIBRATION_SEED,
               targets: Mapping[str, Mapping] = CANONICAL_RUN_TARGETS,
-              pooled_m1_q90: float = CANONICAL_POOLED_M1_Q90, log=print) -> Calibration:
+              pooled_targets: Mapping[str, float] | None = None, power_bounds=(5.0 / 6.0, 8.0),
+              power_steps: int = 8, rolloff_steps: int = 16, sharpness: float | None = None,
+              log=print) -> Calibration:
     """Calibrate the mock detection to the canonical selection and the PE to the real widths.
 
     * per run k: A_k so that the detected R0 population has the canonical
       median redshift; T_k so that run k has the canonical share of the
       detections (share_k ∝ T_k beta_k);
-    * globally: the mass roll-off M_ro so that the pooled detected m1_source
-      90 % quantile is the canonical one (A_k re-fit at every M_ro);
+    * globally, the mass roll-off (1 + (M_det / M_ro)^s)^(-p/s) with s =
+      :data:`MASS_ROLLOFF_SHARPNESS`: for each p, M_ro so
+      that the pooled detected m1_source 90 % quantile is the canonical one
+      (A_k re-fit at every M_ro); p so that the pooled detected fraction with
+      m1_source > 100 is the canonical one (review B item 4: with p = 5/6 the
+      SNR never falls with mass and heavy systems were over-detected);
     * PE: the x_obs width scales c_j so that the median per-event posterior
       std of (ln m1_det, q, chi_eff) is the real catalog's.
 
@@ -691,6 +847,8 @@ def calibrate(draw: DrawDistribution, *, n_pool: int = 3_000_000, n_width_events
     calibration; common random numbers throughout (monotone bisections,
     fixed-point iteration for c_j).
     """
+    pooled_targets = dict(CANONICAL_POOLED_TARGETS if pooled_targets is None else pooled_targets)
+    sharpness = MASS_ROLLOFF_SHARPNESS if sharpness is None else float(sharpness)
     spec, hp = truth_model("null")
     logp = LogDensity(spec)
     rng = np.random.default_rng(np.random.SeedSequence(seed))
@@ -701,25 +859,62 @@ def calibrate(draw: DrawDistribution, *, n_pool: int = 3_000_000, n_width_events
     zq = _SortedQuantile(pool["z"])
     mq = _SortedQuantile(pool["m1_source"])
     share = np.array([float(targets[k]["share"]) for k in RUN_LABELS])
+    state = {"amps": None}
 
-    def pooled_q90(m_ro):
-        amps, dets = _calibrate_amplitudes(pool, w, m_ro, targets, zq)
+    def pooled(m_ro, power):
+        start = state["amps"]
+        amps, dets = _calibrate_amplitudes(pool, w, m_ro, targets, zq, power, start,
+                                           steps=40 if start is None else 18,
+                                           half_width=None if start is None else 1.0,
+                                           sharpness=sharpness)
+        state["amps"] = amps
         betas = np.array([np.sum(w * d) for d in dets])
         mix = sum(sh / b * (w * d) for sh, b, d in zip(share, betas, dets))
-        return mq(mix, 0.9), amps, dets, betas
+        return _pooled_tail_stats(pool, mix, mq), amps, dets, betas
 
-    lo, hi = math.log(20.0), math.log(5000.0)
-    for _ in range(25):
-        mid = 0.5 * (lo + hi)
-        if pooled_q90(math.exp(mid))[0] < pooled_m1_q90:
-            lo = mid
+    def fit_rolloff(power):
+        lo, hi = math.log(50.0), math.log(2.0e4)
+        for _ in range(rolloff_steps):
+            mid = 0.5 * (lo + hi)
+            if pooled(math.exp(mid), power)[0]["m1_source_q90"] < pooled_targets["m1_source_q90"]:
+                lo = mid
+            else:
+                hi = mid
+        m_ro = math.exp(0.5 * (lo + hi))
+        return m_ro, pooled(m_ro, power)
+
+    target_tail = float(pooled_targets["p_m1_source_gt_100"])
+    p_lo, p_hi = (float(x) for x in power_bounds)
+    history = []
+    m_ro, res = fit_rolloff(p_lo)
+    history.append({"power": p_lo, "mass_rolloff": m_ro, **res[0]})
+    if res[0]["p_m1_source_gt_100"] <= target_tail:
+        power = p_lo
+    else:
+        m_hi, res_hi = fit_rolloff(p_hi)
+        history.append({"power": p_hi, "mass_rolloff": m_hi, **res_hi[0]})
+        if res_hi[0]["p_m1_source_gt_100"] > target_tail:
+            power, m_ro, res = p_hi, m_hi, res_hi
         else:
-            hi = mid
-    m_ro = math.exp(0.5 * (lo + hi))
-    q90, amps, dets, betas = pooled_q90(m_ro)
+            for _ in range(power_steps):
+                mid = 0.5 * (p_lo + p_hi)
+                m_mid, res_mid = fit_rolloff(mid)
+                history.append({"power": mid, "mass_rolloff": m_mid, **res_mid[0]})
+                if res_mid[0]["p_m1_source_gt_100"] > target_tail:
+                    p_lo = mid
+                else:
+                    p_hi = mid
+            power = 0.5 * (p_lo + p_hi)
+            m_ro, res = fit_rolloff(power)
+        log(f"calibration: roll-off power {power:.4f} M_ro {m_ro:.1f}")
+    stats, amps, dets, betas = res
     t = share / betas
     t = t * T_TOTAL_YR / t.sum()
-    report = {"mass_rolloff": m_ro, "pooled_m1_source_q90": {"achieved": q90, "target": pooled_m1_q90}}
+    report = {"mass_rolloff": m_ro, "mass_rolloff_power": power, "mass_rolloff_sharpness": sharpness,
+              "pooled_detected_mass": {"achieved": stats, "target": pooled_targets},
+              "pooled_m1_source_q90": {"achieved": stats["m1_source_q90"],
+                                       "target": pooled_targets["m1_source_q90"]},
+              "rolloff_search_history": history}
     for label, a, d, tk in zip(RUN_LABELS, amps, dets, t):
         report[label] = {
             "amplitude": a, "run_time_yr": float(tk),
@@ -727,15 +922,17 @@ def calibrate(draw: DrawDistribution, *, n_pool: int = 3_000_000, n_width_events
             "target": {k: list(targets[label][k]) for k in ("z", "m1_source", "q", "chi_eff")},
             "pool_detected_ess": float(np.sum(w * d) ** 2 / np.sum((w * d) ** 2)),
         }
-    cal = Calibration(tuple(amps), tuple(float(x) for x in t), X_WIDTH_TARGETS, m_ro)
+    cal = Calibration(tuple(amps), tuple(float(x) for x in t), X_WIDTH_TARGETS, m_ro,
+                      mass_rolloff_power=power, mass_rolloff_sharpness=sharpness)
     det_frac = float(sum(p * np.mean(d) for p, d in zip(cal.run_probability, dets)))
-    log(f"calibration: M_ro {m_ro:.2f} amplitudes {np.round(amps, 3).tolist()} run times "
-        f"{np.round(t, 4).tolist()} draw detection fraction {det_frac:.5f}")
+    log(f"calibration: M_ro {m_ro:.2f} power {power:.4f} amplitudes {np.round(amps, 3).tolist()} run times "
+        f"{np.round(t, 4).tolist()} draw detection fraction {det_frac:.5f} pooled {stats}")
 
     # -- PE widths: match the median per-event posterior std of the real catalog
     ev = _resample_detected(pool, w, cal, rng, n_width_events)
     eps = rng.standard_normal((n_width_events, 3))
     pe_seeds = rng.integers(0, 2 ** 63 - 1, n_width_events)
+    box = pe_box(draw.cosmo)
     scale = np.asarray(X_WIDTH_TARGETS, dtype=float).copy()
     history = []
     for it in range(width_iterations + 1):
@@ -745,7 +942,8 @@ def calibrate(draw: DrawDistribution, *, n_pool: int = 3_000_000, n_width_events
             x_true = x_of(ev["m1_detector"][i], ev["q"][i], ev["chi_eff"][i])
             x_obs = x_true + np.linalg.cholesky(cov) @ eps[i]
             s, acc = sample_pe(np.random.default_rng(pe_seeds[i]), x_obs, ev["rho_obs"][i],
-                               ev["amplitude"][i], n_width_samples, scale, m_ro, batch=8192)
+                               ev["amplitude"][i], n_width_samples, scale, m_ro, batch=8192, box=box,
+                               rolloff_power=power, rolloff_sharpness=sharpness)
             ys = np.stack([np.log(s["m1_detector"]), s["q"], np.log(s["luminosity_distance"]), s["chi_eff"]], 1)
             stds.append(ys.std(axis=0))
             corrs.append(np.corrcoef(ys.T))
@@ -772,14 +970,16 @@ def calibrate(draw: DrawDistribution, *, n_pool: int = 3_000_000, n_width_events
     report["n_pool"] = int(n_pool)
     report["truth"] = "null (R0 fiducial, chi_eff N(0.03, 0.09))"
     return Calibration(cal.amplitude, cal.run_time_yr, tuple(float(x) for x in history[-1]["scale"]),
-                       m_ro, RUN_LABELS, report)
+                       m_ro, RUN_LABELS, report, power, sharpness)
 
 
 def _resample_detected(pool, w, cal, rng, n):
     """Detected calibration systems (with the calibrated run mix), resampled by weight."""
     run = rng.choice(len(cal.amplitude), size=len(w), p=cal.run_probability)
     amp = np.asarray(cal.amplitude)[run]
-    rho_obs = amp * pool["base"] * (1.0 + pool["m_tot"] / cal.mass_rolloff) ** (-5.0 / 6.0) + pool["noise"]
+    rho_obs = (amp * pool["base"] * rolloff_factor(pool["m_tot"], cal.mass_rolloff, cal.mass_rolloff_power,
+                                                   cal.mass_rolloff_sharpness)
+               + pool["noise"])
     det = rho_obs > SNR_THRESHOLD
     p = w * det
     idx = rng.choice(len(w), size=n, replace=False, p=p / p.sum())
@@ -807,6 +1007,64 @@ def canonical_run_targets(selection_path, index_path, *, log=print) -> dict:
         out[label] = {"share": float(w[m].sum() / w.sum())}
         for k in ("z", "m1_source", "q", "chi_eff"):
             out[label][k] = weighted_quantiles(sel.samples[k][m], w[m])
+    log(json.dumps(out))
+    return out
+
+
+def _truth_weights(samples, log_draw_density, kind: str) -> np.ndarray:
+    spec, hp = truth_model(kind)
+    lw = LogDensity(spec)(samples, hp) - log_draw_density
+    w = np.exp(lw - np.max(lw[np.isfinite(lw)]))
+    w[~np.isfinite(w)] = 0.0
+    return w
+
+
+def canonical_pooled_targets(selection_path, *, log=print) -> dict:
+    """Recompute :data:`CANONICAL_POOLED_TARGETS` (pooled detected R0 mass statistics; read-only).
+
+    The canonical selection is one estimator-ready campaign, so the found
+    rows weighted by p_pop / p_draw at the null truth are the detected
+    population.
+    """
+    from ..data import SelectionCatalog
+
+    sel = SelectionCatalog.from_hdf5(selection_path)
+    w = _truth_weights(sel.samples, sel.log_draw_density, "null")
+    m1 = np.asarray(sel.samples["m1_source"])
+    pool = {"m1_source": m1, "m_tot": np.asarray(sel.samples["m1_detector"]) * (1.0 + np.asarray(sel.samples["q"]))}
+    out = _pooled_tail_stats(pool, w, _SortedQuantile(m1))
+    log(json.dumps(out))
+    return out
+
+
+def taper_variance_at_truth(posterior, selection, kind: str) -> dict:
+    """sigma^2_lnL at the truth with the pipeline's estimator (NumPy backend, v2 sharp cut).
+
+    Returns the per-event sum, the selection term N^2 Var[ln xi], their total
+    and whether the v2 cut (sigma^2 <= 1) keeps the truth.
+    """
+    from ..hbi import HBIConfig
+    from ..hbi.numpy_backend import shape_log_likelihood
+    from ..inference.v2_numerics import v2_variance_taper
+    from ..models import compile_model_spec
+
+    spec, hp = truth_model(kind)
+    taper = v2_variance_taper()
+    result = shape_log_likelihood(posterior, selection, compile_model_spec(spec), hp,
+                                  config=HBIConfig(selection_chunk_size=None, variance_taper=taper))
+    events = float(result.terms.variance.event_variance)
+    total = float(result.taper_variance)
+    return {"events": events, "selection": total - events, "total": total,
+            "threshold": float(taper.threshold), "kept_by_cut": bool(total <= taper.threshold)}
+
+
+def canonical_taper_variance(pe_path, selection_path, *, log=print) -> dict:
+    """Recompute :data:`CANONICAL_TAPER_VARIANCE` on the canonical pair (read-only)."""
+    from ..data import PosteriorCatalog, SelectionCatalog
+
+    pe = PosteriorCatalog.from_hdf5(pe_path)
+    sel = SelectionCatalog.from_hdf5(selection_path)
+    out = {kind: taper_variance_at_truth(pe, sel, kind) for kind in MOCK_KINDS}
     log(json.dumps(out))
     return out
 
@@ -859,8 +1117,15 @@ def delta_profile(events: Mapping[str, np.ndarray], selection, kind: str, grid, 
     return profile_summary(grid, lnl, truth), log_xi_grid
 
 
-def coverage_gate(draw: DrawDistribution, selection, event_truths, *, graph_nodes=None) -> dict:
-    """Rule 6 on the built artifact: the draw support contains every node's population support."""
+def coverage_gate(draw: DrawDistribution, selection, event_truths, *, graph_nodes=None,
+                  box: Mapping | None = None) -> dict:
+    """Rule 6 on the built artifact: the draw support contains every node's population support.
+
+    Also checks that the PE prior box contains the population support (the
+    PE prior must not truncate where the population has mass): m1_det up to
+    mmax (1 + zmax), d_L up to d_L(zmax), q down to the population's q edge,
+    chi_eff on [-1, 1].
+    """
     from ..grammar.v2 import enumerate_v2_depth1
 
     nodes = graph_nodes if graph_nodes is not None else list(enumerate_v2_depth1().nodes)
@@ -887,9 +1152,23 @@ def coverage_gate(draw: DrawDistribution, selection, event_truths, *, graph_node
                                       event_truths["chi_eff"])
     n_bad_events = int(np.sum(~np.isfinite(lp_ev)))
     n_bad_sel = int(np.sum(~np.isfinite(selection.log_draw_density)))
-    passed = bool(ok_all and n_bad_grid == 0 and n_bad_events == 0 and n_bad_sel == 0)
+    box = pe_box(draw.cosmo) if box is None else box
+    m1_det_max = max(float(n.support["mmax"]) * (1.0 + float(n.support["zmax"])) for n in nodes)
+    m1_det_min = min(float(n.support["mmin"]) for n in nodes)
+    d_max = float(draw.cosmo.dL_of_z(max(float(n.support["zmax"]) for n in nodes)))
+    q_edge = min(max(float(n.support["q_floor"]), float(n.support["mmin"]) / float(n.support["mmax"]))
+                 for n in nodes)
+    box_ok = {
+        "m1_detector": bool(box["m1_detector"][0] <= m1_det_min and box["m1_detector"][1] >= m1_det_max),
+        "luminosity_distance": bool(box["luminosity_distance"][1] >= d_max * (1.0 - 1e-9)),
+        "q": bool(box["q"][0] <= q_edge and box["q"][1] >= 1.0),
+        "chi_eff": bool(box["chi_eff"][0] <= -1.0 and box["chi_eff"][1] >= 1.0),
+    }
+    passed = bool(ok_all and n_bad_grid == 0 and n_bad_events == 0 and n_bad_sel == 0 and all(box_ok.values()))
     return {
         "pass": passed,
+        "pe_box": {k: list(v) for k, v in box.items()},
+        "pe_box_contains_population_support": box_ok,
         "draw_support": sup,
         "nodes_support_inside_draw_support": bool(ok_all),
         "per_node": per_node,
@@ -1008,12 +1287,42 @@ def pe_profile(posterior, selection, kind: str, grid, log_xi_grid, logp: LogDens
     return profile_summary(grid, lnl, float(base[C2_SLOPE]))
 
 
-def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259, n_pe: int = 4096,
-               target_found: int = 1_500_000, seed: int = 20261010, delta_pe: bool = False,
-               calibration: Calibration | None = None, n_pool: int | None = None, run_gates: bool = True,
-               ensemble: int = 50, grid=C2_SLOPE_GRID, calibration_kwargs: Mapping | None = None,
-               log=print) -> dict:
-    """Generate one canonical-format mock pair (pe.h5, selection.h5) plus truth, gates and manifest."""
+#: b-0 taper gates (review B items 1 and 5; DRAFT): sigma^2_lnL at the truth must
+#: be at most this fraction of the v2 cut threshold (the truth must sit well
+#: inside the sharp cut), and the per-event term at most this multiple of the
+#: canonical (real) catalog's at the same truth.
+TRUTH_VARIANCE_MAX_FRACTION = 0.5
+EVENT_VARIANCE_MAX_RATIO = 1.5
+#: representativeness of the realised catalog: |MLE - truth| <= this x sd_ens
+REPRESENTATIVE_N_SD = 3.0
+DEFAULT_N_PE = 8192
+DEFAULT_TARGET_FOUND = 1_500_000
+DEFAULT_ENSEMBLE = 200
+
+
+def _package_versions() -> dict:
+    import importlib.metadata as md
+    import platform
+
+    out = {"python": platform.python_version()}
+    for name in ("numpy", "scipy", "jax", "jaxlib", "h5py"):
+        try:
+            out[name] = md.version(name)
+        except md.PackageNotFoundError:  # pragma: no cover
+            out[name] = None
+    return out
+
+
+def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259, n_pe: int = DEFAULT_N_PE,
+               target_found: int = DEFAULT_TARGET_FOUND, seed: int = 20261030, delta_pe: bool = False,
+               calibration: Calibration | None = None, calibration_source: str | None = None,
+               n_pool: int | None = None, run_gates: bool = True, ensemble: int = DEFAULT_ENSEMBLE,
+               grid=C2_SLOPE_GRID, calibration_kwargs: Mapping | None = None, log=print) -> dict:
+    """Generate one canonical-format mock pair (pe.h5, selection.h5) plus truth, gates and manifest.
+
+    ``calibration_source`` is recorded in the manifest (the path of a reused
+    calibration.json); without a ``calibration`` the calibration is computed.
+    """
     from ..data import PosteriorCatalog, validate_pair
     from ..data.adapters.gwcat_v2 import basis_for_spin
 
@@ -1024,7 +1333,13 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
     draw = DrawDistribution(cosmo)
     if calibration is None:
         calibration = calibrate(draw, log=log, **dict(calibration_kwargs or {}))
+        cal_record = {"computed": True, "seed": int(calibration.report.get("seed", CALIBRATION_SEED))}
+    elif calibration_source:
+        cal_record = {"reused": str(calibration_source), "sha256": sha256_file(calibration_source)}
+    else:
+        cal_record = {"provided_in_memory": True}
     cal = calibration
+    box = pe_box(cosmo)
     (out / "calibration.json").write_text(json.dumps(cal.to_dict(), indent=2, sort_keys=True) + "\n")
     spec, hp = truth_model(kind)
     logp = LogDensity(spec)
@@ -1061,10 +1376,12 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
             s = {k: np.array([pool[k][j]]) for k in cols}
             acc = None
         else:
-            s, acc = sample_pe(rng, x_obs, pool["rho_obs"][j], amp, n_pe, cal.width_scale, cal.mass_rolloff)
+            s, acc = sample_pe(rng, x_obs, pool["rho_obs"][j], amp, n_pe, cal.width_scale, cal.mass_rolloff,
+                               box=box, rolloff_power=cal.mass_rolloff_power,
+                               rolloff_sharpness=cal.mass_rolloff_sharpness)
         for k in cols:
             cols[k].append(s[k])
-        log_ref.append(pe_log_prior_basis(s["m1_detector"], s["luminosity_distance"]))
+        log_ref.append(pe_log_prior_basis(s["m1_detector"], s["luminosity_distance"], box))
         records.append(_event_truth_record(name, pool, j, cal, x_obs, acc))
     samples = {k: np.concatenate(v) for k, v in cols.items()}
     z = cosmo.z_of_dL(samples["luminosity_distance"])
@@ -1078,7 +1395,9 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
         metadata={"mock": True, "mock_format_version": MOCK_FORMAT_VERSION, "mock_kind": kind,
                   "sky_marginal": True, "z_max": DRAW_ZMAX, "seed": int(seed), "delta_pe": bool(delta_pe),
                   "log_ref_density": "ln pi_PE(m1_det, q, d_L, chi_eff) in dm1_det dq dd_L dchi_eff; "
-                                     f"pi ∝ m1_det d_L^2 on the box {PE_BOX}"},
+                                     f"pi ∝ m1_det d_L^2 on the box {box}",
+                  "pe_box": {k: list(v) for k, v in box.items()},
+                  "z_max_note": "the PE prior box ends at d_L(z_max), so no PE sample lies above z_max"},
     )
     validate_pair(posterior, selection, ("m1_detector", "q", "luminosity_distance", "chi_eff"))
     posterior.to_hdf5(out / "pe.h5")
@@ -1100,19 +1419,23 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
         ev_truth = {k: pool[k][picks] for k in ("m1_detector", "q", "luminosity_distance", "chi_eff",
                                                 "m1_source", "z")}
         prof, log_xi_grid = delta_profile(ev_truth, selection, kind, grid, logp=logp_c2)
+        # (i) machinery gate on an ensemble of same-pool catalogs drawn like the
+        # real one (without replacement); the realised catalog is reported
+        # against the pre-declared representativeness rule (review B item 2)
         ens_rng = np.random.default_rng(ens_ss)
         ens = []
         for _ in range(int(ensemble)):
-            idx = ens_rng.choice(len(w), size=n_events, replace=True, p=w / w.sum())
+            idx = ens_rng.choice(len(w), size=n_events, replace=False, p=w / w.sum())
             e = {k: pool[k][idx] for k in ("m1_detector", "q", "luminosity_distance", "chi_eff")}
             ens.append(delta_profile(e, selection, kind, grid, logp=logp_c2, log_xi_grid=log_xi_grid)[0])
         mles = np.array([p["mle"] for p in ens])
         truth_slope = prof["truth"]
         ens_summary = {
-            "n_catalogs": int(ensemble), "n_events_each": n_events,
+            "n_catalogs": int(ensemble), "n_events_each": n_events, "draw": "without replacement",
             "mle_mean": float(mles.mean()) if len(mles) else None,
             "mle_sd": float(mles.std(ddof=1)) if len(mles) > 1 else None,
             "coverage_dlnL_le_2": float(np.mean([p["truth_inside"] for p in ens])) if ens else None,
+            "n_interval_at_grid_edge": int(sum(p["interval_at_grid_edge"] for p in ens)),
             "mles": mles.round(4).tolist(),
         }
         if len(mles) > 1:
@@ -1120,14 +1443,24 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
             ens_summary["mle_mean_minus_truth_over_se"] = float((mles.mean() - truth_slope) / se)
             ens_summary["pass"] = bool(abs(mles.mean() - truth_slope) <= 3.0 * se
                                        and ens_summary["coverage_dlnL_le_2"] >= 0.8)
+        sd = ens_summary.get("mle_sd")
+        representative = {
+            "rule": f"|MLE - truth| <= {REPRESENTATIVE_N_SD:g} sd_ens (pre-declared, SEED_DECLARATION.json)",
+            "mle": prof["mle"], "truth": truth_slope, "sd_ens": sd,
+            "n_sd": None if not sd else float(abs(prof["mle"] - truth_slope) / sd),
+            "ensemble_quantile_of_mle": float(np.mean(mles <= prof["mle"])) if len(mles) else None,
+            "pass": bool(sd and abs(prof["mle"] - truth_slope) <= REPRESENTATIVE_N_SD * sd),
+        }
         gates["i_delta_pe_profile"] = {
             "parameter": C2_SLOPE, "model": "C2 (other hyperparameters at the truth)",
-            "this_catalog": prof, "ensemble": ens_summary,
-            "pass": bool(prof["truth_inside"] and ens_summary.get("pass", True)),
+            "this_catalog": prof, "ensemble": ens_summary, "realised_catalog_representative": representative,
+            "pass": bool(ens_summary.get("pass", False)),
+            "note": ("binding: the ensemble machinery check; the realised catalog's own dlnL <= 2 interval "
+                     "misses the truth for ~5 % of honest seeds and is reported, not gated"),
         }
         if not delta_pe:
             gates["pe_profile_reported"] = pe_profile(posterior, selection, kind, grid, log_xi_grid, logp_c2)
-        gates["ii_coverage"] = coverage_gate(draw, selection, ev_truth)
+        gates["ii_coverage"] = coverage_gate(draw, selection, ev_truth, box=box)
         gates["iii_g12"] = g12_gate(posterior, selection)
         lpd = logp(selection.samples, hp) - selection.log_draw_density
         wsel = np.exp(lpd - lpd.max())
@@ -1138,11 +1471,28 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
             "canonical_selection_ess_at_truth": CANONICAL_SELECTION_ESS[kind],
             "event_pool_ess": pool_ess,
         }
-        gates["b0_pass"] = bool(gates["i_delta_pe_profile"]["pass"] and gates["ii_coverage"]["pass"]
-                                and gates["iii_g12"]["pass"])
+        if not delta_pe:
+            tv = taper_variance_at_truth(posterior, selection, kind)
+            canon = CANONICAL_TAPER_VARIANCE[kind]
+            gates["iv_taper_at_truth"] = {
+                "estimator": "hbi.numpy_backend.shape_log_likelihood / taper_variance with the v2 sharp cut",
+                "mock": tv, "canonical_at_same_truth": canon,
+                "max_total": TRUTH_VARIANCE_MAX_FRACTION * tv["threshold"],
+                "event_ratio_to_canonical": tv["events"] / canon["events"],
+                "max_event_ratio": EVENT_VARIANCE_MAX_RATIO,
+                "pass_total": bool(tv["total"] <= TRUTH_VARIANCE_MAX_FRACTION * tv["threshold"]),
+                "pass_events": bool(tv["events"] <= EVENT_VARIANCE_MAX_RATIO * canon["events"]),
+            }
+            gates["iv_taper_at_truth"]["pass"] = bool(gates["iv_taper_at_truth"]["pass_total"]
+                                                      and gates["iv_taper_at_truth"]["pass_events"])
+        rep = gates["i_delta_pe_profile"]["realised_catalog_representative"]
+        gates["b0_pass"] = bool(gates["i_delta_pe_profile"]["pass"] and rep["pass"]
+                                and gates["ii_coverage"]["pass"] and gates["iii_g12"]["pass"]
+                                and gates.get("iv_taper_at_truth", {"pass": True})["pass"])
         (out / "gates.json").write_text(json.dumps(gates, indent=2, sort_keys=True) + "\n")
-        log(f"gates: b0_pass {gates['b0_pass']} (delta {gates['i_delta_pe_profile']['pass']}, coverage "
-            f"{gates['ii_coverage']['pass']}, G12 {gates['iii_g12']['pass']})")
+        log(f"gates: b0_pass {gates['b0_pass']} (ensemble {gates['i_delta_pe_profile']['pass']}, "
+            f"representative {rep['pass']} ({rep['n_sd']}), coverage {gates['ii_coverage']['pass']}, "
+            f"G12 {gates['iii_g12']['pass']}, taper {gates.get('iv_taper_at_truth', {}).get('mock')})")
 
     files = {name: sha256_file(out / name) for name in ("pe.h5", "selection.h5", "mock_truth.json",
                                                         "calibration.json")}
@@ -1151,6 +1501,8 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
     manifest = {
         "format_version": MOCK_FORMAT_VERSION, "kind": kind, "delta_pe": bool(delta_pe),
         "status": "STAGING MOCK (not frozen)", "code_commit": _git_commit(),
+        "software_versions": _package_versions(),
+        "calibration_source": cal_record,
         "generator": "scripts/v2_closure_mock.py / gwpop_search.validation.v2_mock",
         "seeds": {"master": int(seed), "calibration": int(cal.report.get("seed", CALIBRATION_SEED)),
                   "streams": "SeedSequence(master).spawn(4) = injections, event pool, per-event PE, ensemble"},
@@ -1166,8 +1518,13 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
             "pe_data": "(rho_obs, x_obs), x_obs = (ln m1_det, q, chi_eff) + N(0, Sigma(rho_obs)); "
                        "Sigma widths c_j rho_thr/rho_obs, constant correlation",
             "pe_posterior": "exact draws from N(x_obs; x, Sigma) E_Theta[N(rho_obs; A_k Theta g(theta), 1)] "
-                            "pi_PE(theta); pi_PE ∝ m1_det d_L^2 on PE_BOX",
-            "pe_box": PE_BOX, "snr_threshold": SNR_THRESHOLD, "spin_snr_slope": SPIN_SNR_SLOPE,
+                            "pi_PE(theta); pi_PE ∝ m1_det d_L^2 on pe_box (d_L <= d_L(z_max))",
+            "snr_mass_rolloff": f"(1 + (M_det / M_ro)^s)^(-p/s), M_ro = {cal.mass_rolloff:.2f}, "
+                                f"p = {cal.mass_rolloff_power:.4f}, s = {cal.mass_rolloff_sharpness:g}",
+            "pe_box": {k: list(v) for k, v in box.items()}, "snr_threshold": SNR_THRESHOLD,
+            "spin_snr_slope": SPIN_SNR_SLOPE,
+            "selection_mode": ("RAW_DRAW (mock); frozen-selection null replays require estimator_ready, "
+                               "so the mock campaign uses --max-null-replays 0"),
             "draw_distribution": {"support": draw.support(), "proxy_fraction": DRAW_PROXY_FRACTION,
                                   "proxy": DRAW_PROXY},
         },

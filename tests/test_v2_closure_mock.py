@@ -60,15 +60,22 @@ def test_draw_density_is_normalised_with_exact_jacobian(draw):
     w = np.exp(lw)
     ess = w.sum() ** 2 / np.sum(w ** 2)
     assert w.mean() == pytest.approx(1.0, abs=4.0 / math.sqrt(ess))
-    # the source density integrates to one on the support (uniform-box importance estimate)
-    n = 400_000
-    m1 = rng.uniform(3, 300, n)
+    # the source density integrates to one on the support (box importance estimate, ln m1 uniform)
+    n = 800_000
+    lnm = rng.uniform(math.log(3), math.log(300), n)
     q = rng.uniform(0.001, 1, n)
     z = rng.uniform(1e-6, 1.9, n)
     c = rng.uniform(-1, 1, n)
-    vol = 297 * 0.999 * 1.9 * 2
-    p = np.exp(draw.log_density_source(m1, q, z, c))
+    vol = math.log(100.0) * 0.999 * 1.9 * 2
+    p = np.exp(draw.log_density_source(np.exp(lnm), q, z, c)) * np.exp(lnm)
     assert p.mean() * vol == pytest.approx(1.0, rel=0.03)
+    # sampler and density agree: E_draw[u(x) / p_draw(x)] = 1 for the uniform box density u
+    # (the weights are bounded because the broad component has full support)
+    lnu = -math.log(vol) - np.log(s["m1_source"])
+    ratio = np.exp(lnu - draw.log_density_source(s["m1_source"], s["q"], s["z"], s["chi_eff"]))
+    assert ratio.mean() == pytest.approx(1.0, abs=5.0 * ratio.std() / math.sqrt(ratio.size))
+    # the proxy makes the injection weights at the truth nearly constant: high ESS fraction
+    assert ess / w.size > 0.3
 
 
 def test_detection_is_on_data_and_shared_machinery(draw):
@@ -86,7 +93,7 @@ def test_detection_is_on_data_and_shared_machinery(draw):
 
 
 @np.errstate(invalid="ignore", divide="ignore")
-def _reference_moments(x_obs, rho_obs, amp, box, n=1_000_000, seed=7):
+def _reference_moments(x_obs, rho_obs, amp, box, n=1_000_000, seed=7, power=5.0 / 6.0, m_ro=None, sharp=1.0):
     """Importance-sampling posterior moments from the un-factorised likelihood x prior.
 
     Proposal: y_r = (ln m1, q, chi) ~ N(x_obs, 4 Sigma), ln d_L uniform; the amplitude
@@ -104,12 +111,14 @@ def _reference_moments(x_obs, rho_obs, amp, box, n=1_000_000, seed=7):
     log_prop = -0.5 * np.einsum("ni,ij,nj->n", diff, np.linalg.inv(cov), diff)
     # prior ∝ m1 d^2 in the basis -> m1^2 d^3 in (ln m1, q, ln d, chi)
     logw = 2 * np.log(m1) + 3 * lnd - log_prop
-    base = M.pe_log_likelihood_unmarginalised(x_obs, rho_obs, amp, CAL.width_scale, CAL.mass_rolloff,
-                                              m1_det=m1, q=q, d_l=d, chi=c, theta=0.0) + 0.5 * rho_obs ** 2
+    m_ro = CAL.mass_rolloff if m_ro is None else m_ro
+    base = M.pe_log_likelihood_unmarginalised(x_obs, rho_obs, amp, CAL.width_scale, m_ro,
+                                              m1_det=m1, q=q, d_l=d, chi=c, theta=0.0,
+                                              rolloff_power=power, rolloff_sharpness=sharp) + 0.5 * rho_obs ** 2
     theta = M.projection_factor(rng, 200_000)
     s_grid = np.exp(np.linspace(math.log(rho_obs / 3), math.log(rho_obs * 400), 3000))
     l_grid = np.array([np.mean(np.exp(-0.5 * (rho_obs - sg * theta) ** 2)) for sg in s_grid])
-    s = np.exp(M._log_c(m1, q, c, amp, CAL.mass_rolloff)) / d
+    s = np.exp(M._log_c(m1, q, c, amp, m_ro, power, sharp)) / d
     amp_like = np.interp(np.log(s), np.log(s_grid), l_grid, left=0.0, right=l_grid[-1])
     lw = np.where(inside, logw + base + np.log(amp_like + 1e-300), -np.inf)
     w = np.exp(lw - lw.max())
@@ -119,20 +128,21 @@ def _reference_moments(x_obs, rho_obs, amp, box, n=1_000_000, seed=7):
     return mean, sd, w.sum() ** 2 / np.sum(w ** 2)
 
 
-def test_pe_sampler_matches_unfactorised_posterior():
+@pytest.mark.parametrize("power,m_ro,sharp", [(5.0 / 6.0, CAL.mass_rolloff, 1.0), (2.5, 70.0, 3.0)])
+def test_pe_sampler_matches_unfactorised_posterior(power, m_ro, sharp):
     """The factorised exact sampler reproduces the posterior of the raw likelihood x prior."""
-    amp, m_ro = 20.0, CAL.mass_rolloff
+    amp = 20.0 if power < 1 else 40.0
     m1, q, chi, d_l, theta = 40.0, 0.7, 0.05, 800.0, 0.6
-    rho_opt = theta * amp * M.snr_unit(m1, q, d_l, chi, m_ro)
+    rho_opt = theta * amp * M.snr_unit(m1, q, d_l, chi, m_ro, power, sharp)
     rho_obs = float(rho_opt + 0.4)
     x_obs = M.x_of(m1, q, chi) + np.array([0.02, -0.03, 0.01])
     box = {"m1_detector": (15.0, 100.0), "q": (0.2, 1.0), "luminosity_distance": (60.0, 6000.0),
            "chi_eff": (-0.6, 0.7)}
     s, acc = M.sample_pe(np.random.default_rng(11), x_obs, rho_obs, amp, 40_000, CAL.width_scale, m_ro,
-                         box=box)
+                         box=box, rolloff_power=power, rolloff_sharpness=sharp)
     assert acc > 0.01
     y = np.stack([np.log(s["m1_detector"]), s["q"], np.log(s["luminosity_distance"]), s["chi_eff"]], 1)
-    ref_mean, ref_sd, ess = _reference_moments(x_obs, rho_obs, amp, box)
+    ref_mean, ref_sd, ess = _reference_moments(x_obs, rho_obs, amp, box, power=power, m_ro=m_ro, sharp=sharp)
     assert ess > 2000
     np.testing.assert_allclose(y.mean(0), ref_mean, atol=0.06 * ref_sd.max(), rtol=0)
     assert np.all(np.abs(y.mean(0) - ref_mean) < 0.08 * ref_sd)
@@ -214,10 +224,38 @@ def test_small_build_end_to_end(tmp_path, delta_pe):
     gates = json.loads((out / "gates.json").read_text())
     assert gates["ii_coverage"]["pass"] and gates["iii_g12"]["pass"]
     assert gates["ii_coverage"]["support_grid_points_with_zero_draw_density"] == 0
-    prof = gates["i_delta_pe_profile"]["this_catalog"]
+    assert all(gates["ii_coverage"]["pe_box_contains_population_support"].values())
+    gi = gates["i_delta_pe_profile"]
+    prof = gi["this_catalog"]
     assert prof["truth"] == -2.2 and len(prof["lnL"]) == len(grid)
+    assert gi["ensemble"]["n_catalogs"] == 4 and gi["ensemble"]["draw"] == "without replacement"
+    assert gi["pass"] == gi["ensemble"]["pass"]  # the realised catalog is not the binding check
+    assert "pass" in gi["realised_catalog_representative"]
+    # the PE box ends at d_L(z_max): no PE sample above the declared z_max
+    assert pe.metadata["z_max"] == M.DRAW_ZMAX
+    assert np.nanmax(pe.samples["z"]) <= M.DRAW_ZMAX + 1e-9
+    assert man["software_versions"]["numpy"] == np.__version__
+    assert man["calibration_source"] == {"provided_in_memory": True}
     if not delta_pe:
         assert "pe_profile_reported" in gates
+        # sigma^2 at the truth: the gate's NumPy value is the JAX likelihood's variance
+        tv = gates["iv_taper_at_truth"]
+        from gwpop_search.hbi import HBIConfig
+        from gwpop_search.hbi.jax_backend import build_shape_log_likelihood_components
+        from gwpop_search.inference.v2_numerics import v2_variance_taper
+        from gwpop_search.models import compile_model_spec
+
+        spec_t, hp_t = M.truth_model("closure_widthq")
+        comps = build_shape_log_likelihood_components(
+            pe, sel, compile_model_spec(spec_t),
+            config=HBIConfig(selection_chunk_size=None, variance_taper=v2_variance_taper()))
+        variance = float(comps({k: jax.numpy.asarray(v) for k, v in hp_t.items()})[2])
+        assert tv["mock"]["total"] == pytest.approx(variance, rel=1e-8)
+        assert tv["pass"] == (tv["pass_total"] and tv["pass_events"])
+        assert gates["b0_pass"] is (gi["pass"] and gi["realised_catalog_representative"]["pass"]
+                                    and tv["pass"] and gates["ii_coverage"]["pass"] and gates["iii_g12"]["pass"])
+    else:
+        assert "iv_taper_at_truth" not in gates
     # the selection estimator in the gate equals the pipeline's (numpy HBI) ln xi
     from gwpop_search.hbi import evaluate_selection
 
@@ -228,13 +266,34 @@ def test_small_build_end_to_end(tmp_path, delta_pe):
 
 
 def test_calibration_reproduces_targets(draw):
-    cal = M.calibrate(draw, n_pool=150_000, n_width_events=12, n_width_samples=256, width_iterations=1,
-                      log=lambda *_: None)
+    cal = M.calibrate(draw, n_pool=300_000, n_width_events=12, n_width_samples=256, width_iterations=1,
+                      power_steps=5, rolloff_steps=12, log=lambda *_: None)
     assert sum(cal.run_time_yr) == pytest.approx(M.T_TOTAL_YR)
     for label in M.RUN_LABELS:
         rep = cal.report[label]
-        assert rep["achieved"]["z"][1] == pytest.approx(M.CANONICAL_RUN_TARGETS[label]["z"][1], rel=0.03)
-    assert cal.report["pooled_m1_source_q90"]["achieved"] == pytest.approx(M.CANONICAL_POOLED_M1_Q90, rel=0.05)
+        # small pool: the faint runs (O1/O2) have few detected rows
+        assert rep["achieved"]["z"][1] == pytest.approx(M.CANONICAL_RUN_TARGETS[label]["z"][1], rel=0.08)
+    target = M.CANONICAL_POOLED_TARGETS
+    assert cal.report["pooled_m1_source_q90"]["achieved"] == pytest.approx(target["m1_source_q90"], rel=0.05)
+    # the roll-off power is fitted to the heavy tail (or sits at a bound, reported)
+    assert 5.0 / 6.0 <= cal.mass_rolloff_power <= 8.0
+    tail = cal.report["pooled_detected_mass"]["achieved"]["p_m1_source_gt_100"]
+    if 5.0 / 6.0 < cal.mass_rolloff_power < 8.0:
+        assert tail == pytest.approx(target["p_m1_source_gt_100"], rel=0.3)
     assert list(cal.amplitude) == sorted(cal.amplitude) or cal.amplitude[-1] > cal.amplitude[0]
     rt = M.Calibration.from_dict(json.loads(json.dumps(cal.to_dict())))
     assert rt.amplitude == cal.amplitude and rt.mass_rolloff == cal.mass_rolloff
+    assert rt.mass_rolloff_power == cal.mass_rolloff_power
+    assert rt.mass_rolloff_sharpness == cal.mass_rolloff_sharpness == M.MASS_ROLLOFF_SHARPNESS
+
+
+def test_coverage_gate_refuses_a_pe_box_that_truncates_the_population(draw):
+    sel_like = type("S", (), {"log_draw_density": np.zeros(3)})()
+    truths = {"m1_source": np.array([30.0]), "q": np.array([0.8]), "z": np.array([0.3]),
+              "chi_eff": np.array([0.0])}
+    ok = M.coverage_gate(draw, sel_like, truths)
+    assert ok["pass"]
+    bad_box = dict(M.pe_box(draw.cosmo), m1_detector=(2.0, 500.0))
+    bad = M.coverage_gate(draw, sel_like, truths, box=bad_box)
+    assert not bad["pass"] and not bad["pe_box_contains_population_support"]["m1_detector"]
+    assert M.pe_box(draw.cosmo)["luminosity_distance"][1] == pytest.approx(draw.cosmo.dL_of_z(M.DRAW_ZMAX))
