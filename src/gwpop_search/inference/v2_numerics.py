@@ -5,10 +5,14 @@ freeze; nothing in this module has been frozen.
 
 Numerics decided for v2 (plan ``scalable-stargazing-shamir``, "Numerics"):
 
-* Variance guard *inside* the likelihood: the smooth taper of
-  :mod:`gwpop_search.hbi.taper` at ``sigma^2_lnL = 1`` (GWTC-5,
-  arXiv:2605.27226 Sec. III; Callister & Farr 2024, PRX 14, 021005). Claimed
-  edges are re-run with the taper at 2 (sensitivity; D3).
+* Variance guard *inside* the likelihood: the sharp cut of
+  :mod:`gwpop_search.hbi.taper` at ``sigma^2_lnL = 1`` -- the exact LVK GWTC-5
+  implementation (arXiv:2605.27226 Sec. III; gwpopulation ``hyperpe.py``
+  L185-189 via gwpopulation_pipe ``--maximum-uncertainty``; verified on the
+  GWTC-5 Default release posteriors, staging/v2/TAPER_FORM.md; operator
+  decision 1, 2026-09-30). Claimed edges are re-run with the cut at 2
+  (sensitivity; D3). The smooth (Callister & Farr form) taper stays available
+  as a diagnostic alternative.
 * One dynesty run per model: nlive 500, bound ``multi``, sample ``rslice``,
   dlogz 0.1 (``F3`` rung, one repeat).
 * A second seed only for decision-relevant edges (:class:`SecondSeedRule`):
@@ -33,7 +37,7 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from gwpop_search.hbi import HBIConfig
-from gwpop_search.hbi.taper import CALLISTER_FARR_EXPONENT, VarianceTaper
+from gwpop_search.hbi.taper import DEFAULT_SHARP_REGION_BAND, VarianceTaper
 
 from .dynesty_backend import DynestyConfig
 from .evidence_campaign import EvidenceCampaignConfig
@@ -49,6 +53,8 @@ from .fidelity import (
 V2_NUMERICS_FORMAT_VERSION = "gwpop-search-v2-numerics-draft-1.0"
 V2_TAPER_THRESHOLD = 1.0
 V2_TAPER_SENSITIVITY_THRESHOLD = 2.0
+#: The LVK GWTC-5 variance guard (gwpopulation maximum_uncertainty): a sharp cut.
+V2_TAPER_KIND = "sharp"
 V2_NLIVE = 500
 V2_DLOGZ = 0.1
 
@@ -209,9 +215,16 @@ class SeedPolicy:
         }
 
 
-def v2_variance_taper(threshold: float = V2_TAPER_THRESHOLD) -> VarianceTaper:
-    """The v2 smooth taper (Callister & Farr p = 30) at ``threshold`` (1; 2 for D3)."""
-    return VarianceTaper(kind="smooth", threshold=threshold, exponent=CALLISTER_FARR_EXPONENT)
+def v2_variance_taper(threshold: float = V2_TAPER_THRESHOLD, *, kind: str = V2_TAPER_KIND) -> VarianceTaper:
+    """The v2 variance guard at ``threshold`` (1; 2 for D3): the LVK sharp cut.
+
+    ``kind="smooth"`` gives the Callister & Farr-form diagnostic alternative
+    (p = 30; not the LVK Default form, see :mod:`gwpop_search.hbi.taper`).
+    """
+    if kind == "sharp":
+        return VarianceTaper(kind="sharp", threshold=threshold,
+                             sharp_region_band=DEFAULT_SHARP_REGION_BAND)
+    return VarianceTaper(kind=kind, threshold=threshold)
 
 
 def v2_criteria(*, repeats: int) -> NumericalCriteria:
@@ -256,8 +269,8 @@ def v2_fidelity_run_config(threshold: float = V2_TAPER_THRESHOLD) -> FidelityRun
 
     ``F3``: one run per model (nlive 500, ``multi``/``rslice``, dlogz 0.1).
     ``F4``: the second-seed rung for decision-relevant edges (2 runs, same
-    settings, cross-run gates). The likelihood carries the smooth variance
-    taper at ``threshold``.
+    settings, cross-run gates). The likelihood carries the sharp variance
+    cut at ``threshold`` (the LVK form).
     """
     return FidelityRunConfig(
         f3_evidence=v2_evidence(repeats=1),
@@ -284,17 +297,27 @@ def v2_campaign_numerics(
             "rate_treatment": "shape (rate-marginalised, p(R) ~ 1/R)",
             "variance": "sigma^2 = sum_i Var[ln I_i] + N^2 Var[xi]/xi^2",
             "taper": primary.hbi.variance_taper.to_dict(),
-            "taper_form": "ln T = -ln(1 + (sigma^2/threshold)^p), p = 30",
+            "taper_form": "sharp cut: ln L -> -inf where sigma^2 > threshold (sigma^2 = threshold kept)",
+            "taper_region_diagnostic": primary.hbi.variance_taper.region_definition(),
             "taper_sources": [
-                "GWTC-5.0 populations, arXiv:2605.27226, Sec. III: maximum variance 1, "
-                "'sharp or smoothly-tapered cutoff [Callister & Farr 2024, e.g.]'",
-                "Callister & Farr 2024, PRX 14, 021005; tcallister/autoregressive-bbh-inference "
-                "@53573e9 code/autoregressive_mass_models.py: "
-                "log(1/(1+(N_eff/(4 N_obs))**-30))",
-                "gwpopulation @b3a34f9 hyperpe.py: sharp cut ln L - inf*(max < variance)",
+                "GWTC-5.0 populations, arXiv:2605.27226, Sec. III (source__3-methods.tex L15): "
+                "'maximum variance of 1 ... sharp or smoothly-tapered cutoff'",
+                "gwpopulation @b3a34f9 gwpopulation/hyperpe.py L185-189: "
+                "ln_l -= nan_to_num(inf * (maximum_uncertainty < variance), nan=0)",
+                "gwpopulation_pipe @88c2e2944b (git.ligo.org) parser.py L317-326 --maximum-uncertainty, "
+                "data_analysis.py L232-254 create_likelihood(maximum_uncertainty=...)",
+                "GWInferno @dd810e4 gwinferno/pipeline/analysis.py L305-318: "
+                "where(less_equal(variance, 1), log_l, -inf)",
+                "GWTC-5 Default release posteriors: max variance 1 - 5.9e-6, 0 of 8200 samples above 1 "
+                "(var_4 run: max 4 - 1.8e-5); staging/v2/TAPER_FORM.md",
             ],
+            "taper_not_adopted": (
+                "Callister & Farr 2024 (PRX 14, 021005) S(x) = 1/(1 + x^-30) acts on N_eff^inj/(4 N_obs), "
+                "not on sigma^2; available as VarianceTaper(kind='smooth') for diagnostics only"
+            ),
+            "lvk_relaxed_cut": "GWTC-5 relaxed run uses variance 4; the v2 D3 sensitivity uses 2",
             "sensitivity_taper": sensitivity.hbi.variance_taper.to_dict(),
-            "sensitivity_applies_to": "claimed edges (D3: the taper-at-2 rerun keeps the sign)",
+            "sensitivity_applies_to": "claimed edges (D3: the cut-at-2 rerun keeps the sign)",
         },
         "fidelity": {
             "primary": {

@@ -2248,8 +2248,7 @@ def posterior_taper_mass(
         "taper": taper.to_dict(),
         "definition": (
             "posterior (importance-weighted dead + live points) fraction with "
-            f"T(sigma^2) < {1.0 - taper.region_suppression:g}, i.e. sigma^2 > "
-            f"{taper.region_onset:.6g}; sigma^2 = sum_i Var[ln I_i] + N^2 Var[xi]/xi^2"
+            f"{taper.region_definition()}; sigma^2 = sum_i Var[ln I_i] + N^2 Var[xi]/xi^2"
         ),
         "runs": runs,
         "pooled": pooled,

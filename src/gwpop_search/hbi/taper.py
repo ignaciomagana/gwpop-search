@@ -16,24 +16,35 @@ same estimator as the importance diagnostics
 Where ``sigma^2`` is large the estimate is unreliable. GWTC-5.0 (LVK 2026,
 arXiv:2605.27226, Sec. III) "require[s] a maximum variance of 1 on the
 population likelihood estimator ... implemented as a sharp or
-smoothly-tapered cutoff [Callister & Farr 2024, PRX 14, 021005]". The two
-forms implemented here:
+smoothly-tapered cutoff [Callister & Farr 2024, e.g.]". The two forms
+implemented here (sources and the release check are in
+``staging/v2/TAPER_FORM.md``):
 
-``sharp`` (gwpopulation, ``HyperparameterLikelihood.log_likelihood_ratio``,
-ColmTalbot/gwpopulation at b3a34f9)::
+``sharp`` (the default; the exact LVK implementation for the BP2P Default fit
+that the v2 root ports): gwpopulation ``hyperpe.py`` L185-189
+(ColmTalbot/gwpopulation at b3a34f9), called by gwpopulation_pipe
+``data_analysis.create_likelihood`` with ``--maximum-uncertainty``::
 
-    ln L_tapered = ln L - inf * [sigma^2 > threshold]
+    ln L_tapered = ln L - inf * [sigma^2 > threshold]      (sigma^2 = threshold kept)
 
-``smooth`` (the Callister & Farr 2024 taper; their public code,
-tcallister/autoregressive-bbh-inference at 53573e9,
-``code/autoregressive_mass_models.py``, applies
-``numpyro.factor("Neff_inj_penalty", log(1 / (1 + (N_eff / (4 N_obs))**-30)))``
-to the injection effective sample size). Applied to the variance, with
-``x = sigma^2 / threshold`` and steepness ``p`` (30 in Callister & Farr)::
+gwpopulation compares ``maximum_uncertainty`` directly with the *variance*
+(its docstring calls it a standard deviation; the squared value it stores is
+unused), so its cut is ``sigma^2 <= maximum_uncertainty``; GWInferno's
+``max_variance_cut`` is the same (``less_equal(variance, 1)``). The GWTC-5
+Default release posteriors end exactly at sigma^2 = 1 (and at 4 for the
+relaxed run) with no sample beyond. Difference kept deliberately: a NaN
+variance is cut here (-inf); gwpopulation does not cut it.
+
+``smooth`` (diagnostic alternative, not the LVK Default form): the
+Callister & Farr (2024) functional form ``S(x) = 1/(1 + x^-30)`` -- which they
+apply to the injection effective sample size ``N_eff / (4 N_obs)``
+(tcallister/autoregressive-bbh-inference at 9f78be3,
+``code/autoregressive_mass_models.py`` L206), not to the variance -- applied
+here to the variance, with ``x = sigma^2 / threshold`` and steepness ``p``::
 
     ln T(sigma^2) = -ln(1 + x^p) = -softplus(p ln x)
 
-Properties (pinned by ``tests/test_variance_taper.py``):
+Properties of the smooth form (pinned by ``tests/test_variance_taper.py``):
 
 * ``T -> 1`` (``ln T -> 0``) for ``sigma^2 << threshold``; ``T = 1/2`` exactly
   at the threshold; ``ln T ~ -p ln x`` (power-law suppression ``x^-p``)
@@ -44,21 +55,22 @@ Properties (pinned by ``tests/test_variance_taper.py``):
 * ``p -> inf`` recovers the sharp cut (except at ``sigma^2 = threshold``
   exactly, where the smooth taper keeps ``T = 1/2``).
 
-The GWTC-5 paper does not print the smooth functional form; the LVK
-pipeline configuration (gwpopulation_pipe on git.ligo.org) was not
-accessible when this was written. The Callister & Farr form with ``p = 30``
-applied to ``sigma^2`` is our reading of "[68, e.g.,]"; the steepness is a
-configurable, recorded part of the likelihood identity.
-
 Evidence semantics: the tapered likelihood ``L T`` is the likelihood that is
 sampled and integrated, so ``Z = int L T pi dLambda`` counts only the region
 where the estimate is reliable (weighted by ``T``). A tapered evidence is
 comparable only with evidences under the same taper.
 
 The *taper region* (for the posterior taper-mass diagnostic) is where the
-taper suppresses the likelihood by more than ``region_suppression`` (1 %),
-i.e. ``T < 1 - region_suppression``; for the sharp cut it is
-``sigma^2 > threshold``.
+Monte-Carlo fluctuation of the taper itself is not negligible:
+
+* ``smooth``: where the taper suppresses the likelihood by more than
+  ``region_suppression`` (1 %), i.e. ``T < 1 - region_suppression``;
+* ``sharp``: the band below the wall, ``sigma^2 > (1 - sharp_region_band)
+  threshold`` (``sharp_region_band`` 0.05, DRAFT: the assumed relative
+  Monte-Carlo error of ``sigma^2_hat``). Under a sharp cut no posterior mass
+  lies above the threshold; mass within the band can flip in or out of the
+  cut under a different Monte-Carlo realisation, which the first-order
+  (cut-free) error of ``ln Z`` does not include.
 """
 from __future__ import annotations
 
@@ -70,9 +82,13 @@ from typing import Mapping
 import numpy as np
 
 TAPER_KINDS = ("smooth", "sharp")
+#: The LVK GWTC-5 form (gwpopulation ``maximum_uncertainty``): see the module doc.
+DEFAULT_TAPER_KIND = "sharp"
 # Callister & Farr (2024) steepness of the logistic-in-log taper.
 CALLISTER_FARR_EXPONENT = 30.0
 DEFAULT_REGION_SUPPRESSION = 0.01
+#: Diagnostic band below a sharp cut (assumed relative MC error of sigma^2_hat; DRAFT).
+DEFAULT_SHARP_REGION_BAND = 0.05
 
 
 def _real(name: str, value) -> float:
@@ -88,17 +104,19 @@ def _real(name: str, value) -> float:
 class VarianceTaper:
     """Taper of the shape log-likelihood on its Monte-Carlo variance.
 
+    ``kind`` is ``"sharp"`` (default; the LVK GWTC-5 cut) or ``"smooth"``.
     ``threshold`` is the variance ``sigma^2_lnL`` at which the taper acts
     (GWTC-5 default 1; sensitivity reruns at 2). ``exponent`` is the smooth
     taper's steepness ``p`` (ignored by ``sharp``). ``region_suppression``
-    defines the taper region reported by the taper-mass diagnostic; it does
-    not change the likelihood.
+    (smooth) and ``sharp_region_band`` (sharp) define the taper region
+    reported by the taper-mass diagnostic; neither changes the likelihood.
     """
 
-    kind: str = "smooth"
+    kind: str = DEFAULT_TAPER_KIND
     threshold: float = 1.0
     exponent: float = CALLISTER_FARR_EXPONENT
     region_suppression: float = DEFAULT_REGION_SUPPRESSION
+    sharp_region_band: float = DEFAULT_SHARP_REGION_BAND
 
     def __post_init__(self) -> None:
         if self.kind not in TAPER_KINDS:
@@ -112,24 +130,36 @@ class VarianceTaper:
         suppression = _real("variance taper region_suppression", self.region_suppression)
         if not 0.0 < suppression < 1.0:
             raise ValueError("variance taper region_suppression must lie in (0, 1)")
+        band = _real("variance taper sharp_region_band", self.sharp_region_band)
+        if not 0.0 < band < 1.0:
+            raise ValueError("variance taper sharp_region_band must lie in (0, 1)")
         object.__setattr__(self, "threshold", threshold)
         object.__setattr__(self, "exponent", exponent)
         object.__setattr__(self, "region_suppression", suppression)
+        # The band is a sharp-cut diagnostic only: a smooth taper ignores it, so it is
+        # normalised to the default there (and left out of the smooth serialization,
+        # which keeps smooth identities written before the field existed unchanged).
+        object.__setattr__(
+            self, "sharp_region_band", band if self.kind == "sharp" else DEFAULT_SHARP_REGION_BAND
+        )
 
     # -- serialization -------------------------------------------------------
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "kind": self.kind,
             "threshold": float(self.threshold),
             "exponent": float(self.exponent),
             "region_suppression": float(self.region_suppression),
         }
+        if self.kind == "sharp":
+            payload["sharp_region_band"] = float(self.sharp_region_band)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "VarianceTaper":
         payload = dict(payload)
-        known = {"kind", "threshold", "exponent", "region_suppression"}
+        known = {"kind", "threshold", "exponent", "region_suppression", "sharp_region_band"}
         unknown = sorted(set(payload) - known)
         if unknown:
             raise ValueError(f"unknown variance taper field(s): {unknown}")
@@ -147,9 +177,13 @@ class VarianceTaper:
 
     @property
     def region_onset(self) -> float:
-        """Smallest ``sigma^2`` inside the taper region (``T < 1 - region_suppression``)."""
+        """Smallest ``sigma^2`` inside the taper region.
+
+        Smooth: ``T < 1 - region_suppression``. Sharp: the band
+        ``sigma^2 > (1 - sharp_region_band) threshold`` below the cut.
+        """
         if self.kind == "sharp":
-            return float(self.threshold)
+            return float(self.threshold * (1.0 - self.sharp_region_band))
         s = self.region_suppression
         # -ln(1 + x^p) < ln(1 - s)  <=>  x > (1 / (1 - s) - 1)^(1/p) = (s / (1 - s))^(1/p)
         return float(self.threshold * (s / (1.0 - s)) ** (1.0 / self.exponent))
@@ -157,9 +191,18 @@ class VarianceTaper:
     def in_region(self, variance) -> np.ndarray:
         """Boolean mask: ``sigma^2`` in the taper region (NaN counts as inside)."""
         v = np.asarray(variance, dtype=float)
-        if self.kind == "sharp":
-            return ~(v <= self.threshold)
         return ~(v <= self.region_onset)
+
+    def region_definition(self) -> str:
+        """Human-readable definition of the taper region (for reports)."""
+        if self.kind == "sharp":
+            return (
+                f"sigma^2 > {self.region_onset:.6g} = (1 - {self.sharp_region_band:g}) x threshold "
+                f"{self.threshold:g} (band below the sharp cut)"
+            )
+        return (
+            f"T(sigma^2) < {1.0 - self.region_suppression:g}, i.e. sigma^2 > {self.region_onset:.6g}"
+        )
 
     # -- the taper ---------------------------------------------------------
 

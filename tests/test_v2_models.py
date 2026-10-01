@@ -300,7 +300,7 @@ def test_mixture_component_means_are_ordered():
 def test_support_comes_from_the_spec_with_no_hidden_defaults():
     root = v2_root_model_spec()
     model = compile_model_spec(root)
-    assert model.zmax == 1.9 and model.q_floor == 0.05
+    assert model.zmax == 1.9 and model.q_floor == 0.001
     assert model.cosmology.H0 == 67.74 and model.cosmology.Om0 == 0.3089
     assert model.required_fields == ("m1_detector", "q", "luminosity_distance", "chi_eff")
     assert model.to_config()["support"] == root.support

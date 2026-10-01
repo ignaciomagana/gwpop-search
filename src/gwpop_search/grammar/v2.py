@@ -54,10 +54,11 @@ def _lu(low: float, high: float) -> PriorConfig:
 V2_SUPPORT: dict[str, object] = {
     # OD-6: z_max = 1.9 everywhere (selection and PE exports record 1.9).
     "zmax": 1.9,
-    # OD-12 chose the per-event NRSur fallback (option a) rather than a global
-    # q_floor = 1/6, so the population floor stays at the harness value 0.05 =
-    # the XPHM-SpinTaylor q prior minimum. DRAFT: operator confirms at freeze.
-    "q_floor": 0.05,
+    # Operator decision 2 (2026-09-30): the exact LVK floor, q nodes
+    # linspace(0.001, 1, 500), so R0 reproduces the GWTC-5 Default release grids
+    # (G2a, tests/test_v2_rates_on_grids.py). Replaces the OD-12 harness floor
+    # 0.05 (the XPHM-SpinTaylor PE q prior minimum).
+    "q_floor": 0.001,
     # OD-8: m2 >= 3 Msun (mlow_1 ~ U(3, 10), mlow_2 ~ U(3, mlow_1)); also the
     # lower edge of the LVK normalisation grid (minimum_mass = 3).
     "mmin": 3.0,
@@ -287,16 +288,16 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
         "source": "GWTC-4 (arXiv:2508.18083) Table 10 q-slope delta_mu|q ~ U(-2, 2); Tong+22, Antonini+24",
         "rationale": "over ln m1 in [ln 5, ln 100] (~3 e-folds, where the events are) it spans the same |d mu| <= 2 "
                      "as the q slope over q in [0, 1]. Over the full population support [3, 300] Msun (4.6 e-folds) "
-                     "it spans |d mu| <= 3.1 (the q slope spans 1.9 over q in [0.05, 1]); the alternative that "
-                     "matches over the full support is U(-0.41, 0.41). OPERATOR CHOICE at freeze",
+                     "it spans |d mu| <= 3.1 (the q slope spans 2.0 over q in [0.001, 1]); the alternative that "
+                     "matches over the full support is U(-0.43, 0.43). OPERATOR CHOICE at freeze",
     },
     "C6.chi_log_sigma_log_m1_slope": {
         "prior": "U(-4, 4) per e-fold of m1",
         "source": "GWTC-4 Table 10 delta ln sigma|q ~ U(-12, 4); Tong+22, Antonini+24, Plunkett+26",
         "rationale": "|d ln sigma| <= 12 over ~3 e-folds of m1 (5-100 Msun, where the events are), the largest excursion "
                      "of the q-slope prior; symmetric because the sign is not predicted. Over the full support [3, 300] "
-                     "Msun (4.6 e-folds) it spans |d ln sigma| <= 18.4 versus 11.4 for the q slope over q in [0.05, 1]; "
-                     "the alternative that matches over the full support is U(-2.5, 2.5). OPERATOR CHOICE at freeze",
+                     "Msun (4.6 e-folds) it spans |d ln sigma| <= 18.4 versus 12.0 for the q slope over q in [0.001, 1]; "
+                     "the alternative that matches over the full support is U(-2.6, 2.6). OPERATOR CHOICE at freeze",
     },
     "S1.chi_mu_2_frac": {
         "prior": "U(0, 1): mu_2 = mu_1 + f (1 - mu_1), i.e. mu_2 | mu_1 ~ U(mu_1, 1)",
@@ -353,23 +354,30 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
                      "but give different evidences for Z2 and for the whole A2 suite",
     },
     "taper.form": {
-        "prior": "ln T = -ln(1 + (sigma^2 / 1)^30): T = 0.5 at sigma^2 = 1, > 1% suppression above sigma^2 = 0.858",
-        "source": "Callister & Farr 2024 functional form (applied there to N_eff/(4 N_obs)); GWTC-5 Sec. III states "
-                  "'maximum variance 1' with a 'sharp or smoothly-tapered cutoff'; OPEN OPERATOR DECISION",
-        "rationale": "the LVK smooth-taper definition (gwpopulation_pipe) was not available to verify; the exponent "
-                     "p = 30 and the centring at the threshold are draft choices; p is a candidate D3 sensitivity "
-                     "alongside the taper-at-2 rerun",
+        "prior": "sharp cut: ln L -> -inf where sigma^2_lnL > 1 (sigma^2 = 1 kept); D3 sensitivity rerun at 2. "
+                 "Taper-mass diagnostic region: sigma^2 > 0.95 (band 5% below the cut, the assumed relative MC "
+                 "error of sigma^2_hat; DRAFT)",
+        "source": "operator decision 1 (2026-09-30): adopt the exact LVK GWTC-5 form. gwpopulation @b3a34f9 "
+                  "hyperpe.py L185-189 (ln_l -= inf * (maximum_uncertainty < variance)), passed by "
+                  "gwpopulation_pipe @88c2e2944b data_analysis.py L232-254 (--maximum-uncertainty); GWTC-5 "
+                  "arXiv:2605.27226 Sec. III 'maximum variance of 1'; the Default release posteriors stop at "
+                  "sigma^2 = 1 - 5.9e-6 with 0 of 8200 samples above (staging/v2/TAPER_FORM.md)",
+        "rationale": "R0 ports the gwpopulation BP2P Default fit, whose guard is this cut. The Callister & Farr "
+                     "S(x) = 1/(1 + x^-30) acts on N_eff^inj/(4 N_obs), not on sigma^2; it stays available as "
+                     "VarianceTaper(kind='smooth') for diagnostics only. The LVK relaxed run uses variance 4; "
+                     "v2's D3 uses 2. The 5% band and TAPER_MASS_D2_LIMIT = 0.10 are OPEN: the LVK Default "
+                     "posterior has 67% of its mass at sigma^2 > 0.95",
     },
     "support.q_floor": {
-        "prior": "0.05 (fixed support; truncate and renormalise p(q | m1) on [max(0.05, mlow_2/m1), 1])",
-        "source": "OD-12 option (a): per-event NRSur fallback, harness floor kept (BUILD_PLAN 2.4); "
-                  "OPEN OPERATOR DECISION",
-        "rationale": "the XPHM-SpinTaylor PE prior floor; a global 1/6 floor was the rejected alternative. "
-                     "Consequence: R0 is the LVK Default only at q_floor = 0.001 (G2a, 4.7e-14). At 0.05 the "
-                     "root deviates from the GWTC-5 release by up to 1.7e-4 in dR/dm1 and 5.6e-3 in dR/dq "
-                     "(q >= 0.05; 64 release draws), while the LVK rate fraction below q = 0.05 is <= 1.5e-6 "
-                     "at those draws (more for beta < 0); 1556 found injections (q < 0.05) get zero weight "
-                     "(pinned by tests/test_v2_rates_on_grids.py). Alternative: q_floor = 0.001 (the LVK model)",
+        "prior": "0.001 (fixed support; truncate and renormalise p(q | m1) on [max(0.001, mlow_2/m1), 1]; "
+                 "q nodes linspace(0.001, 1, 500))",
+        "source": "operator decision 2 (2026-09-30): the exact LVK value (GWTC-5 rates_on_grids mass_ratio "
+                  "positions start at 0.001); replaces the OD-12 harness floor 0.05",
+        "rationale": "R0 then reproduces the GWTC-5 Default release dR/dm1 and dR/dq grids to < 1e-6 relative "
+                     "(G2a, pinned by tests/test_v2_rates_on_grids.py). Below q = 0.05 there is no "
+                     "XPHM-SpinTaylor PE prior support; the population mass there is small (LVK rate fraction "
+                     "<= 1.5e-6 at the release draws tested, more for beta < 0) and found injections with "
+                     "q < 0.05 now carry weight",
     },
     "A1.mass_atoms.beta_c": {
         "prior": "beta_p3 ~ U(-10, 13) added with M3/M4 on A1; beta_p35 / beta_p10 removed with M1 / M2",
@@ -653,7 +661,7 @@ def v2_model_graph_checks(
     graph: ModelGraph,
     *,
     expected_zmax: float = 1.9,
-    expected_q_floor: float = 0.05,
+    expected_q_floor: float = 0.001,
     mmin_low: float = 3.0,
     m1_ceiling: float = 590.0,
     export_zmax: Mapping[str, float] | None = None,
@@ -664,7 +672,8 @@ def v2_model_graph_checks(
       mlow_2) is >= ``mmin_low`` (OD-8; v1 had U(2, 10));
     * the m1 support ceiling (fixed mmax) is <= ``m1_ceiling`` (OD-8);
     * zmax equals ``expected_zmax`` (OD-6) and, when given, every export zmax;
-    * q_floor equals ``expected_q_floor`` (OD-12, see V2_DRAFT_PRIORS).
+    * q_floor equals ``expected_q_floor`` (operator decision 2: the LVK 0.001;
+      see V2_DRAFT_PRIORS).
     """
     rows = []
     ok = True

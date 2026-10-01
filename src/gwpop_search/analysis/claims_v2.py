@@ -52,6 +52,7 @@ import math
 from typing import Mapping, Sequence
 
 from gwpop_search.grammar.paths import edge_path_key, mutation_paths
+from gwpop_search.hbi.taper import DEFAULT_TAPER_KIND
 
 from ._common import AnalysisInputError, json_ready
 from .ppc import PPC_ALPHA, ppc_criterion
@@ -71,10 +72,17 @@ ALT_ROOTS = ("A1", "A2")          # D5
 #: D2 (DRAFT, operator approves at freeze): the Monte-Carlo error of a tapered
 #: edge is the first-order error of the untapered estimator
 #: (``first_order_untapered_mc``); the fluctuation of ln T(sigma^2_hat) is
-#: neglected. Inside the taper region d ln T / d ln sigma^2 reaches -p/2 = -15
-#: at the threshold, so a 5% Monte-Carlo error on sigma^2 is ~0.75 nat there.
+#: neglected. Under the v2 sharp cut (the LVK form) ln T is 0 or -inf, and the
+#: neglected term is the posterior mass that flips in or out of the cut under
+#: another Monte-Carlo realisation of sigma^2_hat: the taper region is the band
+#: sigma^2 > (1 - 0.05) x threshold (VarianceTaper.sharp_region_band, the
+#: assumed 5% relative error of sigma^2_hat). (Smooth alternative: d ln T /
+#: d ln sigma^2 reaches -p/2 = -15 at the threshold, ~0.75 nat per 5% error.)
 #: Above this posterior taper-region mass (either endpoint) the approximation
 #: is not trusted: D2 is ``incomplete`` (and DISFAVOURED is not available).
+#: OPEN: the LVK Default posterior has 67% of its mass at sigma^2 > 0.95
+#: (staging/v2/TAPER_FORM.md), so an R0 that piles against the cut the same
+#: way makes D2 incomplete everywhere at 0.10 (pilot item a-4 decides).
 TAPER_MASS_D2_LIMIT = 0.10
 ALT_ROOT_DESCRIPTIONS = {
     "A1": "BP2P + beta per mass component (LVK 'Extended' pairing)",
@@ -628,15 +636,21 @@ def _evidence_evaluations(paths):
 
 #: D3: the taper-at-2 sensitivity rerun (plan 2026-09-30, Numerics)
 TAPER2_THRESHOLD = 2.0
+#: ... under the same taper form as the primary runs (the LVK sharp cut).
+TAPER2_KIND = "sharp"
 
 
-def taper2_rows_from_evaluations(graph, paths, *, threshold: float = TAPER2_THRESHOLD) -> list[dict]:
+def taper2_rows_from_evaluations(
+    graph, paths, *, threshold: float = TAPER2_THRESHOLD, kind: str | None = TAPER2_KIND
+) -> list[dict]:
     """D3 taper-2 rows (``v2-claim-table --taper2`` format) from rerun evaluations.
 
     ``paths`` hold the ``evaluation.json`` files of the reruns under the
     taper-at-``threshold`` fidelity configuration
     (``v2_fidelity_run_config(2.0)``). Every evaluation must carry the taper
-    diagnostic of that threshold (a rerun under another taper is refused).
+    diagnostic of that threshold and of taper form ``kind`` (a rerun under
+    another taper is refused; ``kind=None`` skips the form check). A recorded
+    taper without a ``kind`` is read with the :class:`VarianceTaper` default.
     One row per graph edge whose two endpoints were rerun:
     ``log_bayes_factor = ln Z_child - ln Z_parent`` and ``valid`` when both
     evaluations pass their numerical checks.
@@ -648,6 +662,11 @@ def taper2_rows_from_evaluations(graph, paths, *, threshold: float = TAPER2_THRE
         if taper.get("threshold") is None or float(taper["threshold"]) != float(threshold):
             raise AnalysisInputError(
                 f"{path}: not a taper-at-{threshold:g} evaluation (taper {taper or None})"
+            )
+        if kind is not None and str(taper.get("kind", DEFAULT_TAPER_KIND)) != kind:
+            raise AnalysisInputError(
+                f"{path}: taper-at-{threshold:g} evaluation under a {taper.get('kind')!r} taper, "
+                f"not the primary {kind!r} form"
             )
         model_hash = str(payload["model_hash"])
         if model_hash in runs:

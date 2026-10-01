@@ -42,6 +42,7 @@ from gwpop_search.inference.v2_numerics import (  # noqa: E402
     SeedPolicy,
     v2_campaign_numerics,
     v2_fidelity_run_config,
+    v2_variance_taper,
     write_v2_draft_configs,
 )
 from gwpop_search.models import compile_model_spec  # noqa: E402
@@ -227,6 +228,13 @@ def test_f0_parity_holds_for_the_tapered_likelihood(dataset, tmp_path):  # noqa:
     assert diagnostics["parity"]["n_points_compared"] == 2
     assert diagnostics["parity"]["max_rel_diff"] <= 1e-9
     assert diagnostics["support"]["diagnostics_likelihood_max_rel_diff"] <= 1e-9
+    # Sharp cut: the support gate is the untapered support; parity also covers sigma^2
+    # and the cut itself (thinning inflates sigma^2, so the thinned points are all cut).
+    taper = diagnostics["support"]["taper"]
+    assert taper["taper"]["kind"] == "sharp"
+    assert taper["n_finite_tapered"] <= diagnostics["support"]["n_finite"]
+    for point in diagnostics["parity"]["points"]:
+        assert point["variance_rel_diff"] <= 1e-9 and point["tapered_rel_diff"] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +293,9 @@ def test_v2_fidelity_config_is_valid_and_round_trips(tmp_path):
     assert (f4.repeats, f4.dynesty.nlive, f4.dynesty.dlogz) == (2, 500, 0.1)
     for rung in (f3, f4):
         assert rung.dynesty.sample == "rslice" and rung.dynesty.bound == "multi"
-    assert config.hbi.variance_taper == VarianceTaper(kind="smooth", threshold=1.0, exponent=30.0)
+    assert config.hbi.variance_taper == VarianceTaper(kind="sharp", threshold=1.0)  # the LVK cut
+    assert config.hbi.variance_taper.region_onset == pytest.approx(0.95)
+    assert v2_variance_taper(kind="smooth") == VarianceTaper(kind="smooth", threshold=1.0, exponent=30.0)
     assert config.f3_criteria.max_cross_run_r_hat is None
     assert config.f4_criteria.max_repeat_consistency_z == 3.0
     for criteria in (config.f3_criteria, config.f4_criteria):

@@ -62,7 +62,7 @@ def test_root_is_the_lvk_default_with_gwtc5_table5_priors():
     for name, (lo, hi) in expect.items():
         assert _prior(root, name) == ("uniform", lo, hi), name
     s = root.support
-    assert (s["zmax"], s["mmin"], s["mmax"], s["q_floor"]) == (1.9, 3.0, 300.0, 0.05)
+    assert (s["zmax"], s["mmin"], s["mmax"], s["q_floor"]) == (1.9, 3.0, 300.0, 0.001)
     assert (s["m1_grid"], s["n_m1"], s["n_q"]) == ("geomspace", 1000, 500)
     assert root.to_dict()["support"] == s
 

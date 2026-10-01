@@ -18,18 +18,19 @@ Skipped when the release directory is not mounted (override with
 ``GWPOP_LVK_RELEASE_DIR``), unless ``GWPOP_REQUIRE_G2A=1`` (set it on miko and
 in the pre-freeze suite), which turns the skip into a failure.
 
-``test_production_q_floor_deviation_is_pinned`` records the production root
-(q_floor = 0.05) against the same release: it is *not* the LVK model at 1e-6
-(max dR/dm1 deviation ~1.7e-4, dR/dq on q >= 0.05 ~5.6e-3), which is pinned so
-that a change of either the model or q_floor is noticed (operator decision,
-grammar.v2.V2_DRAFT_PRIORS["support.q_floor"]).
+``test_production_root_reproduces_the_release`` checks the production root
+itself: with q_floor = 0.001 (operator decision 2, 2026-09-30;
+grammar.v2.V2_DRAFT_PRIORS["support.q_floor"]) the compiled v2 root, built
+from ``v2_root_model_spec()`` with no override, is the LVK Default model and
+reproduces dR/dm1 and dR/dq of the release at < 1e-6 on every grid node
+(the previous q_floor = 0.05 deviated by 1.7e-4 in dR/dm1 and 5.6e-3 in
+dR/dq).
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -174,8 +175,8 @@ def test_g2a_declarative_root_coordinates_reproduce_the_release():
     m, rm = grids["mass_1"]
     q, _ = grids["mass_ratio"]
     root = v2_root_model_spec()
-    spec = replace(root, support={**root.support, "q_floor": LVK_Q_FLOOR})
-    model = compile_model_spec(spec)
+    assert root.support["q_floor"] == LVK_Q_FLOOR  # the production root is the LVK model
+    model = compile_model_spec(root)
     mm, qq = np.meshgrid(m, q)
     fn = jax.jit(lambda hp: v2_mass_logpdf(model, jnp.asarray(mm), jnp.asarray(qq), hp))
     devs = []
@@ -188,29 +189,23 @@ def test_g2a_declarative_root_coordinates_reproduce_the_release():
     assert max(devs) < TOL, max(devs)
 
 
-#: production-support deviation bounds (measured 1.66e-4 and 5.61e-3 on 64 draws, 2026-09-30)
-PROD_DM1_BOUNDS = (1e-6, 5e-4)
-PROD_DQ_BOUNDS = (1e-6, 2e-2)
-
-
-def test_production_q_floor_deviation_is_pinned():
-    """The production root (q_floor = 0.05) against the release: a pinned, disclosed deviation."""
+def test_production_root_reproduces_the_release():
+    """The production root (q_floor = 0.001, no override) against the release:
+    dR/dm1 and dR/dq on the full LVK grids, and the q grid is the root's own."""
     col, x, rows, grids = _load("default")
     m, rm = grids["mass_1"]
     q, rq = grids["mass_ratio"]
     root = v2_root_model_spec()
-    assert root.support["q_floor"] == 0.05
+    assert root.support["q_floor"] == LVK_Q_FLOOR == float(q[0])
     model = compile_model_spec(root)
+    assert model.q_floor == LVK_Q_FLOOR
     mm, qq = np.meshgrid(m, q)
     fn = jax.jit(lambda hp: v2_mass_logpdf(model, jnp.asarray(mm), jnp.asarray(qq), hp))
-    keep = q >= root.support["q_floor"]
-    dm1, dq, below = [], [], []
+    dm1, dq = [], []
     for j, i in enumerate(rows[:64]):
         lvk = {k: float(x[i, col[k]]) for k in LVK_MASS_KEYS}
         dens = np.exp(np.asarray(fn(lvk_default_coordinates(lvk)))) * float(x[i, col["rate"]])
         dm1.append(_maxdev(_trapz(dens, q, axis=0), rm[j]))
-        dq.append(_maxdev(_trapz(dens, m, axis=1)[keep], rq[j][keep]))
-        below.append(_trapz(rq[j][~keep], q[~keep]) / _trapz(rq[j], q))
-    assert PROD_DM1_BOUNDS[0] < max(dm1) < PROD_DM1_BOUNDS[1], max(dm1)
-    assert PROD_DQ_BOUNDS[0] < max(dq) < PROD_DQ_BOUNDS[1], max(dq)
-    assert max(below) < 1e-5, max(below)  # LVK rate fraction the floor removes at these draws
+        dq.append(_maxdev(_trapz(dens, m, axis=1), rq[j]))
+    assert max(dm1) < TOL, max(dm1)
+    assert max(dq) < TOL, max(dq)

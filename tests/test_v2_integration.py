@@ -104,10 +104,16 @@ def test_adapter_pair_feeds_the_v2_model_and_matches_its_support(pair, model):
     names = {c["name"] for c in report["checks"]}
     assert {"sky.pe", "sky.selection", "zmax.selection_declared",
             "support.every_event_has_supported_samples"} <= names
-    from gwpop_search.hbi.jax_backend import build_shape_log_likelihood
+    from gwpop_search.hbi.jax_backend import build_shape_log_likelihood_components
 
-    value = build_shape_log_likelihood(pe, sel, model, config=TAPERED)({k: jax.numpy.asarray(v) for k, v in HP.items()})
-    assert np.isfinite(float(value))
+    hp = {k: jax.numpy.asarray(v) for k, v in HP.items()}
+    tapered, untapered, variance, log_t = build_shape_log_likelihood_components(pe, sel, model, config=TAPERED)(hp)
+    assert np.isfinite(float(untapered)) and np.isfinite(float(variance))
+    # the v2 sharp cut: -inf above sigma^2 = 1 (this small fixture sits far above), unchanged below
+    if float(variance) > 1.0:
+        assert np.isneginf(float(tapered)) and np.isneginf(float(log_t))
+    else:
+        assert float(tapered) == float(untapered)
 
 
 def test_support_check_refuses_mismatched_datasets(pair, model):
@@ -280,11 +286,14 @@ def test_data_variant_reweighting_uses_the_sampled_taper(pair, model):
         run_index=np.zeros(X.shape[0], dtype=int), n_runs=1, source="test",
     )
     variant = make_data_variant("drop1", pe, sel, drop_events=(pe.event_names[-1],))
-    auto = reweight_to_variant(sample, pe, sel, model, variant, hbi_config=TAPERED, verify_identity=False)
-    explicit = reweight_to_variant(sample, pe, sel, model, variant, hbi_config=TAPERED, verify_identity=False,
-                                   log_taper=TAPERED.variance_taper.log_taper)
+    # the small fixture has sigma^2 ~ 12-27: a sharp cut above it keeps the points supported
+    wide = HBIConfig(selection_chunk_size=None, variance_taper=v2_variance_taper(100.0))
+    auto = reweight_to_variant(sample, pe, sel, model, variant, hbi_config=wide, verify_identity=False)
+    explicit = reweight_to_variant(sample, pe, sel, model, variant, hbi_config=wide, verify_identity=False,
+                                   log_taper=wide.variance_taper.log_taper)
     untapered = reweight_to_variant(sample, pe, sel, model, variant, hbi_config=UNTAPERED, verify_identity=False)
-    assert auto["taper_applied"] and auto["taper"] == TAPERED.variance_taper.to_dict()
+    assert auto["taper_applied"] and auto["taper"] == wide.variance_taper.to_dict()
+    assert auto["taper"]["kind"] == "sharp"
     assert auto["delta_log_evidence"] == pytest.approx(explicit["delta_log_evidence"], abs=1e-12)
     assert untapered["taper_applied"] is False and untapered["taper"] is None
 
@@ -401,12 +410,12 @@ def test_taper2_rows_from_rerun_evaluations(tmp_path):
     graph = enumerate_v2_depth1()
     edge = next(e for e in graph.edges if e.mutation_id == V2_ATOM_IDS["C2"])
 
-    def write(model_hash, ln_z, threshold, passed=True):
+    def write(model_hash, ln_z, threshold, passed=True, kind="sharp"):
         path = tmp_path / str(threshold) / model_hash / "evaluation.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"model_hash": model_hash, "fidelity": "F3", "diagnostics": {
             "passed": passed, "evidence": {"log_evidence_mean": ln_z, "conservative_error": 0.2},
-            "taper": {"pooled": {"taper": {"kind": "smooth", "threshold": threshold}}}}}))
+            "taper": {"pooled": {"taper": {"kind": kind, "threshold": threshold}}}}}))
 
     write(edge.parent_hash, 10.0, 2.0)
     write(edge.child_hash, 14.5, 2.0)
@@ -418,6 +427,17 @@ def test_taper2_rows_from_rerun_evaluations(tmp_path):
     write(edge.parent_hash, 10.0, 1.0)
     with pytest.raises(AnalysisInputError, match="taper-at-2"):
         taper2_rows_from_evaluations(graph, [tmp_path / "1.0"])
+    # a rerun under another taper form than the primary sharp cut is refused
+    smooth_dir = tmp_path / "smooth"
+    for model_hash, ln_z in ((edge.parent_hash, 10.0), (edge.child_hash, 14.5)):
+        path = smooth_dir / model_hash / "evaluation.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"model_hash": model_hash, "fidelity": "F3", "diagnostics": {
+            "passed": True, "evidence": {"log_evidence_mean": ln_z, "conservative_error": 0.2},
+            "taper": {"pooled": {"taper": {"kind": "smooth", "threshold": 2.0}}}}}))
+    with pytest.raises(AnalysisInputError, match="primary 'sharp'"):
+        taper2_rows_from_evaluations(graph, [smooth_dir])
+    assert len(taper2_rows_from_evaluations(graph, [smooth_dir], kind=None)) == 1
 
 
 def test_draw_support_edge_test_detects_a_draw_cliff_inside_the_support():
@@ -441,7 +461,7 @@ def test_draw_support_edge_test_detects_a_draw_cliff_inside_the_support():
 
 def test_declared_draw_support_must_contain_the_population_support(pair, model):
     pe, sel = pair
-    ok = v2_data_support_report(model, pe, sel, draw_support={"m1_source_max": 1000.0, "q_min": 0.01,
+    ok = v2_data_support_report(model, pe, sel, draw_support={"m1_source_max": 1000.0, "q_min": 0.001,
                                                              "z_max": 1.9, "m1_source_min": 1.0})
     assert ok["pass"] and ok["reported"]["draw_support_declaration"] == "declared"
     bad = v2_data_support_report(model, pe, sel, draw_support={"m1_source_max": 200.0})
@@ -450,6 +470,8 @@ def test_declared_draw_support_must_contain_the_population_support(pair, model):
     # a finite-draw maximum just below zmax (O3: 1.896) is within the 1% tolerance
     assert v2_data_support_report(model, pe, sel, draw_support={"z_max": 1.896})["pass"]
     assert not v2_data_support_report(model, pe, sel, draw_support={"z_max": 1.66})["pass"]
+    # injections drawn above the population floor q_floor = 0.001 do not cover it
+    assert not v2_data_support_report(model, pe, sel, draw_support={"q_min": 0.01})["pass"]
 
 
 def test_write_v2_draft_configs_refuses_frozen(tmp_path):

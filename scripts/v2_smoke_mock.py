@@ -11,7 +11,7 @@ job is to exercise enumeration -> tapered dynesty -> claim table on CPU.
 
 DAG (mock-data-dag): one draw distribution ``p_draw`` in the source frame
 (m1 log-uniform on [mmin, mmax] = [3, 300], q uniform on [q_floor, 1] =
-[0.05, 1], z ~ dVc/dz/(1+z) on [0, zmax = 1.9], chi_eff uniform on [-1, 1];
+[0.001, 1], z ~ dVc/dz/(1+z) on [0, zmax = 1.9], chi_eff uniform on [-1, 1];
 the bounds are read from the v2 model support and asserted to cover it) is
 mapped to the density basis
 (m1_detector, q, luminosity_distance, chi_eff) with its exact Jacobian. The

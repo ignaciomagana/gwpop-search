@@ -1335,10 +1335,29 @@ def run_f0_sanity(
 
     NaN/``+inf`` in any likelihood evaluation raises
     :class:`gwpop_search.hbi.PopulationDensityError` (never a gate value).
+
+    With a variance taper (``hbi_config.variance_taper``) the support gate
+    (``f0.finite_fraction``) is the population support, i.e. the finite
+    fraction of the *untapered* likelihood: a sharp cut (the v2 default) sets
+    ``ln L = -inf`` wherever ``sigma^2 > threshold``, which at prior draws (and
+    on the thinned parity pair, whose variance is inflated by thinning) can be
+    almost everywhere without any support problem. The fraction of draws the
+    taper keeps is reported (``support.taper``). Parity then compares the
+    untapered value, ``sigma^2`` and -- where finite -- the tapered value.
     """
     names, transform = parameterization.prior_transform(priors)
     rng = np.random.default_rng([int(seed), _F0_STREAM])
     theta = np.asarray(transform(rng.random((config.prior_draws, len(names)))), dtype=float)
+
+    tapered = getattr(hbi_config, "variance_taper", None) is not None
+
+    def _evaluate(likelihood, rows):
+        """(tapered ln L, untapered ln L, sigma^2 or None) per row."""
+        if not tapered:
+            out = likelihood(rows)
+            return out, out, None
+        comps = likelihood.components(rows)
+        return comps["log_likelihood"], comps["log_likelihood_untapered"], comps["variance"]
 
     # 1. The production batched likelihood on the full data.
     start = time.perf_counter()
@@ -1350,18 +1369,42 @@ def run_f0_sanity(
         hbi_config=hbi_config,
         batch_size=config.batch_size,
     )
-    first = loglike(theta[: config.batch_size])
+    first = _evaluate(loglike, theta[: config.batch_size])
     compile_seconds = time.perf_counter() - start
     start = time.perf_counter()
+    empty = np.empty(0, dtype=float)
     rest = (
-        loglike(theta[config.batch_size :])
+        _evaluate(loglike, theta[config.batch_size :])
         if theta.shape[0] > config.batch_size
-        else np.empty(0, dtype=float)
+        else (empty, empty, None if not tapered else empty)
     )
     evaluation_seconds = time.perf_counter() - start
-    values = np.concatenate([first, rest])
+    values = np.concatenate([first[0], rest[0]])  # the likelihood that is sampled
+    untapered_values = np.concatenate([first[1], rest[1]])
     finite = np.isfinite(values)
-    finite_fraction = float(np.mean(finite))
+    # support gate: the population support (untapered ln L) -- see the docstring
+    supported = np.isfinite(untapered_values)
+    finite_fraction = float(np.mean(supported))
+    taper_support = None
+    if tapered:
+        variance_values = np.concatenate([first[2], rest[2]])
+        taper = hbi_config.variance_taper
+        taper_support = {
+            "taper": taper.to_dict(),
+            "n_finite_tapered": int(np.count_nonzero(finite)),
+            "finite_fraction_tapered": float(np.mean(finite)),
+            "n_supported_above_threshold": int(
+                np.count_nonzero(supported & ~(variance_values <= taper.threshold))
+            ),
+            "supported_variance_quantiles": (
+                {
+                    f"q{q:g}": float(np.quantile(variance_values[supported & np.isfinite(variance_values)], q))
+                    for q in (0.05, 0.5, 0.95)
+                }
+                if np.any(supported & np.isfinite(variance_values))
+                else None
+            ),
+        }
     stats = loglike.stats()
 
     # 2. Jitted importance diagnostics on the same draws: exposure support.
@@ -1409,17 +1452,42 @@ def run_f0_sanity(
         hbi_config=hbi_config,
         batch_size=config.batch_size,
     )
-    thin_values = thin_loglike(theta)
+    thin_values, thin_untapered, thin_variance = _evaluate(thin_loglike, theta)
     points = []
-    for index in np.flatnonzero(np.isfinite(thin_values))[: config.parity_points]:
+    for index in np.flatnonzero(np.isfinite(thin_untapered))[: config.parity_points]:
         hyperparameters = {name: float(theta[index, k]) for k, name in enumerate(names)}
-        reference = float(
-            shape_log_likelihood(
-                pe_thin, sel_thin, population_model, hyperparameters, config=hbi_config
-            ).log_likelihood
+        result = shape_log_likelihood(
+            pe_thin, sel_thin, population_model, hyperparameters, config=hbi_config
         )
-        jax_value = float(thin_values[index])
+        if not tapered:
+            reference = float(result.log_likelihood)
+            jax_value = float(thin_values[index])
+            difference = abs(reference - jax_value)
+            points.append(
+                {
+                    "draw": int(index),
+                    "hyperparameters": hyperparameters,
+                    "jax": jax_value,
+                    "numpy": reference,
+                    "abs_diff": difference,
+                    "rel_diff": difference / max(1.0, abs(reference)),
+                }
+            )
+            continue
+        reference = float(result.log_likelihood_untapered)
+        jax_value = float(thin_untapered[index])
         difference = abs(reference - jax_value)
+        rel = difference / max(1.0, abs(reference))
+        ref_var, jax_var = float(result.taper_variance), float(thin_variance[index])
+        if np.isfinite(ref_var) and np.isfinite(jax_var):
+            var_rel = abs(ref_var - jax_var) / max(1.0, abs(ref_var))
+        else:
+            var_rel = 0.0 if ref_var == jax_var else float("inf")
+        ref_tapered, jax_tapered = float(result.log_likelihood), float(thin_values[index])
+        if np.isfinite(ref_tapered) and np.isfinite(jax_tapered):
+            tapered_rel = abs(ref_tapered - jax_tapered) / max(1.0, abs(ref_tapered))
+        else:  # the taper must cut the same points in both backends
+            tapered_rel = 0.0 if np.isfinite(ref_tapered) == np.isfinite(jax_tapered) else float("inf")
         points.append(
             {
                 "draw": int(index),
@@ -1427,7 +1495,14 @@ def run_f0_sanity(
                 "jax": jax_value,
                 "numpy": reference,
                 "abs_diff": difference,
-                "rel_diff": difference / max(1.0, abs(reference)),
+                "untapered_rel_diff": rel,
+                "jax_variance": jax_var,
+                "numpy_variance": ref_var,
+                "variance_rel_diff": var_rel,
+                "jax_tapered": jax_tapered,
+                "numpy_tapered": ref_tapered,
+                "tapered_rel_diff": tapered_rel,
+                "rel_diff": max(rel, var_rel, tapered_rel),
             }
         )
     parity_max = max((item["rel_diff"] for item in points), default=None)
@@ -1465,7 +1540,7 @@ def run_f0_sanity(
         "compile_and_first_batch_seconds": float(compile_seconds),
         "evaluation_seconds": float(evaluation_seconds),
         "evaluations_per_second": (
-            float(rest.size / evaluation_seconds) if evaluation_seconds > 0 and rest.size else None
+            float(rest[0].size / evaluation_seconds) if evaluation_seconds > 0 and rest[0].size else None
         ),
         "device_seconds": float(stats.get("device_seconds", 0.0)),
     }
@@ -1490,10 +1565,12 @@ def run_f0_sanity(
         "diagnostics_likelihood_max_rel_diff": consistency,
         "diagnostics_likelihood_same_support": same_support,
     }
+    if taper_support is not None:
+        support["taper"] = taper_support
     parity = {
         "pe_samples_per_event": int(config.parity_pe_samples_per_event),
         "selected_per_campaign": int(config.parity_selected_per_campaign),
-        "n_thinned_finite": int(np.count_nonzero(np.isfinite(thin_values))),
+        "n_thinned_finite": int(np.count_nonzero(np.isfinite(thin_untapered))),
         "n_points_compared": len(points),
         "points": points,
         "max_rel_diff": parity_max,

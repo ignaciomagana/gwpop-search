@@ -42,7 +42,7 @@ from gwpop_search.inference.dynesty_backend import (  # noqa: E402
     posterior_taper_mass,
 )
 
-SMOOTH = VarianceTaper()
+SMOOTH = VarianceTaper(kind="smooth")
 SHARP = VarianceTaper(kind="sharp")
 
 
@@ -54,25 +54,25 @@ SHARP = VarianceTaper(kind="sharp")
 def test_taper_configuration_validates_and_round_trips():
     assert SMOOTH.kind == "smooth" and SMOOTH.threshold == 1.0
     assert SMOOTH.exponent == CALLISTER_FARR_EXPONENT == 30.0
-    for taper in (SMOOTH, SHARP, VarianceTaper(threshold=2, exponent=10, region_suppression=0.05)):
+    for taper in (SMOOTH, SHARP, VarianceTaper(kind="smooth", threshold=2, exponent=10, region_suppression=0.05)):
         assert VarianceTaper.from_dict(json.loads(json.dumps(taper.to_dict()))) == taper
     with pytest.raises(ValueError, match="kind"):
         VarianceTaper(kind="soft")
     with pytest.raises(ValueError, match="positive"):
-        VarianceTaper(threshold=0.0)
+        VarianceTaper(kind="smooth", threshold=0.0)
     with pytest.raises(ValueError, match=">= 1"):
-        VarianceTaper(exponent=0.5)
+        VarianceTaper(kind="smooth", exponent=0.5)
     with pytest.raises(ValueError, match="region_suppression"):
         VarianceTaper(region_suppression=1.0)
     with pytest.raises(TypeError):
-        VarianceTaper(threshold=True)
+        VarianceTaper(kind="smooth", threshold=True)
     with pytest.raises(ValueError, match="unknown"):
         VarianceTaper.from_dict({"kind": "smooth", "cut": 1})
 
 
 @pytest.mark.parametrize("threshold", [1.0, 2.0])
 def test_smooth_taper_limits(threshold):
-    taper = VarianceTaper(threshold=threshold)
+    taper = VarianceTaper(kind="smooth", threshold=threshold)
     p = taper.exponent
     # Far below the threshold: no suppression; ln T ~ -x^p.
     assert taper.log_taper(0.0) == 0.0
@@ -97,21 +97,64 @@ def test_smooth_taper_limits(threshold):
     np.testing.assert_allclose(taper.region_onset, threshold * (0.01 / 0.99) ** (1 / 30), rtol=1e-14)
 
 
+def test_default_taper_is_the_lvk_sharp_cut():
+    """The default is gwpopulation's maximum_uncertainty cut (hyperpe.py L185-189 at
+    b3a34f9): ln L - inf * (threshold < sigma^2), equality kept (TAPER_FORM.md)."""
+    default = VarianceTaper()
+    assert default.kind == "sharp" and default.threshold == 1.0
+    assert default == SHARP
+    v = np.array([0.0, 0.5, 1.0 - 1e-12, 1.0, 1.0 + 1e-12, 4.0, np.inf, np.nan, -1.0])
+    expected = [0.0, 0.0, 0.0, 0.0, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf]
+    np.testing.assert_array_equal(default.log_taper(v), expected)
+    np.testing.assert_array_equal(np.asarray(log_taper_jax(jnp.asarray(v), default)), expected)
+
+    # gwpopulation's expression, verbatim (its nan_to_num turns -inf into -1.8e308, the same
+    # zero likelihood; NaN variance aside: gwpopulation keeps it, we cut it).
+    def gwpopulation_cut(ln_l, variance, maximum_uncertainty=1.0):
+        with np.errstate(invalid="ignore"):
+            return np.nan_to_num(ln_l - np.nan_to_num(np.inf * (maximum_uncertainty < variance), nan=0))
+
+    for value in v[:7]:
+        ours, theirs = float(default.log_taper(value)), float(gwpopulation_cut(0.0, value))
+        assert (ours == theirs == 0.0) or (np.isneginf(ours) and theirs <= -1e308), (value, ours, theirs)
+    assert gwpopulation_cut(0.0, 4.0, 4.0) == VarianceTaper(threshold=4.0).log_taper(4.0) == 0.0
+
+
+def test_sharp_region_band_and_serialization():
+    assert SHARP.sharp_region_band == 0.05
+    np.testing.assert_allclose(SHARP.region_onset, 0.95, rtol=1e-15)
+    np.testing.assert_array_equal(SHARP.in_region([0.9, 0.95, 0.951, 1.0, 1.5, np.nan]),
+                                  [False, False, True, True, True, True])
+    two = VarianceTaper(threshold=2.0, sharp_region_band=0.1)
+    np.testing.assert_allclose(two.region_onset, 1.8)
+    assert "sharp" in SHARP.region_definition() and "0.95" in SHARP.region_definition()
+    # Sharp serializes its band; smooth does not (smooth identities unchanged) and ignores it.
+    assert SHARP.to_dict()["sharp_region_band"] == 0.05
+    assert "sharp_region_band" not in SMOOTH.to_dict()
+    assert VarianceTaper(kind="smooth", sharp_region_band=0.2) == SMOOTH
+    for taper in (SHARP, two, SMOOTH):
+        assert VarianceTaper.from_dict(json.loads(json.dumps(taper.to_dict()))) == taper
+    with pytest.raises(ValueError, match="sharp_region_band"):
+        VarianceTaper(sharp_region_band=0.0)
+    with pytest.raises(ValueError, match="sharp_region_band"):
+        VarianceTaper(sharp_region_band=1.0)
+
+
 def test_smooth_taper_approaches_the_sharp_cut():
     v = np.array([0.0, 0.2, 0.9, 0.99, 1.01, 1.1, 3.0, np.inf])
     sharp = SHARP.log_taper(v)
     np.testing.assert_array_equal(sharp, [0, 0, 0, 0, -np.inf, -np.inf, -np.inf, -np.inf])
-    steep = VarianceTaper(exponent=1e5).log_taper(v)
+    steep = VarianceTaper(kind="smooth", exponent=1e5).log_taper(v)
     np.testing.assert_allclose(steep[:4], 0.0, atol=1e-200)
     assert np.all(steep[4:] < -900)
     # T at the threshold stays 1/2 for every steepness (the sharp cut keeps T = 1 there).
     assert SHARP.log_taper(1.0) == 0.0
-    np.testing.assert_allclose(VarianceTaper(exponent=1e5).log_taper(1.0), -math.log(2))
+    np.testing.assert_allclose(VarianceTaper(kind="smooth", exponent=1e5).log_taper(1.0), -math.log(2))
 
 
 def test_taper_is_continuous_monotone_and_numpy_matches_jax():
     v = np.concatenate([[0.0], np.geomspace(1e-6, 1e3, 20001)])
-    for taper in (SMOOTH, VarianceTaper(threshold=2.0), VarianceTaper(exponent=4.0)):
+    for taper in (SMOOTH, VarianceTaper(kind="smooth", threshold=2.0), VarianceTaper(kind="smooth", exponent=4.0)):
         ln_np = log_taper_numpy(v, taper)
         ln_jax = np.asarray(log_taper_jax(jnp.asarray(v), taper))
         np.testing.assert_allclose(ln_jax, ln_np, rtol=1e-14, atol=1e-300)
@@ -128,7 +171,7 @@ def test_taper_is_continuous_monotone_and_numpy_matches_jax():
 
 
 def test_taper_is_differentiable_with_the_analytic_gradient():
-    for taper in (SMOOTH, VarianceTaper(threshold=2.0)):
+    for taper in (SMOOTH, VarianceTaper(kind="smooth", threshold=2.0)):
         g = jax.grad(lambda v: log_taper_jax(v, taper))
         h = jax.grad(g)
         p, c = taper.exponent, taper.threshold
@@ -161,7 +204,13 @@ def test_taper_region_summary_with_known_weights():
     assert out["variance_quantiles"]["q0.5"] == 1.5
     assert out["variance_quantiles"]["max"] == 4.0
     sharp = taper_region_summary(v, w, SHARP)
+    # sharp band 0.95: 1.5 and 4.0 are inside (weights 3 + 3 of 10).
     np.testing.assert_allclose(sharp["posterior_mass_in_taper_region"], 0.6)
+    near_wall = taper_region_summary([0.5, 0.94, 0.96, 0.99, 1.0], [1, 1, 1, 1, 1], SHARP)
+    np.testing.assert_allclose(near_wall["posterior_mass_in_taper_region"], 0.6)
+    assert near_wall["posterior_mass_above_threshold"] == 0.0
+    assert near_wall["posterior_mean_taper"] == 1.0
+    assert near_wall["region_onset_variance"] == pytest.approx(0.95)
     with pytest.raises(ValueError):
         taper_region_summary(v, np.zeros(5), SMOOTH)
     with pytest.raises(ValueError):
@@ -178,7 +227,7 @@ def test_hbi_config_carries_the_taper_only_when_configured():
     assert "variance_taper" not in plain.to_dict()
     assert HBIConfig.from_dict(plain.to_dict()) == plain
     tapered = HBIConfig(variance_taper={"kind": "smooth", "threshold": 2.0})
-    assert tapered.variance_taper == VarianceTaper(threshold=2.0)
+    assert tapered.variance_taper == VarianceTaper(kind="smooth", threshold=2.0)
     payload = tapered.to_dict()
     assert payload["variance_taper"]["threshold"] == 2.0
     assert HBIConfig.from_dict(json.loads(json.dumps(payload))) == tapered
@@ -234,7 +283,7 @@ def estimator_ready_selection():
 def test_likelihood_variance_matches_the_importance_diagnostics(selection_kind, chunk):
     pe = make_toy_posterior_catalog()
     sel = make_toy_selection_catalog() if selection_kind == "raw_draw" else estimator_ready_selection()
-    taper = VarianceTaper(threshold=0.6)
+    taper = VarianceTaper(kind="smooth", threshold=0.6)
     cfg = HBIConfig(selection_chunk_size=chunk, variance_taper=taper)
     loglike = build_batched_log_likelihood(pe, sel, density_jax, NAMES, hbi_config=cfg, batch_size=3)
     comps = loglike.components(POINTS)
@@ -319,7 +368,7 @@ def test_untapered_likelihood_is_unchanged_by_the_variance_pass():
 def test_tapered_likelihood_is_differentiable():
     pe = make_toy_posterior_catalog()
     sel = make_toy_selection_catalog()
-    cfg = HBIConfig(variance_taper=VarianceTaper(threshold=0.5))
+    cfg = HBIConfig(variance_taper=VarianceTaper(kind="smooth", threshold=0.5))
     components = build_shape_log_likelihood_components(pe, sel, density_jax, config=cfg, jit=False)
 
     def f(ab):
@@ -358,7 +407,7 @@ def test_analysis_evaluators_refuse_a_tapered_configuration():
 
 A_RANGE = (-6.0, 6.0)
 B_RANGE = (-4.0, 4.0)
-TOY_TAPER = VarianceTaper(threshold=0.8)
+TOY_TAPER = VarianceTaper(kind="smooth", threshold=0.8)
 
 
 def density_ab_jax(samples, hp):
@@ -381,16 +430,19 @@ def _grid_log_evidence(components, n_a=241, n_b=161):
     return out, values
 
 
-def test_evidence_with_the_taper_is_the_integral_of_the_tapered_likelihood():
+@pytest.mark.parametrize(
+    "toy_taper", [TOY_TAPER, VarianceTaper(kind="sharp", threshold=0.8)], ids=["smooth", "sharp"]
+)
+def test_evidence_with_the_taper_is_the_integral_of_the_tapered_likelihood(toy_taper):
     pe = make_toy_posterior_catalog()
     sel = make_toy_selection_catalog()
-    cfg = HBIConfig(variance_taper=TOY_TAPER)
+    cfg = HBIConfig(variance_taper=toy_taper)
     loglike = build_batched_log_likelihood(
         pe, sel, density_ab_jax, ("a", "b"), hbi_config=cfg, batch_size=16
     )
     truth, grid = _grid_log_evidence(loglike.components)
     # The taper matters on this problem: a large part of the prior is suppressed.
-    in_region = TOY_TAPER.in_region(grid["variance"])
+    in_region = toy_taper.in_region(grid["variance"])
     assert 0.2 < np.mean(in_region) < 0.95
     assert truth["log_likelihood_untapered"] - truth["log_likelihood"] > 0.9
 
@@ -421,7 +473,7 @@ def test_evidence_with_the_taper_is_the_integral_of_the_tapered_likelihood():
 def test_posterior_taper_mass_on_a_tapered_run():
     pe = make_toy_posterior_catalog()
     sel = make_toy_selection_catalog()
-    cfg = HBIConfig(variance_taper=VarianceTaper(threshold=0.6))
+    cfg = HBIConfig(variance_taper=VarianceTaper(kind="smooth", threshold=0.6))
     names = ("a", "b")
     loglike = build_batched_log_likelihood(pe, sel, density_ab_jax, names, hbi_config=cfg, batch_size=16)
     _, transform = prior_transform_for(
@@ -461,7 +513,7 @@ def test_posterior_taper_mass_on_a_tapered_run():
     # Direct check of one run.
     comps = loglike.components(runs[0].samples)
     w = runs[0].weights
-    expected = float(np.sum(w[VarianceTaper(threshold=0.6).in_region(comps["variance"])]))
+    expected = float(np.sum(w[VarianceTaper(kind="smooth", threshold=0.6).in_region(comps["variance"])]))
     np.testing.assert_allclose(report["runs"][0]["posterior_mass_in_taper_region"], expected)
     pooled = 0.5 * (
         report["runs"][0]["posterior_mass_in_taper_region"]
