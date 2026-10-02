@@ -662,6 +662,21 @@ def _posthoc_posterior_mass_below(args) -> None:
     }))
 
 
+def _read_posteriors(items) -> dict | None:
+    """``HASH=path/pooled_posterior.npz`` items -> {hash: {parameter_names, samples}}."""
+    import numpy as np
+
+    out = {}
+    for item in items or []:
+        model_hash, sep, path = str(item).partition("=")
+        if not sep:
+            raise ValueError(f"--posterior expects HASH=PATH; got {item!r}")
+        with np.load(path, allow_pickle=False) as z:
+            out[model_hash] = {"parameter_names": [str(n) for n in z["parameter_names"]],
+                               "samples": np.asarray(z["samples"], dtype=float)}
+    return out or None
+
+
 def _v2_claim_table(args) -> None:
     from ._common import read_json
     from .claims_v2 import build_claim_table, render_claims_markdown
@@ -732,7 +747,7 @@ def _v2_claim_table(args) -> None:
     table = build_claim_table(
         report, sddr=sddr, prior_sensitivity=prior, d3_reruns=reruns, taper2=taper2, alt_roots=alt,
         ppc=ppc, loo=loo, taper_mass=taper_mass, mass_below=mass_below or None, graph=graph,
-        n_atoms_tried=args.n_atoms_tried, atom_labels=labels,
+        n_atoms_tried=args.n_atoms_tried, atom_labels=labels, posteriors=_read_posteriors(args.posterior),
     )
     _write(args.output, table)
     markdown = render_claims_markdown(table)
@@ -944,6 +959,9 @@ def register_analysis_subcommands(subparsers) -> None:
     claims.add_argument("--atom-labels",
                         help="JSON {mutation_id: plan atom label} (default: the v2 graph's metadata.atoms)")
     claims.add_argument("--n-atoms-tried", type=int, help="override the trials count (default: evaluated edges)")
+    claims.add_argument("--posterior", action="append",
+                        help="HASH=pooled_posterior.npz of a C1 / C2 child: values of its pre-declared reported "
+                             "quantities (sigma(q = 0.7) headline; slope and sigma(1) secondary); repeatable")
     claims.add_argument("--output", required=True)
     claims.add_argument("--markdown")
     claims.set_defaults(func=_v2_claim_table)

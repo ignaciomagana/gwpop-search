@@ -20,6 +20,13 @@ and of every model built on them differ from the graphs written by fd73da8
 (the pilot code); R0 and the other 16 depth-1 nodes are unchanged
 (``metadata.operator_decisions.hash_changes``). The pilot (b) C4 runs used the
 z = 0 pivot (a reparameterisation; the pilot tests the machinery).
+
+Since the operator decisions of 2026-10-02 the chi_eff - q atoms C1 / C2 pivot
+at q = 0.7, so their hashes (and those of every model built on them) differ
+from afd5f53 and earlier (``metadata.operator_decisions.later_decisions
+["2026-10-02"].hash_changes``); the C1 / C2 node metadata carry the pre-declared
+reported quantities (C2: sigma(q = 0.7) headline; slope and sigma(1) secondary,
+with the PE-resolution limitation).
 """
 
 from __future__ import annotations

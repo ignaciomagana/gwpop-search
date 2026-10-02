@@ -6,6 +6,7 @@ to the injections, and PE samples that are exact posterior draws of a noisy
 datum under a flat PE prior (``log_ref_density = 0``).
 """
 
+import json
 import math
 
 import numpy as np
@@ -18,6 +19,8 @@ import jax.numpy as jnp  # noqa: E402
 
 from gwpop_search.analysis._common import AnalysisInputError, posterior_from_equal_weight_draws  # noqa: E402
 from gwpop_search.analysis.ppc import (  # noqa: E402
+    BINDING_STATISTICS,
+    PPC_FORMAT,
     PREDECLARED_STATISTICS,
     PPCConfig,
     ks_uniform_distance,
@@ -282,7 +285,9 @@ def test_ks_p_values_are_one_sided_and_correlations_two_sided():
     assert one["p_value"] == pytest.approx(np.mean(t_pred >= 0.5), abs=1e-12)
     assert one["mc_standard_error"] == pytest.approx(math.sqrt(one["p_value"] * (1 - one["p_value"]) / 2000))
     assert ppc_draws_resolve_alpha(1000) and not ppc_draws_resolve_alpha(999)
-    assert family_wise_false_fail_bound() == pytest.approx(1 - 0.99**18)
+    # D6 is decided by the six binding statistics (operator decision 2026-10-02): ~6%
+    assert family_wise_false_fail_bound() == pytest.approx(1 - 0.99**6)
+    assert family_wise_false_fail_bound(n_statistics=18) == pytest.approx(1 - 0.99**18)
 
 
 def test_source_frame_is_derived_at_the_population_cosmology_even_if_stored():
@@ -434,7 +439,7 @@ def test_replicate_family_wise_rate_keeps_the_correlations():
     np.testing.assert_allclose(p, 1.0)
 
 
-def test_constant_width_model_fails_a_width_statistic_and_the_true_model_passes_all(width_mock):
+def test_constant_width_model_is_flagged_by_a_width_statistic_which_is_not_binding(width_mock):
     pe, sel, events = width_mock
     names = ("alpha", "mu_chi", "log_sigma_chi", "log_sigma_q_slope")
     sample = _near(np.random.default_rng(5), WIDTH_TRUTH, names)
@@ -452,10 +457,39 @@ def test_constant_width_model_fails_a_width_statistic_and_the_true_model_passes_
         _near(np.random.default_rng(6), centre, names0), pe, sel, MockWidthPopulation(q_dependent_width=False),
         config=PPCConfig(n_draws=1000, seed=8, batch_size=50), verify_identity=False,
     ).summary()
-    failed = set(bad["failed_statistics"])
-    assert failed & set(WIDTH_STATISTICS), {k: v["p_value"] for k, v in bad["statistics"].items()}
-    assert "spearman_absdev_chi_eff_q" in failed
-    # the original six statistics do not see the width trend (the pilot (b) finding)
-    assert not failed & {"ks_m1", "ks_q", "ks_z", "spearman_chi_eff_q", "spearman_chi_eff_z"}
-    fw = bad["multiplicity"]["family_wise_false_fail_empirical"]
-    assert 0.0 <= fw["rate"] <= 0.3 and set(fw["per_family"]) == {"marginal", "correlation", "width"}
+    # the width statistics see the misfit and are reported below alpha ...
+    flagged = set(bad["reported_statistics_below_alpha"])
+    assert flagged & set(WIDTH_STATISTICS), {k: v["p_value"] for k, v in bad["statistics"].items()}
+    assert "spearman_absdev_chi_eff_q" in flagged
+    assert bad["statistics"]["spearman_absdev_chi_eff_q"]["below_alpha"]
+    assert not bad["statistics"]["spearman_absdev_chi_eff_q"]["binding"]
+    assert not bad["statistics"]["spearman_absdev_chi_eff_q"]["failed"]
+    # ... but they are reported only (operator decision 2026-10-02): D6 is decided by the original
+    # six, which do not see the width trend (the pilot (b) finding)
+    assert not set(bad["failed_statistics"]) & set(WIDTH_STATISTICS)
+    assert bad["failed_statistics"] == [] and bad["status"] != "fail"
+    assert bad["binding_statistics"] == list(BINDING_STATISTICS) and len(BINDING_STATISTICS) == 6
+    assert bad["reported_statistics"] == list(WIDTH_STATISTICS)
+    mult = bad["multiplicity"]
+    assert mult["n_statistics"] == 6 and mult["n_statistics_reported_only"] == 12
+    assert mult["family_wise_false_fail_upper_bound"] == pytest.approx(1 - 0.99**6)
+    fw = mult["family_wise_false_fail_empirical"]
+    assert 0.0 <= fw["rate"] <= 0.2 and set(fw["per_family"]) == {"marginal", "correlation"}
+    assert set(mult["family_wise_false_fail_empirical_all_statistics"]["per_family"]) == {
+        "marginal", "correlation", "width"}
+    # the D6 criterion on the payload: reported width p-values, binding status from the six
+    payload = {"format_version": PPC_FORMAT, "config": {"alpha": 0.01, "n_draws": 1000},
+               "identity_verified": True, "diagnostics": {"reliable": True, "alpha_resolvable": True},
+               **bad}
+    crit = ppc_criterion(payload)
+    assert crit["status"] == "pass", crit
+    assert set(crit["p_values"]) == set(BINDING_STATISTICS)
+    assert "spearman_absdev_chi_eff_q" in crit["reported_statistics_below_alpha"]
+    # a format-1.2 payload (width statistics then binding) is re-decided on the six
+    old = {**payload, "format_version": "gwpop-search-ppc-1.2"}
+    assert ppc_criterion(old)["status"] == "pass"
+    assert ppc_criterion(old)["family_wise_false_fail_empirical"] is None
+    # a binding statistic below alpha fails D6
+    worse = json.loads(json.dumps(payload))
+    worse["statistics"]["ks_q"]["p_value"] = 0.001
+    assert ppc_criterion(worse)["status"] == "fail" and ppc_criterion(worse)["failed_statistics"] == ["ks_q"]

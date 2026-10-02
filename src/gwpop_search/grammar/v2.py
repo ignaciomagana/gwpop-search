@@ -25,6 +25,18 @@ C4 runs at fd73da8 used the z = 0 pivot, which is a reparameterisation of the
 same densities (the intercept prior refers to a different redshift); the pilot
 tests the machinery and is not rerun for this.
 
+Operator decisions of 2026-10-02 (:data:`V2_OPERATOR_DECISIONS`,
+``later_decisions``), after the pilot (b) width(q) closure diagnosis
+(``staging/v2/b3_investigation/DIAGNOSIS.md``): the chi_eff - q atoms C1 and C2
+pivot at **q = 0.7** (:data:`.v2_structure.V2_Q_PIVOT`), not q = 1:
+mu(q) = mu_p + dmu (q - 0.7) and ln sigma(q) = ln sigma_p + dlnsigma (q - 0.7),
+with the intercept priors as before (mu_p ~ U(-1, 1), ln sigma_p ~ U(-5, 0),
+now at q = 0.7) and the slope priors unchanged (dmu|q ~ U(-2, 2), dlnsigma|q ~
+U(-12, 4)). The headline width quantity of C2 is sigma(q = 0.7); the slope and
+sigma(1) are secondary (:data:`V2_REPORTED_QUANTITIES`). The C1 and C2 hashes
+and those of every model built on them change (:data:`V2_SUPERSEDED_HASHES_Q_PIVOT`);
+the pilot (b) C1/C2 runs (code fd73da8) used the q = 1 pivot.
+
 Root R0 ("LVK Default BBH + Gaussian chi_eff"; GWTC-5 Table 5 priors):
 
 * mass ``bp2p``: broken power law + peaks near 10 and 35 Msun with the Planck
@@ -54,6 +66,7 @@ from .v2_structure import (
     KAPPA_M1_CONVENTION_OPTION,
     V2_MASS_FAMILIES,
     V2_CHIEFF_FAMILIES,
+    V2_Q_PIVOT,
     V2_Z_PIVOT,
     mass_components,
 )
@@ -179,7 +192,8 @@ def _mass(mid, family, description, *, removals=(), updates=None, added=(), drop
 
 def _corr(mid, option, prior, description, *, pivot=None):
     """A chi_eff correlation atom. ``pivot`` overwrites the pivot option(s) of
-    the covariate it switches on (C3/C4: ``z_pivot = 0.5``)."""
+    the covariate it switches on (C1/C2: ``q_pivot = 0.7``; C3/C4:
+    ``z_pivot = 0.5``)."""
     return MutationSpec(
         mid, "chieff", "set_option", "linear", option=option,
         requires_any_family=V2_CHIEFF_FAMILIES,
@@ -192,7 +206,8 @@ def _shape(mid, family, updates, description, *, family_options=None):
     return MutationSpec(
         mid, "chieff", "change_family", family, requires_family="linear_gaussian",
         prior_removals=_SHAPE_EXTRA, prior_updates=dict(updates),
-        # the pivots travel with the switches (C3/C4 set z_pivot = 0.5), so a
+        # the pivots travel with the switches (C1/C2 set q_pivot = 0.7, C3/C4
+        # z_pivot = 0.5), so a
         # shape atom and a correlation atom commute
         family_options=dict(family_options or {}),
         carry_options=_CORRELATION_SWITCHES + CHIEFF_PIVOT_OPTIONS,
@@ -214,9 +229,9 @@ V2_MUTATIONS: tuple[MutationSpec, ...] = (
     _mass("v2.mass.no_break", "pl2p", "M5: no break (single power law + 2 peaks)",
           removals=("alpha_1", "alpha_2", "m_break"), updates={"alpha": _u(-4.0, 12.0)}),
     _corr("v2.chieff.mean_q", "mean_q", _u(-2.0, 2.0),
-          "C1: chi_eff mean linear in q (intercept at q = 1)"),
+          "C1: chi_eff mean linear in q (intercept at q = 0.7)", pivot={"q_pivot": V2_Q_PIVOT}),
     _corr("v2.chieff.log_sigma_q", "log_sigma_q", _u(-12.0, 4.0),
-          "C2: chi_eff ln-width linear in q (intercept at q = 1)"),
+          "C2: chi_eff ln-width linear in q (intercept at q = 0.7)", pivot={"q_pivot": V2_Q_PIVOT}),
     _corr("v2.chieff.mean_z", "mean_z", _u(-1.0, 1.0),
           "C3: chi_eff mean linear in z (intercept at z = 0.5)", pivot={"z_pivot": V2_Z_PIVOT}),
     _corr("v2.chieff.log_sigma_z", "log_sigma_z", _u(-3.0, 5.0),
@@ -478,6 +493,25 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
                     "z_pivot = 0.5, so the C3 / C4 hashes change relative to fd73da8; models without a z slope "
                     "keep the inert family default and their hashes",
     },
+    "C1/C2.q_pivot": {
+        "prior": "0.7 (the intercepts chi_mu ~ U(-1, 1) and ln sigma ~ U(-5, 0) are the values at q = 0.7; "
+                 "slopes unchanged: delta_mu|q ~ U(-2, 2), delta ln sigma|q ~ U(-12, 4))",
+        "source": "operator decision 2026-10-02 (pilot (b) width(q) closure diagnosis, "
+                  "staging/v2/b3_investigation/DIAGNOSIS.md); it replaces the q = 1 intercept of the operator "
+                  "spec of 2026-09-30. The v1 width(q) follow-up already pivoted at q = 0.7",
+        "rationale": "the data constrain the chi_eff width near q ~ 0.6-0.7; at q -> 1 the width is a small "
+                     "difference of two large variances (chi_eff PE likelihood width ~0.16 against sigma(1) "
+                     "~0.05), so (ln sigma(1), slope) lie on a weakly identified ridge (posterior correlation "
+                     "0.8) whose narrow edge is set by the variance cut. A pivot only reparameterises the model, "
+                     "but the intercept prior now refers to q = 0.7, so the prior over densities and the "
+                     "evidence change slightly. At slope 0 the model is R0 for any pivot (the Savage-Dickey "
+                     "null is exact). The pilot (b) C1/C2 runs (code fd73da8) used the q = 1 pivot",
+        "status": "approved by operator 2026-10-02",
+        "decision": "pivot q = 0.7 (not q = 1) for C1 and C2. Written by the C1/C2 atoms as the chi_eff option "
+                    "q_pivot = 0.7, so the C1 / C2 hashes change; models without a q slope keep the inert "
+                    "family default q_pivot = 1.0 and their hashes. Headline width quantity sigma(q = 0.7); "
+                    "slope and sigma(1) secondary (V2_REPORTED_QUANTITIES)",
+    },
     "S4.form": {
         "prior": "location-scale Student-t truncated to [-1, 1], nu ~ LU(1, 100)",
         "source": "spec; LVK Student-t release not available on disk",
@@ -497,8 +531,53 @@ V2_SUPERSEDED_HASHES_FD73DA8: dict[str, str] = {
     "Z2": "f3e52d4a5ae853a1f257b486ff4071c5f6d755a456fa49a8df2b5af9a98292e8",
 }
 
+#: Hashes of C1 and C2 as they were before the q pivot moved to 0.7 (operator
+#: decision 2026-10-02): unchanged from fd73da8 (the pilot code) up to afd5f53.
+#: Tests pin that the current hashes differ from these, and the current ones.
+V2_SUPERSEDED_HASHES_Q_PIVOT: dict[str, str] = {
+    "C1": "95def131492f77abad49d5c694dccdbb79190f9209280d3d4653a98634590bb6",
+    "C2": "c17a030b2ca427447c2c66da7bd56f7521f5597a6ee6b8321bee8b071f7b3cc9",
+}
+#: The C1 / C2 hashes with the q = 0.7 pivot (pinned by tests).
+V2_Q_PIVOT_HASHES: dict[str, str] = {
+    "C1": "6108460313ccb3ddffb42923fbf3513c52df635742fff810a70551855d188950",
+    "C2": "c162760f91e5b245261279f665c9d2bd555dbda33e6d96f46c9c347865feca08",
+}
+
+#: Pre-declared reporting of the chi_eff - q atoms (operator decision
+#: 2026-10-02). Written into the graph metadata of the C1 / C2 nodes and into
+#: the claim table rows of their edges.
+WIDTH_Q_LIMITATION = ("sigma below ~0.05 at q -> 1 is unresolved at the current chi_eff PE resolution "
+                      "(median chi_eff PE likelihood width ~0.16; the narrow edge of the posterior in "
+                      "sigma(1) is set by the sigma^2_lnL <= 1 variance cut, not by the data)")
+V2_REPORTED_QUANTITIES: dict[str, dict[str, object]] = {
+    "C2": {
+        "headline": {"name": "sigma_chi_eff(q = 0.7)", "definition": "exp(chi_log_sigma)",
+                     "parameters": ["chi_log_sigma"]},
+        "secondary": [
+            {"name": "d ln sigma / dq", "definition": "chi_log_sigma_q_slope",
+             "parameters": ["chi_log_sigma_q_slope"]},
+            {"name": "sigma_chi_eff(q = 1)", "definition": "exp(chi_log_sigma + 0.3 chi_log_sigma_q_slope)",
+             "parameters": ["chi_log_sigma", "chi_log_sigma_q_slope"],
+             "report_as": "upper bound (one-sided 95%)"},
+        ],
+        "limitation": WIDTH_Q_LIMITATION,
+        "pivot": {"q_pivot": V2_Q_PIVOT},
+    },
+    "C1": {
+        "headline": {"name": "mu_chi_eff(q = 0.7)", "definition": "chi_mu", "parameters": ["chi_mu"]},
+        "secondary": [
+            {"name": "d mu / dq", "definition": "chi_mu_q_slope", "parameters": ["chi_mu_q_slope"]},
+            {"name": "mu_chi_eff(q = 1)", "definition": "chi_mu + 0.3 chi_mu_q_slope",
+             "parameters": ["chi_mu", "chi_mu_q_slope"]},
+        ],
+        "pivot": {"q_pivot": V2_Q_PIVOT},
+    },
+}
+
 #: The operator decisions of 2026-10-01 on the open freeze items (written into
-#: the graph metadata).
+#: the graph metadata), with the later decisions of 2026-10-02 under
+#: ``later_decisions``.
 V2_OPERATOR_DECISIONS: dict[str, object] = {
     "date": "2026-10-01",
     "source": "staging/v2/FREEZE_DECISIONS_PENDING.md items 1-10",
@@ -525,6 +604,41 @@ V2_OPERATOR_DECISIONS: dict[str, object] = {
                   "reparameterisation of the same family of densities (the intercept prior refers to z = 0 "
                   "instead of z = 0.5). The pilot tests the machinery; it is not rerun. The pilot ran no Z2 "
                   "or A2 model",
+    "later_decisions": {
+        "2026-10-02": {
+            "source": "operator decisions 2026-10-02 after the pilot (b) width(q) closure diagnosis "
+                      "(staging/v2/b3_investigation/DIAGNOSIS.md); staging/v2/FREEZE_DECISIONS_PENDING.md",
+            "decisions": {
+                "C1/C2.q_pivot": "q = 0.7 instead of q = 1: mu(q) = mu_p + dmu (q - 0.7), ln sigma(q) = "
+                                 "ln sigma_p + dlnsigma (q - 0.7); intercept priors as before (mu_p ~ U(-1, 1), "
+                                 "ln sigma_p ~ U(-5, 0)), now at q = 0.7; slope priors unchanged (dmu|q ~ "
+                                 "U(-2, 2), dlnsigma|q ~ U(-12, 4)); slope 0 is R0 bit for bit",
+                "C2.reporting": "headline width quantity sigma(q = 0.7); the slope and sigma(1) are "
+                                "secondary, with the limitation: " + WIDTH_Q_LIMITATION,
+                "D6.width_statistics": "the twelve width-sensitive PPC statistics are reported only (not "
+                                       "binding); D6 is decided by the original six statistics (family-wise "
+                                       "false-fail rate about 6% under independence)",
+                "mock_gate_b0_i": "the delta-PE slope-only representativeness gate is replaced by a joint "
+                                  "noisy-PE ensemble check (validation.v2_mock.noisy_pe_ensemble_gate)",
+                "mock_pe_realism": "the mock generator gives the PE q-dependent (ln m1_det, q, chi_eff) "
+                                   "correlations and real-like likelihood widths (generator 2.0)",
+                "injection_set": "real data hit the sigma^2 <= 1 cut at sigma(1) = 0.05; a larger "
+                                 "chi_eff-reference injection set is needed before any width(q) magnitude "
+                                 "claim -- DECIDE AT FREEZE",
+                "gpu_confirmation_runs": "declined by the operator (diagnosis accepted on CPU evidence)",
+            },
+            "hash_changes": {
+                "relative_to": "afd5f53 (C1 / C2 unchanged since fd73da8)",
+                "changed": "C1, C2 and every model built on them: their depth-2 compositions and C1 / C2 on "
+                           "the alternative roots A1 and A2",
+                "unchanged": "R0 and the other 17 depth-1 nodes",
+                "superseded_hashes": dict(V2_SUPERSEDED_HASHES_Q_PIVOT),
+                "new_hashes": dict(V2_Q_PIVOT_HASHES),
+            },
+            "pilot_note": "the pilot (b) C1 / C2 runs (code fd73da8) used the q = 1 pivot, a "
+                          "reparameterisation of the same family of densities; the pilot is not rerun",
+        },
+    },
 }
 
 
@@ -953,14 +1067,16 @@ def v2_graph_payload(graph: ModelGraph, *, depth2: Depth2Plan | None = None) -> 
         "hyperprior_profile": V2_PROFILE,
         "spec": "scalable-stargazing-shamir.md (2026-09-30); report/dag_artifact_v2/build_v2.py",
         "support": dict(V2_SUPPORT),
-        "atoms": {aid: {"mutation_id": mid, "description": V2_MUTATION_TABLE[mid].description}
+        "atoms": {aid: {"mutation_id": mid, "description": V2_MUTATION_TABLE[mid].description,
+                        **({"reported_quantities": V2_REPORTED_QUANTITIES[aid]}
+                           if aid in V2_REPORTED_QUANTITIES else {})}
                   for aid, mid in V2_ATOM_IDS.items()},
         "edge_atoms": atom_of_edge,
         "draft_priors": V2_DRAFT_PRIORS,
         "operator_decisions": V2_OPERATOR_DECISIONS,
         "conventions": {
             "chieff_z_pivot": V2_Z_PIVOT,
-            "chieff_q_pivot": 1.0,
+            "chieff_q_pivot": V2_Q_PIVOT,
             "m1_pivot": 30.0,
             KAPPA_M1_CONVENTION_OPTION: KAPPA_M1_CONVENTION,
         },

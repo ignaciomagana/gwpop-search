@@ -64,7 +64,8 @@ V2_MIXTURE_FAMILIES = ("single",)
 #: chi_eff correlation switches (each its own structural axis) -> slope parameter.
 #: Mean and ln-width are linear in (q - q_pivot), (z - z_pivot) and
 #: ln(m1 / m1_pivot) (the LVK "linear correlation" form; m1 in log). Pivots:
-#: q = 1, z = 0.5 (V2_Z_PIVOT, written by C3/C4), m1 = 30 Msun.
+#: q = 0.7 (V2_Q_PIVOT, written by C1/C2), z = 0.5 (V2_Z_PIVOT, written by
+#: C3/C4), m1 = 30 Msun.
 CHIEFF_CORRELATION_OPTIONS: dict[str, str] = {
     "mean_q": "chi_mu_q_slope",
     "mean_z": "chi_mu_z_slope",
@@ -88,11 +89,25 @@ CHIEFF_CORRELATION_COVARIATE = {
 #: reparameterisation of the same family of densities that moves the intercept
 #: prior, so the evidence changes slightly).
 V2_Z_PIVOT = 0.5
+#: q pivot of the chi_eff - q atoms C1 (mean) and C2 (ln width): the intercepts
+#: ``chi_mu`` / ``chi_log_sigma`` are the values at q = 0.7, where the data
+#: constrain the width (operator decision 2026-10-02, after the pilot (b)
+#: width(q) closure diagnosis, staging/v2/b3_investigation/DIAGNOSIS.md; v1
+#: already pivoted width(q) at 0.7). It replaces the q = 1 intercept of the
+#: 2026-09-30 spec: mu(q) = mu_p + dmu (q - 0.7), ln sigma(q) = ln sigma_p +
+#: dlnsigma (q - 0.7), intercept priors as before (now at q = 0.7), slope
+#: priors unchanged. At q = 1 the width is a small difference of two large
+#: variances (the chi_eff PE width ~0.16 >> sigma(1)), so sigma(1) is weakly
+#: identified; sigma(0.7) is the headline width quantity.
+V2_Q_PIVOT = 0.7
 #: Pivot options of the chi_eff correlation block.
 CHIEFF_PIVOT_OPTIONS = ("q_pivot", "z_pivot", "m1_pivot")
 _CORRELATION_DEFAULTS: dict[str, JsonValue] = {
     **{name: "constant" for name in CHIEFF_CORRELATION_OPTIONS},
-    # LVK linear form: intercept at q = 1, m1 pivot 30 Msun in ln m1.
+    # LVK linear form: m1 pivot 30 Msun in ln m1. q_pivot = 1.0 is a family
+    # default only: the C1/C2 atoms overwrite it with V2_Q_PIVOT = 0.7 when
+    # they switch a q slope on (operator decision 2026-10-02); the default is
+    # kept so that the hash of every model without a q slope is unchanged.
     "q_pivot": 1.0,
     # Family default only. A pivot is inert while its slope switch is
     # "constant"; the C3/C4 atoms overwrite it with V2_Z_PIVOT = 0.5 when they

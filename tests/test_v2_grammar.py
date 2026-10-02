@@ -40,7 +40,10 @@ from gwpop_search.grammar.v2 import (
     V2_DRAFT_PRIORS,
     V2_MUTATION_ATOM,
     V2_OPERATOR_DECISIONS,
+    V2_Q_PIVOT_HASHES,
+    V2_REPORTED_QUANTITIES,
     V2_SUPERSEDED_HASHES_FD73DA8,
+    V2_SUPERSEDED_HASHES_Q_PIVOT,
     NotComposable,
     depth2_priority,
     enumerate_alt_root_graph,
@@ -138,9 +141,14 @@ def test_atom_priors_follow_the_spec():
     assert _prior(child["Z1"], "md_kappa") == ("uniform", 0, 10)
     assert _prior(child["Z1"], "md_z_peak") == ("uniform", 0, 4)
     assert _prior(child["Z2"], "kappa_log_m1_slope") == ("uniform", -4, 4)
-    # pivots: q = 1; z = 0.5 for the chi_eff - z atoms (operator decision 2026-10-01); the
-    # intercept priors are unchanged and now refer to z = 0.5
-    assert child["C2"].chieff.options["q_pivot"] == 1.0
+    # pivots: q = 0.7 for the chi_eff - q atoms (operator decision 2026-10-02), z = 0.5 for the
+    # chi_eff - z atoms (operator decision 2026-10-01); the intercept priors are unchanged and
+    # now refer to the pivots
+    assert root.chieff.options["q_pivot"] == 1.0  # inert family default (no q slope): R0 hash unchanged
+    for aid in ("C1", "C2"):
+        assert child[aid].chieff.options["q_pivot"] == 0.7
+        assert _prior(child[aid], "chi_mu") == ("uniform", -1, 1)
+        assert _prior(child[aid], "chi_log_sigma") == ("uniform", -5, 0)
     for aid in ("C3", "C4"):
         assert child[aid].chieff.options["z_pivot"] == 0.5
         assert _prior(child[aid], "chi_mu") == ("uniform", -1, 1)
@@ -158,6 +166,8 @@ def test_atom_priors_follow_the_spec():
     assert len(decided) == 14 and {"Z2.normalisation", "C3/C4.z_pivot", "S4.form"} <= set(decided)
     assert "local mass function" in V2_DRAFT_PRIORS["Z2.normalisation"]["decision"]
     assert "z = 0.5" in V2_DRAFT_PRIORS["C3/C4.z_pivot"]["decision"]
+    assert V2_DRAFT_PRIORS["C1/C2.q_pivot"]["status"] == "approved by operator 2026-10-02"
+    assert "q = 0.7" in V2_DRAFT_PRIORS["C1/C2.q_pivot"]["decision"]
 
 
 #: depth-1 hashes that the operator decisions of 2026-10-01 must not change (pilot code fd73da8)
@@ -168,8 +178,6 @@ _UNCHANGED_FD73DA8 = {
     "M3": "e0bda537f02bfdd2f9d82d00fade09ddba9bc14740b2a5abc04518b85c9e8908",
     "M4": "43a26b126bf63348a6bdb12274c1a8d6c1793beb6930708273f19a809d587d87",
     "M5": "cb2e5dbfd65e51a9e5312f56b2b595992009f5bcec6b0f504b68848af9a2192e",
-    "C1": "95def131492f77abad49d5c694dccdbb79190f9209280d3d4653a98634590bb6",
-    "C2": "c17a030b2ca427447c2c66da7bd56f7521f5597a6ee6b8321bee8b071f7b3cc9",
     "C5": "0e65e53997d795afc38aa03d13ba2db4a4c04a9f63c33248d0f2c07f1c4de0df",
     "C6": "799ad2ea4a217a9e0db8b2281ffed45508553900e2d9822a648d532937e6f265",
     "S1": "f02bccfadd81161427a16e81dbb4719f76801af18fbc857bdc06cded52a4dadd",
@@ -183,11 +191,13 @@ _UNCHANGED_FD73DA8 = {
 
 
 def test_only_the_decided_models_change_hash_relative_to_the_pilot_code():
-    """C3, C4 and Z2 (= root A2) change relative to fd73da8; R0 and the other 16 nodes do not."""
+    """C3, C4, Z2 (= root A2) (2026-10-01) and C1, C2 (2026-10-02) change relative to fd73da8;
+    R0 and the other 14 nodes do not."""
     root = v2_root_model_spec()
     now = {"R0": root.model_hash}
     now.update({aid: apply_mutation(root, V2_MUTATION_TABLE[mid]).model_hash for aid, mid in V2_ATOM_IDS.items()})
-    assert set(now) == set(_UNCHANGED_FD73DA8) | set(V2_SUPERSEDED_HASHES_FD73DA8)
+    assert set(now) == (set(_UNCHANGED_FD73DA8) | set(V2_SUPERSEDED_HASHES_FD73DA8)
+                        | set(V2_SUPERSEDED_HASHES_Q_PIVOT))
     for aid, old in _UNCHANGED_FD73DA8.items():
         assert now[aid] == old, aid
     for aid, old in V2_SUPERSEDED_HASHES_FD73DA8.items():
@@ -203,11 +213,44 @@ def test_only_the_decided_models_change_hash_relative_to_the_pilot_code():
     assert V2_OPERATOR_DECISIONS["hash_changes"]["superseded_hashes"] == V2_SUPERSEDED_HASHES_FD73DA8
 
 
+def test_q_pivot_hashes_are_pinned_and_recorded():
+    """C1 / C2 with the q = 0.7 pivot (operator decision 2026-10-02): new hashes pinned, old recorded."""
+    root = v2_root_model_spec()
+    for aid in ("C1", "C2"):
+        spec = apply_mutation(root, V2_MUTATION_TABLE[V2_ATOM_IDS[aid]])
+        assert spec.model_hash == V2_Q_PIVOT_HASHES[aid] != V2_SUPERSEDED_HASHES_Q_PIVOT[aid]
+        # the superseded spec differs by exactly the pivot (q = 1, the pilot code fd73da8 .. afd5f53)
+        old = replace(spec, chieff=replace(spec.chieff, options={**spec.chieff.options, "q_pivot": 1.0}))
+        assert old.model_hash == V2_SUPERSEDED_HASHES_Q_PIVOT[aid]
+    assert V2_Q_PIVOT_HASHES == {
+        "C1": "6108460313ccb3ddffb42923fbf3513c52df635742fff810a70551855d188950",
+        "C2": "c162760f91e5b245261279f665c9d2bd555dbda33e6d96f46c9c347865feca08",
+    }
+    assert V2_SUPERSEDED_HASHES_Q_PIVOT == {
+        "C1": "95def131492f77abad49d5c694dccdbb79190f9209280d3d4653a98634590bb6",
+        "C2": "c17a030b2ca427447c2c66da7bd56f7521f5597a6ee6b8321bee8b071f7b3cc9",
+    }
+    later = V2_OPERATOR_DECISIONS["later_decisions"]["2026-10-02"]
+    assert later["hash_changes"]["superseded_hashes"] == V2_SUPERSEDED_HASHES_Q_PIVOT
+    assert later["hash_changes"]["new_hashes"] == V2_Q_PIVOT_HASHES
+    assert "DECIDE AT FREEZE" in later["decisions"]["injection_set"]
+    assert "declined" in later["decisions"]["gpu_confirmation_runs"]
+    # models built on C1 / C2 change with them; a model without a q slope does not
+    for other in ("C4", "S1", "M3", "P2", "Z2"):
+        model = compose_atoms(root, "C2", other)
+        assert model.chieff.options["q_pivot"] == 0.7
+        old = replace(model, chieff=replace(model.chieff, options={**model.chieff.options, "q_pivot": 1.0}))
+        assert old.model_hash != model.model_hash
+    assert compose_atoms(root, "C1", "C2").chieff.options["q_pivot"] == 0.7
+    assert compose_atoms(root, "C1", "C2") == compose_atoms(root, "C2", "C1")
+
+
 def test_auxiliary_options_travel_with_their_switch_and_are_not_structural_axes():
     root = v2_root_model_spec()
     child = {aid: apply_mutation(root, V2_MUTATION_TABLE[mid]) for aid, mid in V2_ATOM_IDS.items()}
     # written by the atom, part of the hash, not a second axis
-    for aid, block, key in (("C3", "chieff", "z_pivot"), ("C4", "chieff", "z_pivot"),
+    for aid, block, key in (("C1", "chieff", "q_pivot"), ("C2", "chieff", "q_pivot"),
+                            ("C3", "chieff", "z_pivot"), ("C4", "chieff", "z_pivot"),
                             ("Z2", "redshift", "kappa_m1_convention")):
         mutation = V2_MUTATION_TABLE[V2_ATOM_IDS[aid]]
         assert getattr(child[aid], block).options.get(key) != getattr(root, block).options.get(key)
@@ -219,8 +262,14 @@ def test_auxiliary_options_travel_with_their_switch_and_are_not_structural_axes(
         assert model.chieff.options["z_pivot"] == 0.5 and model.chieff.options["log_sigma_z"] == "linear"
         assert apply_mutation(child["C4"], V2_MUTATION_TABLE[V2_ATOM_IDS[other]]) == model
         assert apply_mutation(child[other], V2_MUTATION_TABLE[V2_ATOM_IDS["C4"]]) == model
-    # a shape atom on the root keeps the inert default (hash unchanged)
+    # the q pivot likewise travels with C1 / C2 through shape changes, in either order
+    for other in ("C1", "C4", "C6", "S1", "S2", "S3", "S4", "M3", "P2", "Z2"):
+        model = compose_atoms(root, "C2", other)
+        assert model == compose_atoms(root, other, "C2")
+        assert model.chieff.options["q_pivot"] == 0.7 and model.chieff.options["log_sigma_q"] == "linear"
+    # a shape atom on the root keeps the inert defaults (hash unchanged)
     assert child["S1"].chieff.options["z_pivot"] == 0.0
+    assert child["S1"].chieff.options["q_pivot"] == 1.0
     # every chi_eff atom on A2 keeps the kappa(m1) convention
     a2 = v2_alternative_roots(root)["A2"]
     for aid in CHIEFF_ATOMS:
@@ -406,8 +455,17 @@ def test_graph_payload_is_loadable_and_marked_draft(tmp_path):
     assert meta["operator_decisions"]["date"] == "2026-10-01"
     assert meta["operator_decisions"]["hash_changes"]["relative_to"] == "fd73da8"
     assert "z = 0 pivot" in meta["operator_decisions"]["pilot_note"]
-    assert meta["conventions"] == {"chieff_z_pivot": 0.5, "chieff_q_pivot": 1.0, "m1_pivot": 30.0,
+    assert meta["conventions"] == {"chieff_z_pivot": 0.5, "chieff_q_pivot": 0.7, "m1_pivot": 30.0,
                                    "kappa_m1_convention": "local_mass_function"}
+    assert "q = 0.7" in meta["atoms"]["C1"]["description"] and "q = 0.7" in meta["atoms"]["C2"]["description"]
+    # C2 node metadata: headline width quantity sigma(q = 0.7) and the stated limitation
+    rq = meta["atoms"]["C2"]["reported_quantities"]
+    assert rq == V2_REPORTED_QUANTITIES["C2"]
+    assert rq["headline"]["name"] == "sigma_chi_eff(q = 0.7)"
+    assert "sigma below ~0.05 at q -> 1 is unresolved at the current chi_eff PE resolution" in rq["limitation"]
+    assert [x["name"] for x in rq["secondary"]] == ["d ln sigma / dq", "sigma_chi_eff(q = 1)"]
+    assert "reported_quantities" not in meta["atoms"]["C4"]
+    assert "2026-10-02" in meta["operator_decisions"]["later_decisions"]
     assert "z = 0.5" in meta["atoms"]["C3"]["description"] and "z = 0.5" in meta["atoms"]["C4"]["description"]
     assert "R(m1, 0)" in meta["atoms"]["Z2"]["description"]
     assert meta["alternative_roots"]["A2"]["model_hash"] == v2_alternative_roots()["A2"].model_hash

@@ -53,8 +53,18 @@ SUPPORTED requires all six:
   ``not_applicable`` there. PSIS-LOO is reported, not binding. Event-drop
   scenarios are deferred (not part of D5 in v2).
 * **D6 posterior predictive check** of the claimed model (the child for a
-  positive edge): no pre-declared statistic at ``p < 0.01``
-  (:mod:`gwpop_search.analysis.ppc`).
+  positive edge): no binding statistic at ``p < 0.01`` -- the original six
+  (four KS distances, two Spearman correlations); the twelve width statistics
+  are reported only (operator decision 2026-10-02;
+  :mod:`gwpop_search.analysis.ppc`).
+
+**Reported quantities of the chi_eff - q atoms (operator decision
+2026-10-02).** C1 / C2 pivot at q = 0.7. A C2 edge reports sigma_chi_eff(q =
+0.7) as the headline width quantity and the slope d ln sigma / dq and
+sigma(q = 1) (as an upper bound) as secondary, with the stated limitation
+that sigma below ~0.05 at q -> 1 is unresolved at the current chi_eff PE
+resolution (``grammar.v2.V2_REPORTED_QUANTITIES``; values from the child's
+pooled posterior with ``--posterior HASH=pooled_posterior.npz``).
 
 **Pairwise attribution (chi_eff block; operator decision 2026-10-02).** On
 the pilot (b) closure mock (truth: width(q), C2) both C2 and C4 (width(z))
@@ -89,8 +99,10 @@ from __future__ import annotations
 import math
 from typing import Mapping, Sequence
 
+import numpy as np
+
 from gwpop_search.grammar.paths import edge_path_key, mutation_paths
-from gwpop_search.grammar.v2 import CHIEFF_ATOMS, V2_ATOM_ORDER, V2_MUTATION_ATOM
+from gwpop_search.grammar.v2 import CHIEFF_ATOMS, V2_ATOM_ORDER, V2_MUTATION_ATOM, V2_REPORTED_QUANTITIES
 from gwpop_search.hbi.taper import DEFAULT_TAPER_KIND
 
 from ._common import AnalysisInputError, json_ready
@@ -669,6 +681,44 @@ def d5_alt_roots(
 # ---------------------------------------------------------------------------
 
 
+def _quantiles(x) -> dict[str, float]:
+    q05, q50, q95 = np.quantile(np.asarray(x, dtype=float), (0.05, 0.5, 0.95))
+    return {"q05": float(q05), "median": float(q50), "q95": float(q95)}
+
+
+def reported_quantity_values(atom_id: str | None, parameter_names: Sequence[str], samples) -> dict | None:
+    """Pre-declared reported quantities of a C1 / C2 child from equal-weight posterior draws.
+
+    C2: sigma(q = 0.7) = exp(chi_log_sigma) (headline), d ln sigma / dq and
+    sigma(q = 1) = exp(chi_log_sigma + (1 - 0.7) slope) (secondary; sigma(1)
+    as the one-sided 95% upper bound). C1: mu(q = 0.7), d mu / dq, mu(q = 1).
+    Returns None for other atoms or if the draws lack the parameters.
+    """
+    decl = V2_REPORTED_QUANTITIES.get(atom_id or "")
+    if decl is None:
+        return None
+    cols = {str(n): np.asarray(samples, dtype=float)[:, k] for k, n in enumerate(parameter_names)}
+    lever = 1.0 - float(decl["pivot"]["q_pivot"])
+    if atom_id == "C2":
+        need = ("chi_log_sigma", "chi_log_sigma_q_slope")
+        if not all(n in cols for n in need):
+            return None
+        ls, slope = cols["chi_log_sigma"], cols["chi_log_sigma_q_slope"]
+        sigma1 = np.exp(ls + lever * slope)
+        return {"headline": {"sigma_chi_eff(q = 0.7)": _quantiles(np.exp(ls))},
+                "secondary": {"d ln sigma / dq": _quantiles(slope),
+                              "sigma_chi_eff(q = 1)": {**_quantiles(sigma1),
+                                                       "upper_bound_95": float(np.quantile(sigma1, 0.95))}},
+                "limitation": decl["limitation"], "n_draws": int(len(ls))}
+    need = ("chi_mu", "chi_mu_q_slope")
+    if not all(n in cols for n in need):
+        return None
+    mu, slope = cols["chi_mu"], cols["chi_mu_q_slope"]
+    return {"headline": {"mu_chi_eff(q = 0.7)": _quantiles(mu)},
+            "secondary": {"d mu / dq": _quantiles(slope), "mu_chi_eff(q = 1)": _quantiles(mu + lever * slope)},
+            "n_draws": int(len(mu))}
+
+
 def d6_ppc(claim: Mapping, lnbf: float, ppc: Mapping[str, Mapping]) -> dict:
     """PPC of the claimed model: the child for a positive edge, the parent for a negative one."""
     claimed = claim["child_hash"] if lnbf > 0 else claim["parent_hash"]
@@ -1075,6 +1125,7 @@ def build_claim_table(
     graph=None,
     n_atoms_tried: int | None = None,
     atom_labels: Mapping[str, str] | None = None,
+    posteriors: Mapping[str, Mapping] | None = None,
 ) -> dict:
     """The v2 claim table from an ``analyze-model-comparison`` report and the D3-D6 inputs.
 
@@ -1087,7 +1138,10 @@ def build_claim_table(
     outputs (or raw summaries); ``ppc`` maps model hashes to PPC payloads;
     ``atom_labels`` optionally maps mutation ids to the plan's atom names
     (``C2`` ...). ``graph`` (the searched model graph) is needed to key
-    depth-2 edges on the alternative roots.
+    depth-2 edges on the alternative roots. ``posteriors`` optionally maps
+    model hashes to ``{"parameter_names", "samples"}`` (equal-weight draws,
+    e.g. ``pooled_posterior.npz``) for the reported quantities of C1 / C2
+    edges (:func:`reported_quantity_values`).
     """
     edges = {(e["parent_hash"], e["child_hash"]): e for e in report.get("edges", []) if not e.get("skipped")}
     variants = report.get("model_prior_variants") or []
@@ -1157,6 +1211,13 @@ def build_claim_table(
             flags.append("d5_alt_root_not_applicable_for_this_atom")
         if d6.get("borderline_statistics"):
             flags.append("ppc_borderline_statistic")
+        reported = None
+        if atom_id in V2_REPORTED_QUANTITIES:
+            post = (posteriors or {}).get(claim["child_hash"])
+            reported = {"declaration": V2_REPORTED_QUANTITIES[atom_id],
+                        "model_hash": claim["child_hash"],
+                        "values": None if post is None else reported_quantity_values(
+                            atom_id, post["parameter_names"], post["samples"])}
         rows.append({
             "atom": claim.get("atom"),
             "atom_label": None if atom_labels is None else atom_labels.get(claim["mutation_id"]),
@@ -1175,6 +1236,7 @@ def build_claim_table(
             "D5_alternative_roots": d5,
             "D6_ppc": d6,
             "attribution": attribution,
+            "reported_quantities": reported,
             "flags": flags,
         })
     rows.sort(key=lambda r: -r["log_bayes_factor"])
@@ -1211,13 +1273,16 @@ def build_claim_table(
             "the component's pairing slope with the component (grammar.v2.v2_d5_atom_semantics).",
             "D6 checks the claimed model: the child of a positive edge (the parent of a negative one; "
             "D6 is not required for DISFAVOURED).",
-            "D6 p-values: one-sided P(T_pred >= T_obs) for the four KS distances, two-sided for the "
-            "two Spearman correlations and the twelve width statistics (IQR of chi_eff in terciles of "
-            "q, z, m1; Spearman(x, |chi_eff - median|) for x = q, z, m1; operator decision "
-            "2026-10-02); alpha = 0.01 per statistic without multiplicity correction (a D6 false fail "
-            "only removes SUPPORTED); the family-wise false-fail rate of a correct model is disclosed "
-            "(independence bound 16.5% over 18 statistics; empirical estimate from the predicted "
-            "replicates in the PPC output); at least 1000 posterior draws (n_draws * alpha / 2 >= 5).",
+            "D6 is decided by the original six statistics (operator decision 2026-10-02): one-sided "
+            "P(T_pred >= T_obs) for the four KS distances, two-sided for the two Spearman correlations; "
+            "alpha = 0.01 per statistic without multiplicity correction (a D6 false fail only removes "
+            "SUPPORTED); family-wise false-fail rate of a correct model about 6% (independence bound "
+            "5.9% over 6 statistics; empirical estimate from the predicted replicates in the PPC "
+            "output); at least 1000 posterior draws (n_draws * alpha / 2 >= 5). The twelve width "
+            "statistics (IQR of chi_eff in terciles of q, z, m1; Spearman(x, |chi_eff - median|) for "
+            "x = q, z, m1; two-sided) are reported only, not binding: on the pilot (b) closure mock they "
+            "did not reject a constant-width root (the chi_eff PE width is comparable to the population "
+            "width).",
             "Pairwise attribution (operator decision 2026-10-02): a depth-1 chi_eff atom is SUPPORTED "
             "only if adding it to every other D2-passing depth-1 chi_eff atom passes D2 at cuts 1 and "
             "0.9; an unevaluated or non-composable pair (any two of S1-S4, which are alternative chi_eff "
@@ -1293,6 +1358,29 @@ def render_claims_markdown(table: Mapping) -> str:
     if unattributed:
         lines += ["", "Attribution status (blocks SUPPORTED):", ""]
         lines += [f"- `{name}`: {why}" for name, why in unattributed]
+    reported = [(r.get("atom_label") or r.get("atom") or r["mutation_id"], r["reported_quantities"])
+                for r in table["edges"] if r.get("reported_quantities")]
+    if reported:
+        lines += ["", "Reported quantities (chi_eff - q atoms, pivot q = 0.7; operator decision 2026-10-02):", ""]
+        for name, rq in reported:
+            decl = rq["declaration"]
+            vals = rq.get("values") or {}
+            head = decl["headline"]["name"]
+            cell = head
+            if vals:
+                v = next(iter(vals["headline"].values()))
+                cell += f" = {v['median']:.3g} [{v['q05']:.3g}, {v['q95']:.3g}] (90%)"
+            sec = []
+            for item in decl.get("secondary", ()):
+                text = item["name"]
+                v = (vals.get("secondary") or {}).get(item["name"]) if vals else None
+                if v is not None:
+                    text += f" = {v['median']:.3g} [{v['q05']:.3g}, {v['q95']:.3g}]"
+                    if "upper_bound_95" in v:
+                        text += f" (95% upper bound {v['upper_bound_95']:.3g})"
+                sec.append(text)
+            lines.append(f"- `{name}`: headline {cell}; secondary: {'; '.join(sec)}"
+                         + (f". Limitation: {decl['limitation']}" if decl.get("limitation") else ""))
     lines += ["", "Interpretations pending operator confirmation:", ""]
     lines += [f"- {text}" for text in table.get("interpretations_pending_operator_confirmation", [])]
     return "\n".join(lines) + "\n"

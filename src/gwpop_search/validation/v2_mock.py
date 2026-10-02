@@ -7,7 +7,8 @@ The generator follows the physical DAG of Essick & Fishbach 2023
     (run k, projection Theta, noise n)  -- one realisation per system
     rho_obs = A_k Theta g(theta) + n                 (the DATA detection statistic)
     detected  <=>  rho_obs > rho_thr                 (same rule for events and injections)
-    x_obs = (ln m1_det, q, chi_eff) + N(0, Sigma(rho_obs))   (PE data; widths from rho_obs only)
+    x_obs ~ (ln m1_det, q, chi_eff) + noise with covariance C(rho_obs, x_obs_q)
+                                                     (PE data; a function of the data only)
     PE: exact draws from  L(rho_obs, x_obs | theta) pi_PE(theta)
 
 * **Detection on data (rule 1)** and **one noise realisation used everywhere
@@ -21,10 +22,17 @@ The generator follows the physical DAG of Essick & Fishbach 2023
   pool built by that same function (run labels drawn per system with
   probability ``T_k / T``), i.e. "resample detected injections weighted by
   p_pop / p_draw, per run".
-* **Data-derived analyst constants (rule 4)**: the PE widths are
-  ``c_j * rho_thr / rho_obs`` and the PE correlation is a constant (the
-  median per-event posterior correlation of the real catalog); nothing is
-  frozen at the truth.
+* **Data-derived analyst constants (rule 4)**: the PE likelihood covariance
+  is a function of the observed data only. Generator 2.0
+  (:class:`PEStructure`, operator decision 2026-10-02): widths
+  ``c_j f_j(x_obs_q) (rho_thr / rho_obs)^{a_j}`` and (ln m1_det, q, chi_eff)
+  correlations interpolated in the *observed* x_obs_q between the real binned
+  likelihood correlations; x_obs_q is generated first with a width that
+  depends on rho_obs only, the other two coordinates conditionally on it, so
+  the generative model is a proper density and the likelihood is exactly
+  N(x_obs; x(theta), C(rho_obs, x_obs_q)). Generator 1.0: widths
+  ``c_j * rho_thr / rho_obs`` and a constant correlation. Nothing is frozen at
+  the truth.
 * **Coverage (rule 6)**: the injection draw distribution covers the fixed v2
   population support (m1 in [3, 300], q in [0.001, 1], z in [0, 1.9],
   chi_eff in [-1, 1]) for every hyperparameter value, so the detected
@@ -43,11 +51,15 @@ detections (:data:`CANONICAL_RUN_TARGETS`); one global detector-frame
 total-mass roll-off (1 + (M/M_ro)^3)^(-p/3) reproduces the canonical pooled
 m1 90 % quantile (M_ro) and the detected fraction above m1 = 100 (p), which
 also brings the 99 % quantile and P(m1 > 200) to the canonical values
-(:data:`CANONICAL_POOLED_TARGETS`). The x_obs widths are calibrated to the
-median per-event posterior widths of the real 259-event catalog
-(:data:`REAL_PE_WIDTH_MEDIANS`); the luminosity distance is informed only by
-the amplitude datum (with the projection marginalised), so its posterior
-width is an outcome, not a calibration.
+(:data:`CANONICAL_POOLED_TARGETS`). Generator 2.0 calibrates the PE to the
+real catalog's *likelihood* structure under the mock prior
+(:data:`REAL_PE_REF_WIDTH_MEDIANS`: median widths, chi_eff 0.157; their SNR
+scaling; the q-binned chi_eff correlations, e.g. corr(q, chi_eff) = -0.81 at
+q < 0.5), see :func:`calibrate` and :func:`recalibrate_pe`; 1.0 calibrated
+the widths to the real *posterior* widths (:data:`REAL_PE_WIDTH_MEDIANS`).
+The luminosity distance is informed only by the amplitude datum (with the
+projection marginalised), so its posterior width is an outcome, not a
+calibration (its SNR scaling is weaker than the real one).
 
 Selection Monte-Carlo variance: 80 % of the injections are drawn from a
 population proxy (the R0 fiducial (m1, q) density tabulated on a grid, its
@@ -55,16 +67,24 @@ redshift evolution, a broad chi_eff normal), so the weights p_pop / p_draw at
 the truths are nearly constant; sigma^2_lnL at the truth must sit well inside
 the v2 sharp cut (gate iv of :func:`build_mock`).
 
-Gates b-0 (:func:`build_mock`): (i) the delta-PE C2-slope profile over an
-ensemble of same-pool catalogs (machinery check; binding) with the realised
-catalog reported against the pre-declared representativeness rule
-|MLE - truth| <= 3 sd_ens; (ii) draw-support and PE-box coverage; (iii) G12 on
-every depth-1 node; (iv) sigma^2_lnL at the truth <= 0.5 x the cut threshold
-and the per-event term <= 1.5 x the canonical catalog's.
+Gates b-0 (:func:`build_mock`): (i) the noisy-PE ensemble check
+(:func:`noisy_pe_ensemble_gate`, operator decision 2026-10-02; it replaces the
+1.0 delta-PE slope-only profile, which understated the realistic scatter of a
+catalog's estimate about 5x): K = 30 catalogs from the same truth and
+generator, each with noisy PE, give the ensemble of joint conditional MLEs of
+the chi_eff hyperparameters; the ensemble mean must lie within 3 SE of the
+truth (binding machinery check) and the realised catalog is flagged a *tail
+catalog* if it lies more than 2.5 ensemble sd from the ensemble median in any
+parameter (pre-declared; b0_pass requires no flag); (ii) draw-support and
+PE-box coverage; (iii) G12 on every depth-1 node; (iv) sigma^2_lnL at the
+truth <= 0.5 x the cut threshold and the per-event term <= 1.5 x the
+canonical catalog's. :func:`ensemble_gate_for_mock` runs (i) on a built mock.
 
 Known simplifications (a mock, not a waveform model): one projection factor
 (single-interferometer antenna pattern) for every run, the SNR scaling of
-:func:`snr_unit`, Gaussian x_obs in (ln m1_det, q, chi_eff), the same
+:func:`snr_unit`, Gaussian x_obs in (ln m1_det, q, chi_eff) (so the q
+likelihood extends past q = 1 and the posterior-mean q of the mock events is
+more spread than the real one: about 15-25 % below 0.5 against 7 %), the same
 threshold rho_obs > 10 in every run (the canonical O1/O2 rule; O3/O4 use
 FAR < 1/yr), the PE prior ∝ m1_det d_L^2 (d_L <= d_L(z_max)) with a uniform
 chi_eff prior, and a RAW_DRAW selection (frozen-selection null replays need
@@ -83,7 +103,17 @@ from typing import Mapping
 import numpy as np
 from scipy.special import logsumexp, ndtr, ndtri
 
-MOCK_FORMAT_VERSION = "gwpop-search-v2-closure-mock-1.0"
+#: Generator version. 2.0 (operator decisions 2026-10-02): real-like PE
+#: structure (:class:`PEStructure`: q-dependent (ln m1_det, q, chi_eff)
+#: likelihood correlations, real likelihood widths with per-coordinate SNR
+#: scaling) and the noisy-PE ensemble gate b-0(i) (:func:`noisy_pe_ensemble_gate`).
+#: 1.0 (code fd73da8 .. afd5f53, the pilot (b) mocks): constant PE correlation,
+#: widths c_j rho_thr / rho_obs calibrated to the real *posterior* widths, and
+#: the delta-PE slope-only gate b-0(i). A calibration.json without a
+#: ``pe_structure`` entry is a 1.0 calibration and reproduces the 1.0 PE.
+GENERATOR_VERSION = "2.0"
+MOCK_FORMAT_VERSION = "gwpop-search-v2-closure-mock-2.0"
+LEGACY_MOCK_FORMAT_VERSION = "gwpop-search-v2-closure-mock-1.0"
 MOCK_KINDS = ("closure_widthq", "null")
 
 #: LVK GWTC-5.0 parametric fiducial (BP2P + PowerLawRedshift) popsummary
@@ -98,12 +128,27 @@ LVK_GWTC5_FIDUCIAL_MEDIANS: dict[str, float] = {
 }
 
 #: chi_eff truths (DRAFT, operator decision 2026-09-30). Closure: C2, ln-width
-#: linear in q with the intercept at q = 1: sigma(1) = 0.05, slope -2.2, so
+#: linear in q: sigma(1) = 0.05, slope -2.2, so sigma(0.7) = 0.0967 and
 #: sigma(0.5) = 0.150. Null: R0 (constant width). Its width 0.09 is the
 #: detected-population RMS of the closure sigma(q) (0.0913, computed on the
 #: canonical selection weighted to the R0 fiducial), so the two mocks have the
 #: same detected chi_eff spread and differ only in its q dependence.
-CLOSURE_CHI = {"chi_mu": 0.03, "chi_log_sigma": math.log(0.05), "chi_log_sigma_q_slope": -2.2}
+#: Since the operator decision of 2026-10-02 C2 pivots at q = 0.7
+#: (``grammar.v2_structure.V2_Q_PIVOT``), so ``chi_log_sigma`` is the value at
+#: q = 0.7: ln 0.05 - 2.2 (0.7 - 1) (the same physical truth as before).
+CLOSURE_SIGMA_Q1 = 0.05
+CLOSURE_LOG_SIGMA_SLOPE = -2.2
+
+
+def _closure_chi() -> dict[str, float]:
+    from ..grammar.v2_structure import V2_Q_PIVOT
+
+    return {"chi_mu": 0.03,
+            "chi_log_sigma": math.log(CLOSURE_SIGMA_Q1) + CLOSURE_LOG_SIGMA_SLOPE * (V2_Q_PIVOT - 1.0),
+            "chi_log_sigma_q_slope": CLOSURE_LOG_SIGMA_SLOPE}
+
+
+CLOSURE_CHI = _closure_chi()
 NULL_CHI = {"chi_mu": 0.03, "chi_log_sigma": math.log(0.09)}
 C2_MUTATION_ID = "v2.chieff.log_sigma_q"
 C2_SLOPE = "chi_log_sigma_q_slope"
@@ -152,6 +197,28 @@ REAL_PE_COORDINATES = ("ln_m1_detector", "q", "ln_luminosity_distance", "chi_eff
 X_NAMES = ("ln_m1_detector", "q", "chi_eff")
 PE_CORRELATION = ((1.0, -0.839, 0.391), (-0.839, 1.0, 0.063), (0.391, 0.063, 1.0))
 X_WIDTH_TARGETS = tuple(REAL_PE_WIDTH_MEDIANS[k] for k in X_NAMES)
+
+#: Real-catalog *likelihood* structure (generator 2.0; operator decision
+#: 2026-10-02), from staging/v2/b3_investigation/mock_pe_realism/
+#: pe_structure_summary.json ("real", the ``_ref`` moments): each real PE
+#: posterior reweighted to the mock PE prior pi ∝ m1_det d_L^2 (uniform q and
+#: chi_eff), i.e. the real likelihood under the mock prior, which is what a
+#: mock posterior is. Median per-event std, the slope d ln std / d ln SNR, and
+#: by bins of the event's reweighted mean q: the median correlations
+#: (ln m1_det|q, ln m1_det|chi_eff, q|chi_eff), the median std of
+#: (ln m1_det, q, chi_eff), the bin's median mean q and its event count.
+REAL_PE_REF_WIDTH_MEDIANS = {"ln_m1_detector": 0.1341641, "q": 0.1709593, "chi_eff": 0.1574196,
+                             "ln_luminosity_distance": 0.3111004}
+REAL_PE_REF_SNR_SLOPES = {"ln_m1_detector": -0.7799, "q": -0.4959, "chi_eff": -1.1227,
+                          "ln_luminosity_distance": -0.5071}
+REAL_PE_REF_Q_BINS = ((0.0, 0.5), (0.5, 0.7), (0.7, 0.85), (0.85, 1.01))
+REAL_PE_REF_Q_BIN_MEDIANS = (0.445, 0.643, 0.748, 0.869)
+REAL_PE_REF_Q_BIN_COUNTS = (18, 113, 124, 4)
+REAL_PE_REF_CORR_BY_Q = ((-0.9520, 0.8962, -0.8135), (-0.8910, 0.6260, -0.2324),
+                         (-0.7450, 0.4307, 0.1417), (-0.8866, 0.2545, 0.1935))
+REAL_PE_REF_STD_BY_Q = ((0.2165, 0.1810, 0.1344), (0.1618, 0.1908, 0.1459),
+                        (0.1133, 0.1587, 0.1712), (0.0509, 0.0865, 0.0592))
+X_REF_WIDTH_TARGETS = tuple(REAL_PE_REF_WIDTH_MEDIANS[k] for k in X_NAMES)
 
 SNR_THRESHOLD = 10.0
 #: sharpness s of the SNR mass roll-off (1 + (M_det / M_ro)^s)^(-p/s): with s = 3
@@ -511,6 +578,12 @@ class Calibration:
     #: exponent p and sharpness s of the mass roll-off (:func:`rolloff_factor`)
     mass_rolloff_power: float = 5.0 / 6.0
     mass_rolloff_sharpness: float = 1.0
+    #: generator-2.0 PE likelihood structure; None = the 1.0 constant-correlation PE
+    pe_structure: PEStructure | None = None
+
+    @property
+    def generator_version(self) -> str:
+        return GENERATOR_VERSION if self.pe_structure is not None else "1.0"
 
     @property
     def run_probability(self) -> np.ndarray:
@@ -526,7 +599,9 @@ class Calibration:
                 "run_time_yr": list(self.run_time_yr), "width_scale": list(self.width_scale),
                 "mass_rolloff": float(self.mass_rolloff),
                 "mass_rolloff_power": float(self.mass_rolloff_power),
-                "mass_rolloff_sharpness": float(self.mass_rolloff_sharpness), "report": self.report}
+                "mass_rolloff_sharpness": float(self.mass_rolloff_sharpness), "report": self.report,
+                "pe_structure": None if self.pe_structure is None else self.pe_structure.to_dict(),
+                "generator_version": self.generator_version}
 
     @classmethod
     def from_dict(cls, d: Mapping) -> "Calibration":
@@ -534,7 +609,8 @@ class Calibration:
                    tuple(float(x) for x in d["width_scale"]), float(d["mass_rolloff"]),
                    tuple(d.get("labels", RUN_LABELS)), dict(d.get("report", {})),
                    float(d.get("mass_rolloff_power", 5.0 / 6.0)),
-                   float(d.get("mass_rolloff_sharpness", 1.0)))
+                   float(d.get("mass_rolloff_sharpness", 1.0)),
+                   None if not d.get("pe_structure") else PEStructure.from_dict(d["pe_structure"]))
 
 
 def simulate_detections(draw: DrawDistribution, cal: Calibration, rng, n_draw: int,
@@ -591,8 +667,121 @@ def simulate_detections(draw: DrawDistribution, cal: Calibration, rng, n_draw: i
 # box prior pi ∝ m1_det d_L^2 then factorises exactly (derivation in
 # :func:`sample_pe`).
 
-def pe_covariance(rho_obs: float, width_scale) -> np.ndarray:
-    """Sigma(rho_obs) of x_obs: widths c_j rho_thr / rho_obs, constant correlation."""
+@dataclass(frozen=True)
+class PEStructure:
+    """Real-like likelihood covariance of x_obs (generator 2.0).
+
+    The PE likelihood of an event is N(x_obs; x(theta), C(rho_obs, x_obs_q)),
+    x = (ln m1_det, q, chi_eff), with
+
+    * widths ``sigma_j = c_j f_j(x_obs_q) (rho_thr / rho_obs)^{a_j}``: ``c_j``
+      the calibrated width scales (:attr:`Calibration.width_scale`), ``a_j``
+      the real per-coordinate SNR scaling (:attr:`snr_power`) and ``f_j`` a
+      q-dependent factor interpolated between :attr:`q_nodes`, **identically 1
+      for q** (see below);
+    * correlations (ln m1|q, ln m1|chi, q|chi) interpolated linearly in
+      x_obs_q between the nodes (constant outside them). A linear
+      interpolation of correlation matrices is a convex combination, so it
+      stays positive definite when the nodes are.
+
+    **DAG consistency: the covariance is a function of the observed data
+    only.** It depends on (rho_obs, x_obs_q), never on the truth. The data are
+    generated sequentially (:func:`observe`):
+
+        x_obs_q = q + s_q(rho_obs) e_1,
+        (x_obs_m, x_obs_chi) | x_obs_q = (ln m1, chi) + B (x_obs_q - q) + chol(S) (e_2, e_3),
+
+    with ``s_q^2 = C_qq`` (q width: a function of rho_obs only, which is why
+    ``f_q = 1``), ``B = C_rq / C_qq`` and ``S = C_rr - C_rq C_qr / C_qq``
+    evaluated at the observed ``x_obs_q``. Each factor is a normalised
+    density of the data given theta, so the generative model is proper, and
+    as a function of theta the product is exactly N(x_obs; x(theta), C(rho_obs,
+    x_obs_q)) (block-LDL of C; its normaliser det C depends on the data only).
+    The posterior therefore keeps the exact factorised form of
+    :func:`sample_pe` with C in place of the 1.0 covariance.
+    """
+
+    q_nodes: tuple[float, ...] = REAL_PE_REF_Q_BIN_MEDIANS
+    #: per node: (corr(ln m1, q), corr(ln m1, chi), corr(q, chi))
+    corr_nodes: tuple[tuple[float, float, float], ...] = REAL_PE_REF_CORR_BY_Q
+    #: per node: width factors (f_ln_m1, f_q, f_chi); f_q must be 1
+    width_factor_nodes: tuple[tuple[float, float, float], ...] = ((1.0, 1.0, 1.0),) * 4
+    #: a_j: widths scale as (rho_thr / rho_obs)^{a_j}
+    snr_power: tuple[float, float, float] = tuple(-REAL_PE_REF_SNR_SLOPES[k] for k in X_NAMES)
+
+    def __post_init__(self):
+        n = len(self.q_nodes)
+        if n < 1 or len(self.corr_nodes) != n or len(self.width_factor_nodes) != n:
+            raise ValueError("PEStructure: one correlation triple and one width-factor triple per q node")
+        if list(self.q_nodes) != sorted(self.q_nodes):
+            raise ValueError("PEStructure: q nodes must be increasing")
+        if any(float(f[1]) != 1.0 for f in self.width_factor_nodes):
+            raise ValueError("PEStructure: the q width must not depend on x_obs_q (f_q = 1): it is the "
+                             "width of the first factor of the sequential data model")
+        for r in self.corr_nodes:
+            if np.min(np.linalg.eigvalsh(_corr3(r))) <= 0.0:
+                raise ValueError(f"PEStructure: correlation node {r} is not positive definite")
+
+    def _interp(self, values, q_obs):
+        v = np.asarray(values, dtype=float)
+        return np.array([np.interp(float(q_obs), self.q_nodes, v[:, j]) for j in range(v.shape[1])])
+
+    def correlation(self, q_obs: float) -> np.ndarray:
+        return _corr3(self._interp(self.corr_nodes, q_obs))
+
+    def sigmas(self, rho_obs: float, q_obs: float, width_scale) -> np.ndarray:
+        s = SNR_THRESHOLD / max(float(rho_obs), RHO_WIDTH_FLOOR)
+        return (np.asarray(width_scale, dtype=float) * self._interp(self.width_factor_nodes, q_obs)
+                * s ** np.asarray(self.snr_power, dtype=float))
+
+    def covariance(self, rho_obs: float, q_obs: float, width_scale) -> np.ndarray:
+        sig = self.sigmas(rho_obs, q_obs, width_scale)
+        return self.correlation(q_obs) * np.outer(sig, sig)
+
+    def to_dict(self) -> dict:
+        return {"q_nodes": list(self.q_nodes), "corr_nodes": [list(r) for r in self.corr_nodes],
+                "width_factor_nodes": [list(f) for f in self.width_factor_nodes],
+                "snr_power": list(self.snr_power),
+                "corr_order": ["ln_m1_detector|q", "ln_m1_detector|chi_eff", "q|chi_eff"],
+                "covariate": "x_obs_q (observed datum)"}
+
+    @classmethod
+    def from_dict(cls, d: Mapping) -> "PEStructure":
+        return cls(tuple(float(x) for x in d["q_nodes"]),
+                   tuple(tuple(float(x) for x in r) for r in d["corr_nodes"]),
+                   tuple(tuple(float(x) for x in f) for f in d["width_factor_nodes"]),
+                   tuple(float(x) for x in d["snr_power"]))
+
+
+def _corr3(r) -> np.ndarray:
+    r_mq, r_mc, r_qc = (float(x) for x in r)
+    return np.array([[1.0, r_mq, r_mc], [r_mq, 1.0, r_qc], [r_mc, r_qc, 1.0]])
+
+
+def default_pe_structure() -> PEStructure:
+    """Generator-2.0 structure: the real binned correlations at the bins' median q,
+    the real per-coordinate SNR scaling, and q-dependent width factors for
+    ln m1_det and chi_eff from the real binned widths (relative to the
+    0.5 <= q < 0.7 bin; the q > 0.85 bin, 4 events dominated by loud
+    signals, reuses the 0.7-0.85 factors)."""
+    ref = REAL_PE_REF_STD_BY_Q
+    f = [(ref[k][0] / ref[1][0], 1.0, ref[k][2] / ref[1][2]) for k in range(3)]
+    f.append(f[2])
+    return PEStructure(width_factor_nodes=tuple(tuple(round(x, 6) for x in t) for t in f))
+
+
+def pe_covariance(rho_obs: float, width_scale, structure: PEStructure | None = None,
+                  q_obs: float | None = None) -> np.ndarray:
+    """Likelihood covariance of x_obs.
+
+    1.0 (``structure`` None): widths c_j rho_thr / rho_obs, constant
+    correlation. 2.0: :meth:`PEStructure.covariance` at the observed
+    ``q_obs`` (= x_obs_q; a datum, never the truth).
+    """
+    if structure is not None:
+        if q_obs is None:
+            raise ValueError("a structured PE covariance needs the observed q (x_obs_q)")
+        return structure.covariance(rho_obs, q_obs, width_scale)
     s = SNR_THRESHOLD / max(float(rho_obs), RHO_WIDTH_FLOOR)
     sig = np.asarray(width_scale, dtype=float) * s
     corr = np.asarray(PE_CORRELATION, dtype=float)
@@ -614,10 +803,27 @@ def pe_log_prior_basis(m1_det, d_l, box: Mapping | None = None) -> np.ndarray:
     return np.where(inside, np.log(m1_det) + 2.0 * np.log(d_l) - log_norm, -np.inf)
 
 
-def observe(rng, x_true: np.ndarray, rho_obs: float, width_scale) -> np.ndarray:
-    """x_obs = x(theta) + N(0, Sigma(rho_obs))."""
-    cov = pe_covariance(rho_obs, width_scale)
-    return x_true + np.linalg.cholesky(cov) @ rng.standard_normal(3)
+def observe(rng, x_true: np.ndarray, rho_obs: float, width_scale,
+            structure: PEStructure | None = None) -> np.ndarray:
+    """x_obs given theta (and the detection datum rho_obs).
+
+    1.0: x_obs = x(theta) + N(0, Sigma(rho_obs)). 2.0: the sequential data
+    model of :class:`PEStructure` (x_obs_q first; the conditional of the other
+    two coordinates uses the covariance at the observed x_obs_q).
+    """
+    if structure is None:
+        cov = pe_covariance(rho_obs, width_scale)
+        return x_true + np.linalg.cholesky(cov) @ rng.standard_normal(3)
+    eps = rng.standard_normal(3)
+    x_true = np.asarray(x_true, dtype=float)
+    s_q = float(structure.sigmas(rho_obs, 0.0, width_scale)[1])  # f_q = 1: independent of q
+    xq = float(x_true[1]) + s_q * eps[0]
+    cov = structure.covariance(rho_obs, xq, width_scale)
+    r = [0, 2]
+    b = cov[r, 1] / cov[1, 1]
+    cond = cov[np.ix_(r, r)] - np.outer(cov[r, 1], cov[1, r]) / cov[1, 1]
+    rest = x_true[r] + b * (xq - x_true[1]) + np.linalg.cholesky(cond) @ eps[1:]
+    return np.array([rest[0], xq, rest[1]])
 
 
 def _log_c(m1_det, q, chi, amplitude, m_rolloff, power: float = 5.0 / 6.0, sharpness: float = 1.0):
@@ -653,7 +859,7 @@ def _sample_theta_cubed(rng, n: int) -> np.ndarray:
 def sample_pe(rng, x_obs: np.ndarray, rho_obs: float, amplitude: float, n_samples: int,
               width_scale, m_rolloff: float, *, box: Mapping | None = None, batch: int = 32_768,
               max_proposals: int = 200_000_000, rolloff_power: float = 5.0 / 6.0,
-              rolloff_sharpness: float = 1.0):
+              rolloff_sharpness: float = 1.0, structure: PEStructure | None = None):
     """Exact posterior draws of (m1_det, q, d_L, chi_eff) given d = (rho_obs, x_obs).
 
     With y_r = (ln m1_det, q, chi_eff), y2 = ln d_L, c(y_r) as in :func:`_log_c`
@@ -675,9 +881,12 @@ def sample_pe(rng, x_obs: np.ndarray, rho_obs: float, amplitude: float, n_sample
     grid (truncated below at :func:`rho_lower_cut`, neglected mass < 1e-8).
     The box is applied by rejecting joint draws outside it. Returns
     (samples dict, acceptance fraction).
+
+    Generator 2.0 (``structure``): Sigma is C(rho_obs, x_obs_q), a function of
+    the data only (:class:`PEStructure`), so the derivation is unchanged.
     """
     box = PE_BOX if box is None else box
-    cov = pe_covariance(rho_obs, width_scale)
+    cov = pe_covariance(rho_obs, width_scale, structure, float(x_obs[1]))
     chol = np.linalg.cholesky(cov)
     mean = np.asarray(x_obs, dtype=float) + cov @ np.array([4.5, 0.0, 0.0])
     lo = np.array([math.log(box["m1_detector"][0]), box["q"][0], box["chi_eff"][0]])
@@ -715,9 +924,9 @@ def sample_pe(rng, x_obs: np.ndarray, rho_obs: float, amplitude: float, n_sample
 
 def pe_log_likelihood_unmarginalised(x_obs, rho_obs, amplitude, width_scale, m_rolloff, *,
                                      m1_det, q, d_l, chi, theta, rolloff_power: float = 5.0 / 6.0,
-                                     rolloff_sharpness: float = 1.0):
+                                     rolloff_sharpness: float = 1.0, structure: PEStructure | None = None):
     """ln L(d | theta, Theta) up to a constant (for tests)."""
-    cov = pe_covariance(rho_obs, width_scale)
+    cov = pe_covariance(rho_obs, width_scale, structure, float(x_obs[1]))
     r = x_of(m1_det, q, chi) - x_obs
     quad = np.einsum("...i,ij,...j->...", r, np.linalg.inv(cov), r)
     rho = theta * np.exp(_log_c(m1_det, q, chi, amplitude, m_rolloff, rolloff_power, rolloff_sharpness)) / d_l
@@ -823,12 +1032,12 @@ def _pooled_tail_stats(pool, mix, mq) -> dict:
     }
 
 
-def calibrate(draw: DrawDistribution, *, n_pool: int = 3_000_000, n_width_events: int = 200,
-              n_width_samples: int = 1024, width_iterations: int = 5, seed: int = CALIBRATION_SEED,
+def calibrate(draw: DrawDistribution, *, n_pool: int = 3_000_000, n_width_events: int = 1000,
+              n_width_samples: int = 1024, width_iterations: int = 12, seed: int = CALIBRATION_SEED,
               targets: Mapping[str, Mapping] = CANONICAL_RUN_TARGETS,
               pooled_targets: Mapping[str, float] | None = None, power_bounds=(5.0 / 6.0, 8.0),
               power_steps: int = 8, rolloff_steps: int = 16, sharpness: float | None = None,
-              log=print) -> Calibration:
+              pe_structure: PEStructure | None | str = "default", log=print) -> Calibration:
     """Calibrate the mock detection to the canonical selection and the PE to the real widths.
 
     * per run k: A_k so that the detected R0 population has the canonical
@@ -841,7 +1050,11 @@ def calibrate(draw: DrawDistribution, *, n_pool: int = 3_000_000, n_width_events
       m1_source > 100 is the canonical one (review B item 4: with p = 5/6 the
       SNR never falls with mass and heavy systems were over-detected);
     * PE: the x_obs width scales c_j so that the median per-event posterior
-      std of (ln m1_det, q, chi_eff) is the real catalog's.
+      std of (ln m1_det, q, chi_eff) is the real catalog's: generator 2.0
+      (``pe_structure``, default :func:`default_pe_structure`) the real
+      likelihood widths under the mock prior, with the q-dependent
+      correlations of :class:`PEStructure`; ``pe_structure=None`` gives the
+      1.0 constant-correlation PE calibrated to the real posterior widths.
 
     Uses the null truth (R0) and a fixed seed, so both mocks share one
     calibration; common random numbers throughout (monotone bisections,
@@ -849,6 +1062,10 @@ def calibrate(draw: DrawDistribution, *, n_pool: int = 3_000_000, n_width_events
     """
     pooled_targets = dict(CANONICAL_POOLED_TARGETS if pooled_targets is None else pooled_targets)
     sharpness = MASS_ROLLOFF_SHARPNESS if sharpness is None else float(sharpness)
+    if isinstance(pe_structure, str):
+        if pe_structure != "default":
+            raise ValueError(f"pe_structure must be a PEStructure, None or 'default'; got {pe_structure!r}")
+        pe_structure = default_pe_structure()
     spec, hp = truth_model("null")
     logp = LogDensity(spec)
     rng = np.random.default_rng(np.random.SeedSequence(seed))
@@ -930,47 +1147,208 @@ def calibrate(draw: DrawDistribution, *, n_pool: int = 3_000_000, n_width_events
 
     # -- PE widths: match the median per-event posterior std of the real catalog
     ev = _resample_detected(pool, w, cal, rng, n_width_events)
-    eps = rng.standard_normal((n_width_events, 3))
-    pe_seeds = rng.integers(0, 2 ** 63 - 1, n_width_events)
-    box = pe_box(draw.cosmo)
-    scale = np.asarray(X_WIDTH_TARGETS, dtype=float).copy()
-    history = []
-    for it in range(width_iterations + 1):
-        stds, corrs, accs = [], [], []
-        for i in range(n_width_events):
-            cov = pe_covariance(ev["rho_obs"][i], scale)
-            x_true = x_of(ev["m1_detector"][i], ev["q"][i], ev["chi_eff"][i])
-            x_obs = x_true + np.linalg.cholesky(cov) @ eps[i]
-            s, acc = sample_pe(np.random.default_rng(pe_seeds[i]), x_obs, ev["rho_obs"][i],
-                               ev["amplitude"][i], n_width_samples, scale, m_ro, batch=8192, box=box,
-                               rolloff_power=power, rolloff_sharpness=sharpness)
-            ys = np.stack([np.log(s["m1_detector"]), s["q"], np.log(s["luminosity_distance"]), s["chi_eff"]], 1)
-            stds.append(ys.std(axis=0))
-            corrs.append(np.corrcoef(ys.T))
-            accs.append(acc)
-        achieved = np.median(np.asarray(stds), axis=0)
-        history.append({"scale": scale.tolist(), "median_posterior_std": achieved.tolist(),
-                        "median_acceptance": float(np.median(accs))})
-        log(f"width iteration {it}: scale {np.round(scale, 4).tolist()} achieved {np.round(achieved, 4).tolist()}")
-        if it == width_iterations:
-            break
-        scale = scale * np.asarray(X_WIDTH_TARGETS) / achieved[[0, 1, 3]]
-    report["pe_widths"] = {
-        "x_obs_coordinates": list(X_NAMES),
-        "coordinates": list(REAL_PE_COORDINATES),
-        "target_median_posterior_std": [REAL_PE_WIDTH_MEDIANS[k] for k in REAL_PE_COORDINATES],
-        "achieved_median_posterior_std": history[-1]["median_posterior_std"],
-        "achieved_median_posterior_correlation": np.median(np.asarray(corrs), axis=0).round(4).tolist(),
-        "real_median_posterior_correlation": [list(r) for r in REAL_PE_CORRELATION],
-        "note": "ln d_L is not calibrated: its width follows from the amplitude datum and the projection prior",
-        "history": history, "n_events": n_width_events, "n_samples": n_width_samples,
-    }
+    scale, pe_structure, pe_report = _calibrate_pe_widths(
+        ev, cal, pe_box(draw.cosmo), rng, structure=pe_structure, n_width_samples=n_width_samples,
+        width_iterations=width_iterations, log=log)
+    report["pe_widths"] = pe_report
     report["draw_detection_fraction"] = det_frac
     report["seed"] = int(seed)
     report["n_pool"] = int(n_pool)
     report["truth"] = "null (R0 fiducial, chi_eff N(0.03, 0.09))"
-    return Calibration(cal.amplitude, cal.run_time_yr, tuple(float(x) for x in history[-1]["scale"]),
-                       m_ro, RUN_LABELS, report, power, sharpness)
+    return Calibration(cal.amplitude, cal.run_time_yr, tuple(float(x) for x in scale),
+                       m_ro, RUN_LABELS, report, power, sharpness, pe_structure)
+
+
+def _binned_structure(stds, corrs, means, rhos) -> dict:
+    """Median std / correlation of (ln m1_det, q, chi_eff) per real q bin (by posterior-mean q) and
+    the per-coordinate slope d ln std / d ln rho (least squares), next to the real values."""
+    stds, corrs, means, rhos = (np.asarray(a, dtype=float) for a in (stds, corrs, means, rhos))
+    idx = [0, 1, 3]  # (ln m1, q, ln d_L, chi) -> (ln m1, q, chi)
+    out_bins = []
+    for k, (lo, hi) in enumerate(REAL_PE_REF_Q_BINS):
+        m = (means[:, 1] >= lo) & (means[:, 1] < hi)
+        row = {"q_mean_bin": [lo, hi], "n": int(m.sum()), "real_n": REAL_PE_REF_Q_BIN_COUNTS[k],
+               "real_corr": list(REAL_PE_REF_CORR_BY_Q[k]), "real_std": list(REAL_PE_REF_STD_BY_Q[k])}
+        if m.sum():
+            c = corrs[m]
+            row["corr"] = [float(np.median(c[:, 0, 1])), float(np.median(c[:, 0, 3])), float(np.median(c[:, 1, 3]))]
+            row["std"] = [float(np.median(stds[m][:, j])) for j in idx]
+        out_bins.append(row)
+    lr = np.log(rhos)
+    slopes = {}
+    for j, name in zip((0, 1, 3, 2), ("ln_m1_detector", "q", "chi_eff", "ln_luminosity_distance")):
+        a = np.polyfit(lr, np.log(stds[:, j]), 1)[0] if len(lr) > 2 else float("nan")
+        slopes[name] = {"achieved": float(a), "real": REAL_PE_REF_SNR_SLOPES[name]}
+    return {"by_q_mean": out_bins, "d_ln_std_d_ln_snr": slopes,
+            "corr_order": ["ln_m1_detector|q", "ln_m1_detector|chi_eff", "q|chi_eff"],
+            "std_order": ["ln_m1_detector", "q", "chi_eff"]}
+
+
+#: calibration events needed in a q bin before its correlation node is iterated
+CORR_NODE_MIN_EVENTS = 20
+#: real events needed in a q bin for its correlations to be a calibration
+#: target (the q > 0.85 bin has 4 real events: its node keeps the real values)
+CORR_NODE_MIN_REAL_EVENTS = 10
+#: damping of the correlation-node fixed point (neighbouring nodes interact
+#: through the interpolation and the x_obs_q -> posterior-mean-q smearing)
+CORR_NODE_DAMPING = 0.5
+
+
+def _update_corr_nodes(structure: PEStructure, achieved_bins, damping: float = CORR_NODE_DAMPING) -> PEStructure:
+    """One damped fixed-point step of the correlation nodes towards the real binned values.
+
+    The chi_eff correlations of node k, (ln m1|chi, q|chi), move by ``damping
+    (real_k - achieved_k)`` (posterior correlations of the calibration events
+    in real q bin k), clipped to |r| <= 0.98 and halved until the node stays
+    positive definite (smallest eigenvalue >= 0.01). The (ln m1|q) element
+    keeps the real binned value: the posterior's is diluted by the q <= 1
+    boundary of a Gaussian likelihood in (ln m1, q), and moving it towards
+    -1 leaves no positive-definite room for the chi_eff correlations, which
+    are the structure the width(q) analyses are sensitive to.
+    Nodes whose bin has fewer than :data:`CORR_NODE_MIN_EVENTS` calibration
+    events, or fewer than :data:`CORR_NODE_MIN_REAL_EVENTS` real events, stay.
+    """
+    nodes = []
+    for k, r in enumerate(structure.corr_nodes):
+        b = achieved_bins[k]
+        if (b["n"] < CORR_NODE_MIN_EVENTS or "corr" not in b
+                or REAL_PE_REF_Q_BIN_COUNTS[k] < CORR_NODE_MIN_REAL_EVENTS):
+            nodes.append(tuple(r))
+            continue
+        step = damping * (np.asarray(REAL_PE_REF_CORR_BY_Q[k]) - np.asarray(b["corr"]))
+        step[0] = 0.0
+        for _ in range(12):
+            cand = np.clip(np.asarray(r) + step, -0.98, 0.98)
+            if np.min(np.linalg.eigvalsh(_corr3(cand))) >= 0.01:
+                break
+            step = 0.5 * step
+        else:
+            cand = np.asarray(r)
+        nodes.append(tuple(round(float(x), 6) for x in cand))
+    return PEStructure(structure.q_nodes, tuple(nodes), structure.width_factor_nodes, structure.snr_power)
+
+
+def _update_snr_power(structure: PEStructure, stds, rhos) -> PEStructure:
+    """Fixed-point step of the likelihood SNR powers a_j so that the posterior widths of the
+    calibration events scale with rho like the real ones (d ln std / d ln SNR; multiplicative,
+    a_j <- a_j * real_j / achieved_j, bounded to [0.1, 2])."""
+    slopes = _binned_structure(stds, np.zeros((len(stds), 4, 4)), np.zeros((len(stds), 4)), rhos)
+    slopes = slopes["d_ln_std_d_ln_snr"]
+    new = []
+    for a, name in zip(structure.snr_power, X_NAMES):
+        ach = slopes[name]["achieved"]
+        new.append(float(np.clip(a * REAL_PE_REF_SNR_SLOPES[name] / ach, 0.1, 2.0)) if ach < -1e-3 else a)
+    return PEStructure(structure.q_nodes, structure.corr_nodes, structure.width_factor_nodes,
+                       tuple(round(x, 6) for x in new))
+
+
+def _calibrate_pe_widths(ev, cal: Calibration, box, rng, *, structure: PEStructure | None,
+                         n_width_samples: int, width_iterations: int, iterate_correlations: bool = True,
+                         log=print):
+    """Fixed-point width scales c_j matching the median per-event posterior std to the real catalog.
+
+    1.0 (no structure): the real posterior widths (:data:`REAL_PE_WIDTH_MEDIANS`).
+    2.0: the real likelihood widths under the mock prior
+    (:data:`REAL_PE_REF_WIDTH_MEDIANS`, chi_eff 0.157) and, with
+    ``iterate_correlations``, the correlation nodes so that the median
+    posterior correlations of the calibration events in each real q bin (by
+    posterior-mean q) match the real binned values (:func:`_update_corr_nodes`;
+    the posterior correlation is diluted relative to the likelihood's by the
+    q <= 1 boundary and by the interpolation between nodes). The binned
+    correlations and widths and the SNR slopes are reported next to the real
+    ones. Returns (scale, structure, report).
+    """
+    n = len(ev["rho_obs"])
+    targets = np.asarray(X_REF_WIDTH_TARGETS if structure is not None else X_WIDTH_TARGETS, dtype=float)
+    eps = rng.standard_normal((n, 3))
+    pe_seeds = rng.integers(0, 2 ** 63 - 1, n)  # (the 1.0 random-number order is kept)
+    obs_seeds = rng.integers(0, 2 ** 63 - 1, n)
+    scale = targets.copy()
+    history = []
+    for it in range(width_iterations + 1):
+        stds, corrs, accs, means = [], [], [], []
+        for i in range(n):
+            x_true = x_of(ev["m1_detector"][i], ev["q"][i], ev["chi_eff"][i])
+            if structure is None:  # common random numbers across iterations (1.0 form)
+                cov = pe_covariance(ev["rho_obs"][i], scale)
+                x_obs = x_true + np.linalg.cholesky(cov) @ eps[i]
+            else:
+                x_obs = observe(np.random.default_rng(obs_seeds[i]), x_true, ev["rho_obs"][i], scale, structure)
+            s, acc = sample_pe(np.random.default_rng(pe_seeds[i]), x_obs, ev["rho_obs"][i],
+                               ev["amplitude"][i], n_width_samples, scale, cal.mass_rolloff, batch=8192, box=box,
+                               rolloff_power=cal.mass_rolloff_power, rolloff_sharpness=cal.mass_rolloff_sharpness,
+                               structure=structure)
+            ys = np.stack([np.log(s["m1_detector"]), s["q"], np.log(s["luminosity_distance"]), s["chi_eff"]], 1)
+            stds.append(ys.std(axis=0))
+            corrs.append(np.corrcoef(ys.T))
+            means.append(ys.mean(axis=0))
+            accs.append(acc)
+        achieved = np.median(np.asarray(stds), axis=0)
+        entry = {"scale": scale.tolist(), "median_posterior_std": achieved.tolist(),
+                 "median_acceptance": float(np.median(accs))}
+        bins = None
+        if structure is not None:
+            bins = _binned_structure(stds, corrs, means, ev["rho_obs"])["by_q_mean"]
+            entry["corr_nodes"] = [list(r) for r in structure.corr_nodes]
+            entry["snr_power"] = list(structure.snr_power)
+            entry["binned_corr"] = [b.get("corr") for b in bins]
+        history.append(entry)
+        log(f"width iteration {it}: scale {np.round(scale, 4).tolist()} achieved {np.round(achieved, 4).tolist()}"
+            + ("" if bins is None else f" binned corr {[np.round(b.get('corr', []), 3).tolist() for b in bins]}"))
+        if it == width_iterations:
+            break
+        scale = scale * targets / achieved[[0, 1, 3]]
+        if structure is not None and iterate_correlations:
+            structure = _update_corr_nodes(structure, bins)
+            structure = _update_snr_power(structure, stds, ev["rho_obs"])
+    real_widths = REAL_PE_REF_WIDTH_MEDIANS if structure is not None else REAL_PE_WIDTH_MEDIANS
+    report = {
+        "x_obs_coordinates": list(X_NAMES),
+        "coordinates": list(REAL_PE_COORDINATES),
+        "target": ("real likelihood widths under the mock prior (pe_structure_summary.json, _ref)"
+                   if structure is not None else "real posterior widths"),
+        "target_median_posterior_std": [real_widths[k] for k in REAL_PE_COORDINATES],
+        "achieved_median_posterior_std": history[-1]["median_posterior_std"],
+        "achieved_median_posterior_correlation": np.median(np.asarray(corrs), axis=0).round(4).tolist(),
+        "real_median_posterior_correlation": [list(r) for r in REAL_PE_CORRELATION],
+        "note": "ln d_L is not calibrated: its width follows from the amplitude datum and the projection prior",
+        "history": history, "n_events": n, "n_samples": n_width_samples,
+        "generator_version": GENERATOR_VERSION if structure is not None else "1.0",
+    }
+    if structure is not None:
+        report["pe_structure"] = structure.to_dict()
+        report["correlation_nodes_iterated"] = bool(iterate_correlations)
+        report["structure_check"] = _binned_structure(stds, corrs, means, ev["rho_obs"])
+    return scale, structure, report
+
+
+def recalibrate_pe(cal: Calibration, draw: DrawDistribution, *, structure: PEStructure | None = None,
+                   n_pool: int = 3_000_000, n_width_events: int = 1000, n_width_samples: int = 1024,
+                   width_iterations: int = 12, seed: int = CALIBRATION_SEED, source: str | None = None,
+                   log=print) -> Calibration:
+    """Keep the detection calibration of ``cal``; (re)calibrate the PE (generator 2.0 by default).
+
+    The detection model (A_k, T_k, roll-off) does not depend on the PE, so a
+    calibrated 1.0 detection can carry the 2.0 PE structure. The calibration
+    events are drawn as in :func:`calibrate` (null truth, fixed seed).
+    """
+    structure = default_pe_structure() if structure is None else structure
+    spec, hp = truth_model("null")
+    rng = np.random.default_rng(np.random.SeedSequence(seed))
+    pool = _calibration_pool(draw, rng, n_pool)
+    lw = LogDensity(spec)(pool, hp) - pool["log_draw_density"]
+    w = np.exp(lw - np.max(lw[np.isfinite(lw)]))
+    w[~np.isfinite(w)] = 0.0
+    ev = _resample_detected(pool, w, cal, rng, n_width_events)
+    scale, structure, pe_report = _calibrate_pe_widths(
+        ev, cal, pe_box(draw.cosmo), rng, structure=structure, n_width_samples=n_width_samples,
+        width_iterations=width_iterations, log=log)
+    report = dict(cal.report)
+    report["pe_widths"] = pe_report
+    report["pe_recalibration"] = {"detection_calibration_reused": source or "in memory", "seed": int(seed),
+                                  "n_pool": int(n_pool), "generator_version": GENERATOR_VERSION}
+    return Calibration(cal.amplitude, cal.run_time_yr, tuple(float(x) for x in scale), cal.mass_rolloff,
+                       cal.labels, report, cal.mass_rolloff_power, cal.mass_rolloff_sharpness, structure)
 
 
 def _resample_detected(pool, w, cal, rng, n):
@@ -1195,6 +1573,356 @@ def g12_gate(posterior, selection) -> dict:
             "reported_root": reports[0]["reported"]}
 
 
+# ---------------------------------------------------------------------------
+# Gate b-0(i): noisy-PE ensemble (operator decision 2026-10-02)
+# ---------------------------------------------------------------------------
+#
+# The 1.0 gate b-0(i) profiled the C2 slope alone on delta-function PE (the
+# other parameters at the truth). That removes the (ln sigma, slope)
+# degeneracy and the PE noise which make up the real scatter of a catalog's
+# estimate (staging/v2/b3_investigation/DIAGNOSIS.md: sd 0.15 against a
+# realistic joint noisy-PE scatter of 0.6-0.8 in the slope), so it could not
+# detect a noisy-PE tail catalog. The replacement compares the realised
+# catalog with K catalogs from the same truth, generator and selection, each
+# with its own noisy PE, through the *joint* conditional maximum-likelihood
+# estimate of the generating model's chi_eff hyperparameters (the mass,
+# pairing and redshift hyperparameters held at the truth).
+
+#: pre-declared (operator decision 2026-10-02)
+ENSEMBLE_N_CATALOGS = 30
+ENSEMBLE_N_PE = 2048
+TAIL_CATALOG_N_SD = 2.5
+ENSEMBLE_UNBIASED_N_SE = 3.0
+
+
+def chi_hyperparameters(spec) -> tuple[str, ...]:
+    """chi_eff-block hyperparameters of a v2 ``linear_gaussian`` model (fixed order)."""
+    from ..grammar.v2_structure import CHIEFF_CORRELATION_OPTIONS
+
+    if spec.chieff.family != "linear_gaussian":
+        raise ValueError(f"the ensemble gate supports the linear_gaussian chi_eff family; got {spec.chieff.family!r}")
+    names = ["chi_mu", "chi_log_sigma"]
+    names += [slope for option, slope in CHIEFF_CORRELATION_OPTIONS.items()
+              if spec.chieff.options[option] == "linear"]
+    return tuple(names)
+
+
+def _log_interval_mass(a, b):
+    """ln[Phi(b) - Phi(a)] (evaluated in the upper tail when a > 0)."""
+    upper = a > 0.0
+    lo = np.where(upper, -b, a)
+    hi = np.where(upper, -a, b)
+    return np.log(np.clip(ndtr(hi) - ndtr(lo), 1e-300, None))
+
+
+class _ChiCovariates:
+    """The covariates of the chi_eff block of ``spec`` for a set of detector-frame rows."""
+
+    def __init__(self, spec, cols: Mapping[str, np.ndarray], cosmo: NumpyCosmology):
+        from ..grammar.v2_structure import CHIEFF_CORRELATION_COVARIATE, CHIEFF_CORRELATION_OPTIONS
+
+        options = spec.chieff.options
+        self.chi = np.asarray(cols["chi_eff"], dtype=float)
+        self.terms = []  # (slope name, is_mean, covariate - pivot)
+        z = None
+        for option, slope in CHIEFF_CORRELATION_OPTIONS.items():
+            if options[option] != "linear":
+                continue
+            cov = CHIEFF_CORRELATION_COVARIATE[option]
+            if cov == "q":
+                x = np.asarray(cols["q"], dtype=float) - float(options["q_pivot"])
+            else:
+                if z is None:
+                    z = cosmo.z_of_dL(np.asarray(cols["luminosity_distance"], dtype=float))
+                if cov == "z":
+                    x = z - float(options["z_pivot"])
+                else:
+                    x = (np.log(np.asarray(cols["m1_detector"], dtype=float) / (1.0 + z))
+                         - math.log(float(options["m1_pivot"])))
+            self.terms.append((slope, option.startswith("mean_"), x))
+
+    def logpdf(self, hp: Mapping[str, float]) -> np.ndarray:
+        """ln p(chi_eff | covariates): truncated normal on [-1, 1] with LVK-linear moments."""
+        mu = float(hp["chi_mu"])
+        log_sigma = float(hp["chi_log_sigma"])
+        mu_v, ls_v = mu, log_sigma
+        for slope, is_mean, x in self.terms:
+            if is_mean:
+                mu_v = mu_v + float(hp[slope]) * x
+            else:
+                ls_v = ls_v + float(hp[slope]) * x
+        sigma = np.exp(ls_v)
+        zz = (self.chi - mu_v) / sigma
+        out = (-0.5 * zz * zz - ls_v - 0.5 * math.log(2.0 * math.pi)
+               - _log_interval_mass((-1.0 - mu_v) / sigma, (1.0 - mu_v) / sigma))
+        return np.where((self.chi >= -1.0) & (self.chi <= 1.0), out, -np.inf)
+
+
+class ChiConditionalLikelihood:
+    """Shape ln L of the chi_eff hyperparameters with every other hyperparameter at the truth.
+
+    The chi_eff factor of the population density separates:
+    ln p_pop = rest(m1, q, z; truth) + ln p(chi_eff | q, z, m1; lambda_chi), so
+    ``rest`` is computed once (the pipeline's model, JAX) and only the chi_eff
+    factor is re-evaluated (NumPy). ln L = sum_i ln mean_k[p_pop / pi_PE]_ik -
+    N ln xi, xi with the pipeline's raw-draw estimator (the rate is
+    marginalised); no variance cut.
+    """
+
+    def __init__(self, spec, hp_truth: Mapping[str, float], selection, cosmo: NumpyCosmology,
+                 logp: LogDensity | None = None):
+        from ..hbi.common import selection_log_factors
+
+        self.spec, self.hp_truth, self.cosmo = spec, dict(hp_truth), cosmo
+        self.names = chi_hyperparameters(spec)
+        self.logp = logp or LogDensity(spec)
+        cols = {k: np.asarray(selection.samples[k], dtype=float) for k in LogDensity.FIELDS}
+        self._sel_cov = _ChiCovariates(spec, cols, cosmo)
+        self._sel_rest = (self.logp(cols, self.hp_truth) - self._sel_cov.logpdf(self.hp_truth)
+                          - np.asarray(selection.log_draw_density, dtype=float)
+                          + selection_log_factors(selection))
+        self.bounds = np.array([[float(spec.priors[n].parameters["low"]), float(spec.priors[n].parameters["high"])]
+                                for n in self.names])
+        self.truth = np.array([float(self.hp_truth[n]) for n in self.names])
+
+    def events(self, cols: Mapping[str, np.ndarray], log_ref: np.ndarray, offsets: np.ndarray):
+        """Bind a catalog (concatenated PE samples, ln pi_PE, offsets); returns a callable ln L(values)."""
+        cov = _ChiCovariates(self.spec, cols, self.cosmo)
+        rest = self.logp(cols, self.hp_truth) - cov.logpdf(self.hp_truth) - np.asarray(log_ref, dtype=float)
+        offsets = np.asarray(offsets)
+        sizes = np.diff(offsets)
+        equal = bool(np.all(sizes == sizes[0]))
+        n_ev = len(sizes)
+
+        def lnl(values) -> float:
+            hp = dict(zip(self.names, (float(v) for v in values)))
+            lw = rest + cov.logpdf(hp)
+            if equal:
+                ev = logsumexp(lw.reshape(n_ev, int(sizes[0])), axis=1) - math.log(int(sizes[0]))
+            else:
+                ev = np.array([logsumexp(lw[offsets[i]:offsets[i + 1]]) - math.log(sizes[i]) for i in range(n_ev)])
+            lx = logsumexp(self._sel_rest + self._sel_cov.logpdf(hp))
+            return float(np.sum(ev) - n_ev * lx)
+
+        return lnl
+
+    def mle(self, lnl, start=None) -> dict:
+        """Maximum of ``lnl`` inside the prior box (Nelder-Mead from the truth)."""
+        from scipy.optimize import minimize
+
+        lo, hi = self.bounds[:, 0], self.bounds[:, 1]
+        x0 = np.clip(self.truth if start is None else np.asarray(start, dtype=float), lo, hi)
+        step = 0.05 * (hi - lo)
+        x0 = np.clip(x0, lo + step, hi - step)
+
+        def f(x):
+            out = np.maximum(lo - x, 0.0) + np.maximum(x - hi, 0.0)
+            if np.any(out > 0):
+                return 1e12 * (1.0 + float(out.sum()))
+            v = lnl(x)
+            return -v if np.isfinite(v) else 1e12
+
+        simplex = np.vstack([x0] + [x0 + np.eye(len(x0))[i] * step[i] for i in range(len(x0))])
+        r = minimize(f, x0, method="Nelder-Mead",
+                     options={"initial_simplex": simplex, "xatol": 1e-3, "fatol": 1e-4, "maxiter": 4000})
+        x = np.clip(r.x, lo, hi)
+        edge = (np.abs(x - lo) < 2e-3 * (hi - lo)) | (np.abs(x - hi) < 2e-3 * (hi - lo))
+        return {"values": x.tolist(), "lnL": float(-r.fun), "n_evaluations": int(r.nfev),
+                "converged": bool(r.success), "at_prior_edge": [n for n, e in zip(self.names, edge) if e]}
+
+
+def _ensemble_catalog(pool, w, cal: Calibration, box, n_events: int, n_pe: int, ss) -> tuple:
+    """One catalog from the event pool (p_pop/p_draw resample without replacement) with noisy PE."""
+    rng = np.random.default_rng(ss)
+    idx = rng.choice(len(w), size=n_events, replace=False, p=w / w.sum())
+    cols = {k: [] for k in LogDensity.FIELDS}
+    log_ref = []
+    for j in idx:
+        amp = cal.amplitude[int(pool["run_index"][j])]
+        x_true = x_of(pool["m1_detector"][j], pool["q"][j], pool["chi_eff"][j])
+        x_obs = observe(rng, x_true, pool["rho_obs"][j], cal.width_scale, cal.pe_structure)
+        smp, _ = sample_pe(rng, x_obs, pool["rho_obs"][j], amp, n_pe, cal.width_scale, cal.mass_rolloff, box=box,
+                           rolloff_power=cal.mass_rolloff_power, rolloff_sharpness=cal.mass_rolloff_sharpness,
+                           structure=cal.pe_structure)
+        for k in cols:
+            cols[k].append(smp[k])
+        log_ref.append(pe_log_prior_basis(smp["m1_detector"], smp["luminosity_distance"], box))
+    return ({k: np.concatenate(v) for k, v in cols.items()}, np.concatenate(log_ref),
+            np.arange(n_events + 1) * n_pe, idx)
+
+
+def ensemble_decision(realised, estimates, truth, names) -> dict:
+    """The pre-declared b-0(i) decisions from the realised estimate and the ensemble's.
+
+    Tail catalog: |realised - median| > :data:`TAIL_CATALOG_N_SD` x sd (ddof 1)
+    for any parameter. Unbiased: |mean - truth| <= :data:`ENSEMBLE_UNBIASED_N_SE`
+    x sd / sqrt(K) for every parameter.
+    """
+    est = np.atleast_2d(np.asarray(estimates, dtype=float))
+    realised = np.asarray(realised, dtype=float)
+    truth = np.asarray(truth, dtype=float)
+    med = np.median(est, axis=0)
+    sd = est.std(axis=0, ddof=1)
+    mean = est.mean(axis=0)
+    se = sd / math.sqrt(len(est))
+    mad_sd = 1.4826 * np.median(np.abs(est - med), axis=0)
+    position, unbiased = {}, {}
+    for j, n in enumerate(names):
+        zpos = float((realised[j] - med[j]) / sd[j]) if sd[j] > 0 else float("inf")
+        position[n] = {"realised": float(realised[j]), "ensemble_median": float(med[j]),
+                       "ensemble_sd": float(sd[j]), "ensemble_mad_sd": float(mad_sd[j]),
+                       "n_sd_from_median": zpos,
+                       "ensemble_quantile_of_realised": float(np.mean(est[:, j] <= realised[j])),
+                       "pass": bool(abs(zpos) <= TAIL_CATALOG_N_SD)}
+        zb = float((mean[j] - truth[j]) / se[j]) if se[j] > 0 else 0.0
+        unbiased[n] = {"truth": float(truth[j]), "ensemble_mean": float(mean[j]), "standard_error": float(se[j]),
+                       "mean_minus_truth_over_se": zb, "pass": bool(abs(zb) <= ENSEMBLE_UNBIASED_N_SE)}
+    return {"position": position, "unbiased": unbiased,
+            "tail_catalog": not all(v["pass"] for v in position.values()),
+            "unbiased_pass": all(v["pass"] for v in unbiased.values())}
+
+
+def _derived_chi(names, values, spec) -> dict:
+    """Reported derived quantities: ln sigma(q = 1) for a ln-width linear in q (C2)."""
+    hp = dict(zip(names, values))
+    out = {}
+    if "chi_log_sigma_q_slope" in hp:
+        out["chi_log_sigma_at_q1"] = float(hp["chi_log_sigma"] + hp["chi_log_sigma_q_slope"]
+                                           * (1.0 - float(spec.chieff.options["q_pivot"])))
+    return out
+
+
+def noisy_pe_ensemble_gate(posterior, selection, kind: str, cal: Calibration, *, seed_sequence, n_pool: int,
+                           n_catalogs: int = ENSEMBLE_N_CATALOGS, n_pe: int = ENSEMBLE_N_PE, workers: int = 1,
+                           draw: DrawDistribution | None = None, log=print) -> dict:
+    """Gate b-0(i): the realised catalog's position in a noisy-PE ensemble (operator decision 2026-10-02).
+
+    * K = ``n_catalogs`` catalogs of the realised size are drawn from the same
+      truth with the realised catalog's generator (``cal``: detection and PE
+      model, so a 1.0 mock is compared with 1.0 catalogs) from one fresh event
+      pool of ``n_pool`` draws (stream ``seed_sequence.spawn(2)[0]``; catalog k
+      from ``seed_sequence.spawn(2)[1].spawn(K)[k]``, without replacement
+      within a catalog); each gets its own noisy PE with ``n_pe`` samples per
+      event, and every catalog is analysed with the realised selection set.
+    * Estimator: the joint conditional MLE of the generating model's chi_eff
+      hyperparameters (:class:`ChiConditionalLikelihood`; mass / pairing /
+      redshift at the truth, bounded to the prior box, no variance cut). The
+      realised catalog uses all its stored PE samples.
+    * **Pre-declared rule:** the realised catalog is a *tail catalog* if, for
+      any parameter, |realised - ensemble median| > 2.5 ensemble sd.
+      Ensemble unbiasedness (the machinery check): for every parameter, the
+      ensemble mean lies within 3 standard errors of the truth.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    if n_catalogs < 2:
+        raise ValueError("the ensemble gate needs at least 2 catalogs")
+    spec, hp = truth_model(kind)
+    cosmo = default_cosmology() if draw is None else draw.cosmo
+    draw = draw or DrawDistribution(cosmo)
+    box = pe_box(cosmo)
+    logp = LogDensity(spec)
+    like = ChiConditionalLikelihood(spec, hp, selection, cosmo, logp=logp)
+    pool_ss, cats_ss = _child(seed_sequence, 0), _child(seed_sequence, 1)
+    pool = simulate_detections(draw, cal, np.random.default_rng(pool_ss), int(n_pool))
+    lw = logp(pool, hp) - pool["log_draw_density"]
+    w = np.exp(lw - np.max(lw[np.isfinite(lw)]))
+    w[~np.isfinite(w)] = 0.0
+    pool_ess = float(w.sum() ** 2 / np.sum(w ** 2))
+    n_events = int(posterior.n_events)
+    log(f"ensemble gate: pool detected {len(w)} ESS {pool_ess:.0f}; {n_catalogs} catalogs x {n_events} events "
+        f"x {n_pe} PE samples ({'1.0' if cal.pe_structure is None else GENERATOR_VERSION} PE)")
+    realised_cols = {k: np.asarray(posterior.samples[k], dtype=float) for k in LogDensity.FIELDS}
+    realised = like.mle(like.events(realised_cols, posterior.log_ref_density, posterior.offsets))
+    log(f"ensemble gate: realised MLE {np.round(realised['values'], 4).tolist()}")
+
+    def one(k):
+        cols, log_ref, offsets, _ = _ensemble_catalog(pool, w, cal, box, n_events, n_pe, _child(cats_ss, k))
+        fit = like.mle(like.events(cols, log_ref, offsets))
+        log(f"ensemble gate: catalog {k} MLE {np.round(fit['values'], 4).tolist()}")
+        return fit
+
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=int(workers)) as ex:
+            fits = list(ex.map(one, range(n_catalogs)))
+    else:
+        fits = [one(k) for k in range(n_catalogs)]
+    est = np.array([f["values"] for f in fits])
+    names = like.names
+    decision = ensemble_decision(realised["values"], est, like.truth, names)
+    position, unbiased = decision["position"], decision["unbiased"]
+    tail, unbiased_pass = decision["tail_catalog"], decision["unbiased_pass"]
+    derived = {"realised": _derived_chi(names, realised["values"], spec),
+               "ensemble": [_derived_chi(names, f["values"], spec) for f in fits]}
+    for key in derived["realised"]:
+        vals = np.array([d[key] for d in derived["ensemble"]])
+        derived[key] = {"realised": derived["realised"][key], "ensemble_median": float(np.median(vals)),
+                        "ensemble_sd": float(vals.std(ddof=1)),
+                        "truth": _derived_chi(names, like.truth, spec)[key],
+                        "ensemble_quantile_of_realised": float(np.mean(vals <= derived["realised"][key]))}
+    return {
+        "gate": "b-0(i) noisy-PE ensemble (operator decision 2026-10-02; replaces the delta-PE slope-only gate)",
+        "rule": (f"tail catalog if |realised - ensemble median| > {TAIL_CATALOG_N_SD:g} ensemble sd for any "
+                 f"parameter (pre-declared); ensemble unbiased if |ensemble mean - truth| <= "
+                 f"{ENSEMBLE_UNBIASED_N_SE:g} SE for every parameter"),
+        "estimator": ("joint conditional MLE of the generating model's chi_eff hyperparameters (mass, pairing and "
+                      "redshift hyperparameters at the truth), bounded to the prior box, no variance cut; "
+                      "per-event plain Monte-Carlo average over the PE samples; the realised catalog's selection "
+                      "set for every catalog"),
+        "model": {"kind": kind, "model_hash": spec.model_hash, "parameters": list(names),
+                  "truth": dict(zip(names, like.truth.tolist())), "prior_box": like.bounds.tolist()},
+        "ensemble": {"n_catalogs": int(n_catalogs), "n_events_each": n_events, "n_pe": int(n_pe),
+                     "pe_model": "1.0 constant correlation" if cal.pe_structure is None else
+                                 f"{GENERATOR_VERSION} PEStructure",
+                     "pool": {"n_draw": int(n_pool), "n_detected": int(len(w)), "ess": pool_ess,
+                              "draw": "one fresh pool; catalogs without replacement within a catalog"},
+                     "estimates": est.round(5).tolist(),
+                     "n_at_prior_edge": {n: int(sum(n in f["at_prior_edge"] for f in fits)) for n in names},
+                     "n_not_converged": int(sum(not f["converged"] for f in fits))},
+        "realised": {**realised, "n_pe": int(np.diff(posterior.offsets)[0])},
+        "position": position,
+        "derived_reported": derived,
+        "tail_catalog": bool(tail),
+        "unbiased": {"per_parameter": unbiased, "pass": bool(unbiased_pass)},
+        "pass": bool(unbiased_pass),
+        "note": ("pass = the ensemble machinery check (binding); tail_catalog flags the realised catalog "
+                 "(b0_pass requires it to be False; a flagged production seed is not re-seeded, the operator "
+                 "decides)"),
+    }
+
+
+def _child(parent, k: int):
+    """The k-th child of a SeedSequence, independent of how many children are drawn."""
+    return np.random.SeedSequence(parent.entropy, spawn_key=tuple(parent.spawn_key) + (int(k),),
+                                  pool_size=parent.pool_size)
+
+
+def ensemble_gate_for_mock(mock_dir, *, n_catalogs: int = ENSEMBLE_N_CATALOGS, n_pe: int = ENSEMBLE_N_PE,
+                           workers: int = 1, log=print) -> dict:
+    """Run :func:`noisy_pe_ensemble_gate` on a built mock directory (read-only).
+
+    The mock's own calibration.json fixes the generator (a 1.0 mock is
+    compared with 1.0 catalogs); the ensemble stream is the build's fourth
+    stream, ``SeedSequence(master).spawn(4)[3]``, and the pool size the
+    build's event-pool size.
+    """
+    from ..data import PosteriorCatalog, SelectionCatalog
+
+    d = Path(mock_dir)
+    man = json.loads((d / "mock_manifest.json").read_text())
+    cal = Calibration.from_dict(json.loads((d / "calibration.json").read_text()))
+    posterior = PosteriorCatalog.from_hdf5(d / "pe.h5")
+    selection = SelectionCatalog.from_hdf5(d / "selection.h5")
+    ens_ss = np.random.SeedSequence(int(man["seeds"]["master"])).spawn(4)[3]
+    out = noisy_pe_ensemble_gate(posterior, selection, man["kind"], cal, seed_sequence=ens_ss,
+                                 n_pool=int(man["sizes"]["event_pool_draws"]), n_catalogs=n_catalogs, n_pe=n_pe,
+                                 workers=workers, log=log)
+    out["mock"] = {"dir": str(d.resolve()), "format_version": man.get("format_version"),
+                   "code_commit": man.get("code_commit"), "seed": man["seeds"]["master"],
+                   "files_sha256": man.get("files_sha256")}
+    return out
+
+
 def sha256_file(path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -1293,11 +2021,9 @@ def pe_profile(posterior, selection, kind: str, grid, log_xi_grid, logp: LogDens
 #: canonical (real) catalog's at the same truth.
 TRUTH_VARIANCE_MAX_FRACTION = 0.5
 EVENT_VARIANCE_MAX_RATIO = 1.5
-#: representativeness of the realised catalog: |MLE - truth| <= this x sd_ens
-REPRESENTATIVE_N_SD = 3.0
 DEFAULT_N_PE = 8192
 DEFAULT_TARGET_FOUND = 1_500_000
-DEFAULT_ENSEMBLE = 200
+DEFAULT_ENSEMBLE = ENSEMBLE_N_CATALOGS
 
 
 def _package_versions() -> dict:
@@ -1316,7 +2042,8 @@ def _package_versions() -> dict:
 def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259, n_pe: int = DEFAULT_N_PE,
                target_found: int = DEFAULT_TARGET_FOUND, seed: int = 20261030, delta_pe: bool = False,
                calibration: Calibration | None = None, calibration_source: str | None = None,
-               n_pool: int | None = None, run_gates: bool = True, ensemble: int = DEFAULT_ENSEMBLE,
+               n_pool: int | None = None, run_gates: bool = True, ensemble: int = ENSEMBLE_N_CATALOGS,
+               ensemble_n_pe: int = ENSEMBLE_N_PE, ensemble_workers: int = 1,
                grid=C2_SLOPE_GRID, calibration_kwargs: Mapping | None = None, log=print) -> dict:
     """Generate one canonical-format mock pair (pe.h5, selection.h5) plus truth, gates and manifest.
 
@@ -1335,7 +2062,11 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
         calibration = calibrate(draw, log=log, **dict(calibration_kwargs or {}))
         cal_record = {"computed": True, "seed": int(calibration.report.get("seed", CALIBRATION_SEED))}
     elif calibration_source:
-        cal_record = {"reused": str(calibration_source), "sha256": sha256_file(calibration_source)}
+        cal_record = {"reused": str(calibration_source)}
+        if Path(str(calibration_source)).is_file():
+            cal_record["sha256"] = sha256_file(calibration_source)
+        if calibration.report.get("pe_recalibration"):
+            cal_record["pe_recalibration"] = calibration.report["pe_recalibration"]
     else:
         cal_record = {"provided_in_memory": True}
     cal = calibration
@@ -1371,14 +2102,14 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
         rng = np.random.default_rng(ev_ss)
         amp = cal.amplitude[int(pool["run_index"][j])]
         x_true = x_of(pool["m1_detector"][j], pool["q"][j], pool["chi_eff"][j])
-        x_obs = observe(rng, x_true, pool["rho_obs"][j], cal.width_scale)
+        x_obs = observe(rng, x_true, pool["rho_obs"][j], cal.width_scale, cal.pe_structure)
         if delta_pe:
             s = {k: np.array([pool[k][j]]) for k in cols}
             acc = None
         else:
             s, acc = sample_pe(rng, x_obs, pool["rho_obs"][j], amp, n_pe, cal.width_scale, cal.mass_rolloff,
                                box=box, rolloff_power=cal.mass_rolloff_power,
-                               rolloff_sharpness=cal.mass_rolloff_sharpness)
+                               rolloff_sharpness=cal.mass_rolloff_sharpness, structure=cal.pe_structure)
         for k in cols:
             cols[k].append(s[k])
         log_ref.append(pe_log_prior_basis(s["m1_detector"], s["luminosity_distance"], box))
@@ -1418,46 +2149,19 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
         logp_c2 = LogDensity(c2)
         ev_truth = {k: pool[k][picks] for k in ("m1_detector", "q", "luminosity_distance", "chi_eff",
                                                 "m1_source", "z")}
+        # reported only (the 1.0 gate b-0(i) quantity): the realised catalog's delta-PE C2-slope
+        # profile, the other hyperparameters at the truth
         prof, log_xi_grid = delta_profile(ev_truth, selection, kind, grid, logp=logp_c2)
-        # (i) machinery gate on an ensemble of same-pool catalogs drawn like the
-        # real one (without replacement); the realised catalog is reported
-        # against the pre-declared representativeness rule (review B item 2)
-        ens_rng = np.random.default_rng(ens_ss)
-        ens = []
-        for _ in range(int(ensemble)):
-            idx = ens_rng.choice(len(w), size=n_events, replace=False, p=w / w.sum())
-            e = {k: pool[k][idx] for k in ("m1_detector", "q", "luminosity_distance", "chi_eff")}
-            ens.append(delta_profile(e, selection, kind, grid, logp=logp_c2, log_xi_grid=log_xi_grid)[0])
-        mles = np.array([p["mle"] for p in ens])
-        truth_slope = prof["truth"]
-        ens_summary = {
-            "n_catalogs": int(ensemble), "n_events_each": n_events, "draw": "without replacement",
-            "mle_mean": float(mles.mean()) if len(mles) else None,
-            "mle_sd": float(mles.std(ddof=1)) if len(mles) > 1 else None,
-            "coverage_dlnL_le_2": float(np.mean([p["truth_inside"] for p in ens])) if ens else None,
-            "n_interval_at_grid_edge": int(sum(p["interval_at_grid_edge"] for p in ens)),
-            "mles": mles.round(4).tolist(),
-        }
-        if len(mles) > 1:
-            se = ens_summary["mle_sd"] / math.sqrt(len(mles))
-            ens_summary["mle_mean_minus_truth_over_se"] = float((mles.mean() - truth_slope) / se)
-            ens_summary["pass"] = bool(abs(mles.mean() - truth_slope) <= 3.0 * se
-                                       and ens_summary["coverage_dlnL_le_2"] >= 0.8)
-        sd = ens_summary.get("mle_sd")
-        representative = {
-            "rule": f"|MLE - truth| <= {REPRESENTATIVE_N_SD:g} sd_ens (pre-declared, SEED_DECLARATION.json)",
-            "mle": prof["mle"], "truth": truth_slope, "sd_ens": sd,
-            "n_sd": None if not sd else float(abs(prof["mle"] - truth_slope) / sd),
-            "ensemble_quantile_of_mle": float(np.mean(mles <= prof["mle"])) if len(mles) else None,
-            "pass": bool(sd and abs(prof["mle"] - truth_slope) <= REPRESENTATIVE_N_SD * sd),
-        }
-        gates["i_delta_pe_profile"] = {
-            "parameter": C2_SLOPE, "model": "C2 (other hyperparameters at the truth)",
-            "this_catalog": prof, "ensemble": ens_summary, "realised_catalog_representative": representative,
-            "pass": bool(ens_summary.get("pass", False)),
-            "note": ("binding: the ensemble machinery check; the realised catalog's own dlnL <= 2 interval "
-                     "misses the truth for ~5 % of honest seeds and is reported, not gated"),
-        }
+        gates["delta_pe_profile_reported"] = {"parameter": C2_SLOPE, "this_catalog": prof,
+                                              "note": "reported, not gated (replaced by the noisy-PE ensemble)"}
+        # (i) noisy-PE ensemble (operator decision 2026-10-02)
+        if delta_pe:
+            gates["i_noisy_pe_ensemble"] = {"run": False, "reason": "delta-PE build", "pass": True,
+                                            "tail_catalog": False}
+        else:
+            gates["i_noisy_pe_ensemble"] = noisy_pe_ensemble_gate(
+                posterior, selection, kind, cal, seed_sequence=ens_ss, n_pool=n_pool, n_catalogs=int(ensemble),
+                n_pe=int(ensemble_n_pe), workers=int(ensemble_workers), draw=draw, log=log)
         if not delta_pe:
             gates["pe_profile_reported"] = pe_profile(posterior, selection, kind, grid, log_xi_grid, logp_c2)
         gates["ii_coverage"] = coverage_gate(draw, selection, ev_truth, box=box)
@@ -1485,13 +2189,14 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
             }
             gates["iv_taper_at_truth"]["pass"] = bool(gates["iv_taper_at_truth"]["pass_total"]
                                                       and gates["iv_taper_at_truth"]["pass_events"])
-        rep = gates["i_delta_pe_profile"]["realised_catalog_representative"]
-        gates["b0_pass"] = bool(gates["i_delta_pe_profile"]["pass"] and rep["pass"]
+        gi = gates["i_noisy_pe_ensemble"]
+        gates["b0_pass"] = bool(gi["pass"] and not gi["tail_catalog"]
                                 and gates["ii_coverage"]["pass"] and gates["iii_g12"]["pass"]
                                 and gates.get("iv_taper_at_truth", {"pass": True})["pass"])
+        gates["generator_version"] = GENERATOR_VERSION
         (out / "gates.json").write_text(json.dumps(gates, indent=2, sort_keys=True) + "\n")
-        log(f"gates: b0_pass {gates['b0_pass']} (ensemble {gates['i_delta_pe_profile']['pass']}, "
-            f"representative {rep['pass']} ({rep['n_sd']}), coverage {gates['ii_coverage']['pass']}, "
+        log(f"gates: b0_pass {gates['b0_pass']} (ensemble unbiased {gi['pass']}, tail catalog "
+            f"{gi['tail_catalog']}, coverage {gates['ii_coverage']['pass']}, "
             f"G12 {gates['iii_g12']['pass']}, taper {gates.get('iv_taper_at_truth', {}).get('mock')})")
 
     files = {name: sha256_file(out / name) for name in ("pe.h5", "selection.h5", "mock_truth.json",
@@ -1500,12 +2205,14 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
         files["gates.json"] = sha256_file(out / "gates.json")
     manifest = {
         "format_version": MOCK_FORMAT_VERSION, "kind": kind, "delta_pe": bool(delta_pe),
+        "generator_version": GENERATOR_VERSION, "pe_generator_version": cal.generator_version,
         "status": "STAGING MOCK (not frozen)", "code_commit": _git_commit(),
         "software_versions": _package_versions(),
         "calibration_source": cal_record,
         "generator": "scripts/v2_closure_mock.py / gwpop_search.validation.v2_mock",
         "seeds": {"master": int(seed), "calibration": int(cal.report.get("seed", CALIBRATION_SEED)),
-                  "streams": "SeedSequence(master).spawn(4) = injections, event pool, per-event PE, ensemble"},
+                  "streams": "SeedSequence(master).spawn(4) = injections, event pool, per-event PE, ensemble "
+                             "(noisy-PE ensemble gate: child 0 = its event pool, child 1 -> catalog k)"},
         "sizes": {"n_events": n_events, "n_pe": per, "n_draw": n_draw, "n_found": int(selection.n_selected),
                   "event_pool_draws": n_pool, "event_pool_detected": int(len(w))},
         "truth": {"model_hash": spec.model_hash, "hyperparameters": hp,
@@ -1515,10 +2222,19 @@ def build_mock(output_dir, *, kind: str = "closure_widthq", n_events: int = 259,
                          "identical function for injections and events",
             "events": "p_pop/p_draw-weighted resample (without replacement) of the detected systems of an "
                       "event pool drawn with the injection machinery (run k with probability T_k/T)",
-            "pe_data": "(rho_obs, x_obs), x_obs = (ln m1_det, q, chi_eff) + N(0, Sigma(rho_obs)); "
-                       "Sigma widths c_j rho_thr/rho_obs, constant correlation",
+            "pe_data": ("(rho_obs, x_obs), x_obs = (ln m1_det, q, chi_eff) + N(0, Sigma(rho_obs)); "
+                        "Sigma widths c_j rho_thr/rho_obs, constant correlation (generator 1.0)"
+                        if cal.pe_structure is None else
+                        "(rho_obs, x_obs) with the sequential data model of PEStructure (generator 2.0): "
+                        "x_obs_q = q + s_q(rho_obs) e1, then (x_obs_m, x_obs_chi) | x_obs_q Gaussian with the "
+                        "conditional of C(rho_obs, x_obs_q); the likelihood is N(x_obs; x(theta), C(rho_obs, "
+                        "x_obs_q)), a covariance that is a function of the observed data only: widths c_j "
+                        "f_j(x_obs_q) (rho_thr/rho_obs)^a_j (f_q = 1), correlations interpolated in x_obs_q "
+                        "between the real binned values"),
+            "pe_structure": None if cal.pe_structure is None else cal.pe_structure.to_dict(),
             "pe_posterior": "exact draws from N(x_obs; x, Sigma) E_Theta[N(rho_obs; A_k Theta g(theta), 1)] "
-                            "pi_PE(theta); pi_PE ∝ m1_det d_L^2 on pe_box (d_L <= d_L(z_max))",
+                            "pi_PE(theta); pi_PE ∝ m1_det d_L^2 on pe_box (d_L <= d_L(z_max)); Sigma = "
+                            "C(rho_obs, x_obs_q) for generator 2.0",
             "snr_mass_rolloff": f"(1 + (M_det / M_ro)^s)^(-p/s), M_ro = {cal.mass_rolloff:.2f}, "
                                 f"p = {cal.mass_rolloff_power:.4f}, s = {cal.mass_rolloff_sharpness:g}",
             "pe_box": {k: list(v) for k, v in box.items()}, "snr_threshold": SNR_THRESHOLD,

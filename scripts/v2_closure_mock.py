@@ -3,28 +3,36 @@
 
     python scripts/v2_closure_mock.py --output-dir <dir> [--kind closure_widthq|null]
         [--n-events 259] [--n-pe 8192] [--target-found 1500000] [--seed <declared>]
-        [--delta-pe] [--calibration <dir>/calibration.json] [--no-gates]
+        [--delta-pe] [--calibration <dir>/calibration.json] [--recalibrate-pe] [--no-gates]
+        [--ensemble 30] [--ensemble-n-pe 2048] [--ensemble-workers 1]
 
 Writes ``<dir>/pe.h5`` and ``<dir>/selection.h5`` in the canonical
 sky-marginal gwcat-v2 basis, plus ``mock_truth.json`` (truth hyperparameters
 and per-event truths), ``calibration.json``, ``gates.json`` (generator gates
-b-0: delta-PE C2-slope ensemble machinery check and the realised catalog's
-representativeness, draw-support and PE-box coverage, G12, and sigma^2_lnL at the
-truth against the v2 sharp cut) and
+b-0: (i) the noisy-PE ensemble check -- K catalogs from the same truth with
+noisy PE, the realised catalog flagged as a tail catalog if its joint
+conditional chi_eff MLE lies more than 2.5 ensemble sd from the ensemble
+median, plus ensemble unbiasedness; (ii) draw-support and PE-box coverage;
+(iii) G12; (iv) sigma^2_lnL at the truth against the v2 sharp cut) and
 ``mock_manifest.json`` (truths, seeds, sizes, DAG description, sha256 of every
 file).
 
 Truths: R0 at the LVK GWTC-5 BP2P fiducial medians (PILOT_PLAN reference
 table) with chi_eff mu = 0.03 and
-* ``closure_widthq`` (C2): ln sigma linear in q, sigma(1) = 0.05, slope -2.2;
+* ``closure_widthq`` (C2, pivot q = 0.7): ln sigma linear in q, sigma(1) = 0.05,
+  slope -2.2 (sigma(0.7) = 0.0967);
 * ``null`` (R0): constant sigma = 0.09 (the detected RMS of the closure width).
 
 DAG (mock-data-dag): each system has one run label, projection and noise
 realisation; detection is rho_obs > 10 on the data, identical for injections
 and events; the events are a p_pop/p_draw-weighted resample of detected
-systems; the PE shares the detection datum rho_obs and has widths derived from
-it only. The mock detection is calibrated per run to the canonical selection
-(median z, detection share) and the PE widths to the real catalog. See
+systems; the PE shares the detection datum rho_obs, and its likelihood
+covariance is a function of the observed data (rho_obs, x_obs_q) only
+(generator 2.0: real-like q-dependent correlations and likelihood widths). The
+mock detection is calibrated per run to the canonical selection (median z,
+detection share) and the PE widths to the real catalog. ``--recalibrate-pe``
+keeps the detection calibration of ``--calibration`` (e.g. a generator-1.0
+calibration.json) and calibrates the 2.0 PE structure. See
 ``gwpop_search.validation.v2_mock`` for the derivations.
 
 Refuses to write under a ``frozen/`` or ``v2r2`` directory.
@@ -53,15 +61,20 @@ def main(argv=None) -> None:
     parser.add_argument("--calibration", default=None,
                         help="reuse a calibration.json (else recalibrate; deterministic, fixed seed)")
     parser.add_argument("--n-pool", type=int, default=None, help="event-pool draws (default n_draw / 2)")
-    parser.add_argument("--ensemble", type=int, default=200,
-                        help="number of delta-PE catalogs in the gate-(i) ensemble")
+    parser.add_argument("--recalibrate-pe", action="store_true",
+                        help="keep the detection calibration of --calibration, calibrate the 2.0 PE structure")
+    parser.add_argument("--ensemble", type=int, default=30,
+                        help="number of noisy-PE catalogs in the gate-(i) ensemble")
+    parser.add_argument("--ensemble-n-pe", type=int, default=2048, help="PE samples per event in the ensemble")
+    parser.add_argument("--ensemble-workers", type=int, default=1, help="threads for the ensemble")
     parser.add_argument("--no-gates", action="store_true")
     args = parser.parse_args(argv)
 
     import jax
 
     jax.config.update("jax_enable_x64", True)
-    from gwpop_search.validation.v2_mock import Calibration, build_mock, refuse_protected
+    from gwpop_search.validation.v2_mock import (Calibration, DrawDistribution, build_mock, default_cosmology,
+                                                 recalibrate_pe, refuse_protected)
 
     out = Path(args.output_dir).resolve()
     refuse_protected(out)
@@ -73,11 +86,22 @@ def main(argv=None) -> None:
     def log(msg):
         print(f"[{time.time() - t0:8.1f}s] {msg}", flush=True)
 
+    source = args.calibration
+    if args.recalibrate_pe:
+        if cal is None:
+            raise SystemExit("--recalibrate-pe needs --calibration (the detection calibration to keep)")
+        cal = recalibrate_pe(cal, DrawDistribution(default_cosmology()), source=args.calibration, log=log)
+        # the manifest records the reused detection calibration and the PE recalibration
+    elif cal is not None and cal.pe_structure is None:
+        log("WARNING: --calibration is a generator-1.0 calibration (no pe_structure): the PE is the 1.0 "
+            "constant-correlation model; use --recalibrate-pe for the 2.0 PE")
+
     manifest = build_mock(out, kind=args.kind, n_events=args.n_events, n_pe=args.n_pe,
                           target_found=args.target_found, seed=args.seed, delta_pe=args.delta_pe,
-                          calibration=cal, calibration_source=args.calibration,
+                          calibration=cal, calibration_source=source,
                           n_pool=args.n_pool, run_gates=not args.no_gates,
-                          ensemble=args.ensemble, log=log)
+                          ensemble=args.ensemble, ensemble_n_pe=args.ensemble_n_pe,
+                          ensemble_workers=args.ensemble_workers, log=log)
     print(json.dumps({k: manifest[k] for k in ("kind", "delta_pe", "sizes", "gates_b0_pass", "files_sha256")},
                      indent=2, sort_keys=True))
     if manifest.get("gates_b0_pass") is False:

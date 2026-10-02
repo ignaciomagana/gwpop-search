@@ -629,3 +629,65 @@ def test_d2_failing_chieff_atom_is_not_flagged_unattributable():
     assert c6["attribution"]["status"] == "not_applicable"
     assert "chieff_not_attributable" not in c6["flags"]
     assert "`C6`" not in render_claims_markdown(table).split("Attribution status")[-1].split("Interpretations")[0]
+
+
+# ---------------------------------------------------------------------------
+# operator decisions 2026-10-02: D6 width statistics reported only; C2 reporting at q = 0.7
+# ---------------------------------------------------------------------------
+
+
+def test_d6_width_statistics_are_reported_not_binding():
+    from gwpop_search.analysis.ppc import BINDING_STATISTICS, WIDTH_STATISTICS
+
+    edges = [_edge("a" * 64, 9.0)]
+    payload = _ppc("a" * 64)
+    payload["statistics"]["spearman_absdev_chi_eff_q"] = {"p_value": 0.001}
+    payload["statistics"]["iqr_chi_eff_q_t1"] = {"p_value": 0.004}
+    row = build_claim_table(_report(edges), **_inputs(edges, ppc={"a" * 64: payload}))["edges"][0]
+    d6 = row["D6_ppc"]
+    assert d6["status"] == "pass" and row["label"] == SUPPORTED
+    assert d6["reported_statistics_below_alpha"] == ["iqr_chi_eff_q_t1", "spearman_absdev_chi_eff_q"]
+    assert set(d6["p_values"]) == set(BINDING_STATISTICS) and set(d6["reported_p_values"]) == set(WIDTH_STATISTICS)
+    assert d6["family_wise_false_fail_upper_bound"] == pytest.approx(1 - 0.99 ** 6)
+    payload["statistics"]["spearman_chi_eff_q"] = {"p_value": 0.002}  # a binding statistic fails D6
+    row = build_claim_table(_report(edges), **_inputs(edges, ppc={"a" * 64: payload}))["edges"][0]
+    assert row["D6_ppc"]["status"] == "fail" and row["D6_ppc"]["failed_statistics"] == ["spearman_chi_eff_q"]
+    table = build_claim_table(_report(edges), **_inputs(edges))
+    text = " ".join(table["interpretations_pending_operator_confirmation"])
+    assert "original six statistics" in text and "reported only" in text
+
+
+def test_c2_edges_report_sigma_at_q_0p7_as_the_headline():
+    import numpy as np
+
+    from gwpop_search.analysis.claims_v2 import reported_quantity_values
+    from gwpop_search.grammar.v2 import V2_REPORTED_QUANTITIES
+
+    edges = [_edge(C2_CHILD, 9.0, mutation=V2_ATOM_IDS["C2"]), _edge(M1_CHILD, 1.0, mutation=V2_ATOM_IDS["M1"])]
+    rng = np.random.default_rng(0)
+    ls = rng.normal(-2.3, 0.1, 4000)
+    slope = rng.normal(-3.0, 0.8, 4000)
+    post = {C2_CHILD: {"parameter_names": ["chi_mu", "chi_log_sigma", "chi_log_sigma_q_slope"],
+                       "samples": np.stack([np.full(4000, 0.03), ls, slope], 1)}}
+    table = build_claim_table(_report(edges), posteriors=post, **_inputs(edges))
+    c2 = _row(table, C2_CHILD)
+    rq = c2["reported_quantities"]
+    assert rq["declaration"] == V2_REPORTED_QUANTITIES["C2"] and rq["model_hash"] == C2_CHILD
+    head = rq["values"]["headline"]["sigma_chi_eff(q = 0.7)"]
+    assert head["median"] == pytest.approx(float(np.exp(np.median(ls))), rel=1e-6)
+    s1 = rq["values"]["secondary"]["sigma_chi_eff(q = 1)"]
+    assert s1["upper_bound_95"] == pytest.approx(float(np.quantile(np.exp(ls + 0.3 * slope), 0.95)))
+    assert "unresolved at the current chi_eff PE resolution" in rq["values"]["limitation"]
+    assert _row(table, M1_CHILD)["reported_quantities"] is None
+    md = render_claims_markdown(table)
+    assert "headline sigma_chi_eff(q = 0.7) =" in md and "95% upper bound" in md
+    assert "sigma below ~0.05 at q -> 1 is unresolved" in md
+    # without a posterior the declaration is still reported
+    bare = _row(build_claim_table(_report(edges), **_inputs(edges)), C2_CHILD)["reported_quantities"]
+    assert bare["values"] is None and bare["declaration"]["headline"]["name"] == "sigma_chi_eff(q = 0.7)"
+    # C1: mu(q = 0.7) headline
+    vals = reported_quantity_values("C1", ["chi_mu", "chi_mu_q_slope"], np.stack([np.full(10, 0.05),
+                                                                                    np.full(10, 0.2)], 1))
+    assert vals["headline"]["mu_chi_eff(q = 0.7)"]["median"] == pytest.approx(0.05)
+    assert vals["secondary"]["mu_chi_eff(q = 1)"]["median"] == pytest.approx(0.05 + 0.3 * 0.2)
+    assert reported_quantity_values("M1", ["x"], np.zeros((3, 1))) is None

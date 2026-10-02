@@ -89,11 +89,12 @@ def test_exact_embeddings_reproduce_the_smaller_model_numerically():
 
 
 def test_decided_conventions_keep_the_null_embeddings_exact():
-    """C3/C4 (pivot z = 0.5) and Z2 (local mass function): slope 0 is the parent, to rounding."""
+    """C1/C2 (pivot q = 0.7), C3/C4 (pivot z = 0.5) and Z2 (local mass function): slope 0 is the
+    parent, to rounding."""
     graph = enumerate_v2_depth1()
     by_hash = graph.by_hash
     rows = {V2_MUTATION_ATOM[r.mutation_id]: (e, r) for e, r in zip(graph.edges, classify_graph_edges(graph))}
-    for aid in ("C3", "C4", "Z2"):
+    for aid in ("C1", "C2", "C3", "C4", "Z2"):
         edge, row = rows[aid]
         assert row.classification == "exact" and row.larger_model == "child"
         assert row.embeddings[0].null_value == 0.0 and not row.vw_required

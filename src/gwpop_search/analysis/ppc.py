@@ -61,29 +61,33 @@ draws (ties counted 1/2), is
   ``p = min(1, 2 min(P(T_pred >= T_obs), P(T_pred <= T_obs)))``.
 
 **Claim criterion (D6):** the model fails the check if ``p < alpha = 0.01``
-for any pre-declared statistic. The Monte-Carlo standard error of each p is
-reported, and a p within two standard errors of ``alpha`` is flagged
-``borderline`` (the label is still decided by the point estimate, as
+for any of the six **binding** statistics (:data:`BINDING_STATISTICS`: the
+four KS distances and the two Spearman correlations). The twelve width
+statistics (:data:`REPORTED_STATISTICS`) are computed, reported with their
+p-values and flagged when below ``alpha``, but are **not binding** (operator
+decision 2026-10-02: on catalogs measured like GWTC-5 they cannot reject a
+constant-width root, see the measured limitation below, while they add to
+the family-wise false-fail rate). The Monte-Carlo standard error of each p
+is reported, and a binding p within two standard errors of ``alpha`` is
+flagged ``borderline`` (the label is still decided by the point estimate, as
 pre-declared).
 
 **Multiplicity (explicit).** ``alpha`` stays 0.01 *per statistic* with no
-Bonferroni-style correction, over the 18 pre-declared statistics (four KS,
-two correlations, twelve width statistics). Reason: a D6 failure can only
-*remove* a SUPPORTED label (D6 is required for SUPPORTED, never for
-DISFAVOURED), so a family-wise false fail costs power, never a false claim,
-whereas dividing ``alpha`` by 3 would cost power against exactly the width
-misfits the new statistics exist to catch, and would need three times the
-posterior draws (``n_draws alpha / 2 >= 5``). The family-wise false-fail
-rate of a correct model is disclosed two ways with every result:
+Bonferroni-style correction, over the six binding statistics. Reason: a D6
+failure can only *remove* a SUPPORTED label (D6 is required for SUPPORTED,
+never for DISFAVOURED), so a family-wise false fail costs power, never a
+false claim. The family-wise false-fail rate of a correct model is disclosed
+two ways with every result:
 
-* the independence bound ``1 - (1 - alpha)^18 = 16.5%`` (the statistics are
-  strongly positively correlated -- three terciles of one variable, the
-  tercile spreads and the abs-deviation trend -- so the true rate is lower);
+* the independence bound ``1 - (1 - alpha)^6 = 5.9%`` over the binding
+  statistics (16.5% if the twelve reported width statistics were binding;
+  the statistics are positively correlated, so the true rates are lower);
 * an empirical estimate from the predicted replicates themselves: each
   predicted catalog ``r`` is scored as if it were the observed one against
   the other ``S - 1`` predicted catalogs (same sidedness, ties 1/2), and the
-  rate is the fraction of replicates with any statistic below ``alpha``
-  (overall and per family). This keeps the full correlation structure of the
+  rate is the fraction of replicates with any binding statistic below
+  ``alpha`` (per family also for the reported width family). This keeps the
+  full correlation structure of the
   statistics; it ignores the data reuse below, which makes the real
   posterior predictive p-values more conservative, so it is an upper-side
   estimate for a correct model.
@@ -150,7 +154,12 @@ from ._common import (
 )
 from .terms import CatalogWeightEvaluator, pad_catalog
 
-PPC_FORMAT = "gwpop-search-ppc-1.2"  # 1.1: one-sided KS p, derived source frame; 1.2: width statistics
+#: 1.1: one-sided KS p, derived source frame; 1.2: width statistics (binding);
+#: 1.3: width statistics reported only, D6 decided by the six binding statistics
+PPC_FORMAT = "gwpop-search-ppc-1.3"
+#: payload formats :func:`ppc_criterion` reads (a 1.2 payload carries every
+#: statistic and its p-value; D6 is re-decided on the binding six)
+PPC_ACCEPTED_FORMATS = ("gwpop-search-ppc-1.2", PPC_FORMAT)
 #: D6 level: a pre-declared statistic with p < PPC_ALPHA is a failure.
 PPC_ALPHA = 0.01
 #: expected tail counts needed to resolve the smallest tested tail (alpha / 2)
@@ -176,7 +185,12 @@ WIDTH_IQR_STATISTICS = tuple(
 )
 WIDTH_TREND_STATISTICS = tuple(f"spearman_absdev_{WIDTH_TARGET}_{x}" for x in WIDTH_CONDITIONING)
 WIDTH_STATISTICS = WIDTH_IQR_STATISTICS + WIDTH_TREND_STATISTICS
-PREDECLARED_STATISTICS = MARGINAL_STATISTICS + CORRELATION_STATISTICS + WIDTH_STATISTICS
+#: D6 is decided by these six (operator decision 2026-10-02)
+BINDING_STATISTICS = MARGINAL_STATISTICS + CORRELATION_STATISTICS
+#: computed and reported with every check, never binding (operator decision 2026-10-02)
+REPORTED_STATISTICS = WIDTH_STATISTICS
+#: every pre-declared statistic (binding and reported)
+PREDECLARED_STATISTICS = BINDING_STATISTICS + REPORTED_STATISTICS
 #: statistic families (multiplicity is disclosed overall and per family)
 STATISTIC_FAMILIES: Mapping[str, tuple[str, ...]] = {
     "marginal": MARGINAL_STATISTICS,
@@ -198,7 +212,7 @@ def statistic_kind(name: str) -> str:
     return "spearman"
 
 
-def family_wise_false_fail_bound(alpha: float = PPC_ALPHA, n_statistics: int = len(PREDECLARED_STATISTICS)) -> float:
+def family_wise_false_fail_bound(alpha: float = PPC_ALPHA, n_statistics: int = len(BINDING_STATISTICS)) -> float:
     """``1 - (1 - alpha)^n``: the family-wise false-fail rate for independent statistics.
 
     For positively correlated statistics (the pre-declared ones) the true rate
@@ -358,7 +372,7 @@ def replicate_p_values(name: str, t_pred) -> np.ndarray:
 
 
 def replicate_family_wise_rate(t_pred: Mapping[str, np.ndarray], alpha: float = PPC_ALPHA,
-                               names: Sequence[str] = PREDECLARED_STATISTICS) -> dict[str, object]:
+                               names: Sequence[str] = BINDING_STATISTICS) -> dict[str, object]:
     """Empirical family-wise false-fail rate from the predicted replicates.
 
     Each replicate is treated as the observed catalog of a correct model; the
@@ -564,20 +578,26 @@ class PPCResult:
         stats = {}
         failed = []
         borderline = []
+        reported_below = []
         for name, p in self.p_values().items():
-            is_fail = p["p_value"] < alpha
+            binding = name in BINDING_STATISTICS
+            below = p["p_value"] < alpha
             near = abs(p["p_value"] - alpha) <= 2.0 * p["mc_standard_error"]
-            if is_fail:
+            if binding and below:
                 failed.append(name)
-            if near:
+            if binding and near:
                 borderline.append(name)
+            if not binding and below:
+                reported_below.append(name)
             stats[name] = {
                 "kind": statistic_kind(name),
+                "binding": bool(binding),
                 "observed": _quantiles(self.t_obs[name]),
                 "predicted": _quantiles(self.t_pred[name]),
                 **p,
-                "failed": bool(is_fail),
-                "borderline": bool(near),
+                "below_alpha": bool(below),
+                "failed": bool(binding and below),
+                "borderline": bool(binding and near),
             }
         floor = self.config.min_selection_ess_per_event * self.n_catalog
         low = float(np.mean(self.selection_ess < floor))
@@ -595,6 +615,9 @@ class PPCResult:
             "status": status,
             "failed_statistics": failed,
             "borderline_statistics": borderline,
+            "reported_statistics_below_alpha": reported_below,
+            "binding_statistics": list(BINDING_STATISTICS),
+            "reported_statistics": list(REPORTED_STATISTICS),
             "statistics": stats,
             "diagnostics": {
                 "selection_ess": _quantiles(self.selection_ess),
@@ -608,13 +631,19 @@ class PPCResult:
             },
             "multiplicity": {
                 "correction": "none: alpha per statistic (a D6 false fail can only remove SUPPORTED)",
-                "n_statistics": len(PREDECLARED_STATISTICS),
+                "n_statistics": len(BINDING_STATISTICS),
+                "n_statistics_reported_only": len(REPORTED_STATISTICS),
                 "families": {k: list(v) for k, v in STATISTIC_FAMILIES.items()},
+                "binding_families": ["marginal", "correlation"],
                 "family_wise_false_fail_upper_bound": family_wise_false_fail_bound(
+                    alpha, len(BINDING_STATISTICS)),
+                "family_wise_false_fail_upper_bound_if_width_binding": family_wise_false_fail_bound(
                     alpha, len(PREDECLARED_STATISTICS)),
                 "family_wise_false_fail_independence_bound_per_family": {
                     k: family_wise_false_fail_bound(alpha, len(v)) for k, v in STATISTIC_FAMILIES.items()},
                 "family_wise_false_fail_empirical": replicate_family_wise_rate(self.t_pred, alpha),
+                "family_wise_false_fail_empirical_all_statistics": replicate_family_wise_rate(
+                    self.t_pred, alpha, names=PREDECLARED_STATISTICS),
             },
         }
 
@@ -631,10 +660,11 @@ class PPCResult:
             "n_catalog": int(self.n_catalog),
             "predeclared_statistics": list(PREDECLARED_STATISTICS),
             "criterion": (
-                f"D6: fail if any pre-declared statistic has a posterior predictive p < "
-                f"{self.config.alpha:g} (one-sided P(T_pred >= T_obs) for the KS distances, "
-                "two-sided for the Spearman correlations and the width statistics; alpha per "
-                "statistic, family-wise false-fail rate disclosed)"
+                f"D6: fail if any of the six binding statistics (four KS distances, two Spearman "
+                f"correlations) has a posterior predictive p < {self.config.alpha:g} (one-sided "
+                "P(T_pred >= T_obs) for the KS distances, two-sided for the Spearman correlations; "
+                "alpha per statistic, family-wise false-fail rate disclosed); the twelve width "
+                "statistics (two-sided) are reported only, not binding (operator decision 2026-10-02)"
             ),
             "method": (
                 "predicted catalog: N found injections resampled with p_pop/p_draw*(T_k/N_k) "
@@ -798,33 +828,47 @@ def posterior_predictive_check(
 def ppc_criterion(payload: Mapping[str, object] | None, *, alpha: float = PPC_ALPHA) -> dict[str, object]:
     """D6 status from a :meth:`PPCResult.to_dict` payload.
 
-    ``pass`` only if every pre-declared statistic was evaluated with
-    ``p >= alpha`` on a reliable, resolvable check; ``fail`` if any has
-    ``p < alpha``; otherwise ``missing``/``incomplete``.
+    ``pass`` only if every binding statistic (:data:`BINDING_STATISTICS`) was
+    evaluated with ``p >= alpha`` on a reliable, resolvable check; ``fail`` if
+    any has ``p < alpha``; otherwise ``missing``/``incomplete``. The width
+    statistics (:data:`REPORTED_STATISTICS`) are reported (their p-values and
+    those below ``alpha``) and never change the status (operator decision
+    2026-10-02); a payload in format 1.2 (width statistics then binding) is
+    re-decided on the binding six.
     """
     if payload is None:
         return {"status": "missing", "reason": "no posterior predictive check supplied"}
-    if payload.get("format_version") != PPC_FORMAT:
+    if payload.get("format_version") not in PPC_ACCEPTED_FORMATS:
         return {"status": "incomplete", "reason": f"unsupported PPC format {payload.get('format_version')!r}"}
     stats = payload.get("statistics") or {}
-    absent = [name for name in PREDECLARED_STATISTICS if name not in stats]
+    absent = [name for name in BINDING_STATISTICS if name not in stats]
     if absent:
-        return {"status": "incomplete", "reason": f"pre-declared statistics missing: {absent}"}
+        return {"status": "incomplete", "reason": f"binding statistics missing: {absent}"}
     used_alpha = float((payload.get("config") or {}).get("alpha", alpha))
     if abs(used_alpha - alpha) > 1e-12:
         return {"status": "incomplete", "reason": f"PPC evaluated at alpha={used_alpha}, D6 requires {alpha}"}
-    p_values = {name: float(stats[name]["p_value"]) for name in PREDECLARED_STATISTICS}
+    p_values = {name: float(stats[name]["p_value"]) for name in BINDING_STATISTICS}
     failed = sorted(name for name, p in p_values.items() if p < alpha)
+    reported = {name: float(stats[name]["p_value"]) for name in REPORTED_STATISTICS if name in stats}
+    binding_borderline = [name for name in (payload.get("borderline_statistics") or [])
+                          if name in BINDING_STATISTICS]
+    empirical = (payload.get("multiplicity") or {}).get("family_wise_false_fail_empirical") or {}
+    if payload.get("format_version") != PPC_FORMAT:  # 1.2: the empirical rate was over all 18
+        empirical = {}
     detail = {
         "p_values": p_values,
         "failed_statistics": failed,
-        "borderline_statistics": list(payload.get("borderline_statistics") or []),
+        "borderline_statistics": binding_borderline,
+        "reported_p_values": reported,
+        "reported_statistics_below_alpha": sorted(name for name, p in reported.items() if p < alpha),
+        "reported_statistics_missing": [name for name in REPORTED_STATISTICS if name not in stats],
+        "binding": "the six statistics of BINDING_STATISTICS; the width statistics are reported only "
+                   "(operator decision 2026-10-02)",
         "n_draws": (payload.get("config") or {}).get("n_draws"),
         "identity_verified": payload.get("identity_verified"),
-        "sidedness": {name: stats[name].get("sidedness") for name in PREDECLARED_STATISTICS},
+        "sidedness": {name: stats[name].get("sidedness") for name in BINDING_STATISTICS},
         "family_wise_false_fail_upper_bound": family_wise_false_fail_bound(alpha),
-        "family_wise_false_fail_empirical": (
-            ((payload.get("multiplicity") or {}).get("family_wise_false_fail_empirical") or {}).get("rate")),
+        "family_wise_false_fail_empirical": empirical.get("rate"),
     }
     if failed:
         return {"status": "fail", **detail}

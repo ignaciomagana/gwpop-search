@@ -477,6 +477,54 @@ def test_chi_eff_z_atoms_at_slope_zero_are_the_root_exactly(aid, slope_name):
     assert np.max(np.abs(c[np.isfinite(a)] - a[np.isfinite(a)])) > 0.01
 
 
+# chi_eff - q atoms C1 (mean) and C2 (ln width): pivot q = 0.7 (operator decision 2026-10-02)
+
+
+@pytest.mark.parametrize("aid, slope_name", [("C1", "chi_mu_q_slope"), ("C2", "chi_log_sigma_q_slope")])
+def test_chi_eff_q_atoms_pivot_at_q_0p7(aid, slope_name):
+    from gwpop_search.grammar.v2 import V2_SUPERSEDED_HASHES_Q_PIVOT
+    from gwpop_search.models.declarative import _v2_chi_moments
+
+    root = v2_root_model_spec()
+    spec = atom(root, aid)
+    assert spec.chieff.options["q_pivot"] == 0.7
+    assert root.chieff.options["q_pivot"] == 1.0  # inert family default (no q slope): R0 hash unchanged
+    slope = -2.2
+    hp = hyper(spec, **{slope_name: slope})
+    q = jnp.asarray([0.05, 0.3, 0.7, 0.9, 1.0])
+    mu, log_sigma = _v2_chi_moments(spec, hp, q=q, z=jnp.full_like(q, 0.4), log_m1=jnp.full_like(q, math.log(30.0)))
+    moved, fixed = (mu, log_sigma) if aid == "C1" else (log_sigma, mu)
+    intercept = hp["chi_mu"] if aid == "C1" else hp["chi_log_sigma"]
+    # the intercept is the value at q = 0.7; the slope multiplies (q - 0.7)
+    assert float(moved[2]) == intercept
+    assert np.allclose(np.asarray(moved), intercept + slope * (np.asarray(q) - 0.7), rtol=0, atol=1e-15)
+    assert np.all(np.asarray(fixed) == (hp["chi_log_sigma"] if aid == "C1" else hp["chi_mu"]))
+    # the superseded q = 1 pivot is the same family of densities, reparameterised:
+    # f(q) = f_1 + s (q - 1) = (f_1 - 0.3 s) + s (q - 0.7)
+    old = replace(spec, chieff=replace(spec.chieff, options={**spec.chieff.options, "q_pivot": 1.0}))
+    assert old.model_hash == V2_SUPERSEDED_HASHES_Q_PIVOT[aid] != spec.model_hash
+    name = "chi_mu" if aid == "C1" else "chi_log_sigma"
+    samples = _detector_samples(n=1500)
+    a = np.asarray(compile_model_spec(spec)(samples, hp))
+    b = np.asarray(compile_model_spec(old)(samples, {**hp, name: hp[name] + 0.3 * slope}))
+    fin = np.isfinite(a)
+    assert fin.mean() > 0.5 and np.array_equal(np.isfinite(b), fin)
+    assert np.max(np.abs(a[fin] - b[fin])) < 1e-10
+
+
+@pytest.mark.parametrize("aid, slope_name", [("C1", "chi_mu_q_slope"), ("C2", "chi_log_sigma_q_slope")])
+def test_chi_eff_q_atoms_at_slope_zero_are_the_root_bit_for_bit(aid, slope_name):
+    root = v2_root_model_spec()
+    spec = atom(root, aid)
+    samples = _detector_samples()
+    hp = hyper(root)
+    a = np.asarray(compile_model_spec(root)(samples, hp))
+    b = np.asarray(compile_model_spec(spec)(samples, {**hp, slope_name: 0.0}))
+    assert np.isfinite(a).mean() > 0.5 and np.array_equal(a, b)
+    c = np.asarray(compile_model_spec(spec)(samples, {**hp, slope_name: 0.5}))
+    assert np.max(np.abs(c[np.isfinite(a)] - a[np.isfinite(a)])) > 0.01
+
+
 def test_skew_normal_at_zero_skew_is_the_truncated_gaussian_even_off_the_interval():
     chi = jnp.linspace(-1.0, 1.0, 1001)
     for mu, sigma in ((0.05, 0.12), (0.99, 0.0068), (1.6, 0.05), (-2.5, 0.3)):
@@ -600,16 +648,19 @@ GWTC4_BBH = Path("/hildafs/home/magana/tmp_ondemand_hildafs_phy220048p_symlink/s
 
 
 @pytest.mark.skipif(not GWTC4_BBH.is_dir(), reason="LVK GWTC-4 analyses not mounted")
-@pytest.mark.parametrize("fname,option,pivot", [
-    ("BBHCorr_qchieffLinearCorrelationModel.h5", "q", 1.0),
-    ("BBHCorr_zchieffLinearCorrelationModel.h5", "z", 0.5),
+@pytest.mark.parametrize("fname,option,pivot,lvk_pivot", [
+    ("BBHCorr_qchieffLinearCorrelationModel.h5", "q", 0.7, 1.0),
+    ("BBHCorr_zchieffLinearCorrelationModel.h5", "z", 0.5, 0.5),
 ])
-def test_linear_correlation_matches_the_lvk_mean_and_width_curves(fname, option, pivot):
+def test_linear_correlation_matches_the_lvk_mean_and_width_curves(fname, option, pivot, lvk_pivot):
     """mu(x) and sigma(x) of the LVK linear model: intercept at the pivot, ln width.
 
-    The GWTC-4 q release pivots at q = 1 and the z release at z = 0.5; the v2
-    atoms use the same pivots (C3/C4 at z = 0.5 since the operator decision of
-    2026-10-01), so the release hyperparameters are the v2 hyperparameters.
+    The GWTC-4 q release pivots at q = 1 and the z release at z = 0.5. The v2
+    z atoms use the release pivot (C3/C4 at z = 0.5, operator decision of
+    2026-10-01), so those release hyperparameters are the v2 hyperparameters;
+    the v2 q atoms pivot at q = 0.7 (operator decision 2026-10-02), so the
+    release intercept maps to f(0.7) = f_1 + slope (0.7 - 1) with the slope
+    unchanged.
     """
     h5py = pytest.importorskip("h5py")
     from gwpop_search.models.declarative import _v2_chi_moments
@@ -624,7 +675,9 @@ def test_linear_correlation_matches_the_lvk_mean_and_width_curves(fname, option,
     spec = atom(atom(v2_root_model_spec(), "C1" if option == "q" else "C3"), "C2" if option == "q" else "C4")
     assert spec.chieff.options[f"{option}_pivot"] == pivot  # the atoms' own pivot, not overridden
     for i in range(x.shape[0]):
-        hp = {"chi_mu": x[i, col["mu_chieff_0"]], "chi_log_sigma": x[i, col["ln_sigma_chieff_0"]],
+        shift = pivot - lvk_pivot
+        hp = {"chi_mu": x[i, col["mu_chieff_0"]] + x[i, col["mu_chieff_1"]] * shift,
+              "chi_log_sigma": x[i, col["ln_sigma_chieff_0"]] + x[i, col["ln_sigma_chieff_1"]] * shift,
               f"chi_mu_{option}_slope": x[i, col["mu_chieff_1"]],
               f"chi_log_sigma_{option}_slope": x[i, col["ln_sigma_chieff_1"]]}
         grid = jnp.asarray(pos)
