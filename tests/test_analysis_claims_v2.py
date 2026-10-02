@@ -588,3 +588,44 @@ def test_non_composable_family_members_cannot_attribute_each_other():
     table = build_claim_table(report, **_inputs(edges))
     assert {r["label"] for r in table["edges"]} == {INCONCLUSIVE}
     assert "not composable" in render_claims_markdown(table)
+
+
+def test_chieff_atom_with_undetermined_d2_blocks_attribution():
+    # C4's root edge is in the searched graph but was never evaluated: it may pass D2
+    edges = [_edge(C2_CHILD, 20.0, mutation=V2_ATOM_IDS["C2"]),
+             _edge(C4_CHILD, None, mutation=V2_ATOM_IDS["C4"])]
+    evaluated = edges[:1]
+    table = build_claim_table(_report(edges, claims=[_claim(edges[0])]), **_inputs(evaluated))
+    att = table["chieff_attribution"]
+    assert att["family"] == ["C2"] and att["undetermined"] == ["C4"]
+    c2 = _row(table, C2_CHILD)
+    assert c2["attribution"]["status"] == "incomplete"
+    assert c2["attribution"]["undetermined"] == ["C4"]
+    assert c2["label"] == INCONCLUSIVE and "undetermined for C4" in c2["label_reason"]
+    assert "chieff_not_attributable" in c2["flags"]
+    assert "undetermined depth-1 D2" in render_claims_markdown(table)
+
+
+def test_chieff_atom_with_incomplete_d2_blocks_attribution():
+    # C4 passes the primary cut but its 0.9 cut cannot be evaluated (no mass-below entry)
+    edges = [_edge(C2_CHILD, 20.0, mutation=V2_ATOM_IDS["C2"]),
+             _edge(C4_CHILD, 9.0, mutation=V2_ATOM_IDS["C4"])]
+    inputs = _inputs(edges)
+    inputs["mass_below"] = {h: v for h, v in inputs["mass_below"].items() if h != C4_CHILD}
+    table = build_claim_table(_report(edges), **inputs)
+    assert _row(table, C4_CHILD)["D2_strength"]["status"] == "incomplete"
+    att = table["chieff_attribution"]
+    assert att["family"] == ["C2"] and att["undetermined"] == ["C4"]
+    c2 = _row(table, C2_CHILD)
+    assert c2["attribution"]["status"] == "incomplete" and c2["label"] == INCONCLUSIVE
+
+
+def test_d2_failing_chieff_atom_is_not_flagged_unattributable():
+    edges = [_edge(C2_CHILD, 20.0, mutation=V2_ATOM_IDS["C2"]),
+             _edge(C4_CHILD, 9.0, mutation=V2_ATOM_IDS["C4"]),
+             _edge("e" * 64, 2.0, mutation=V2_ATOM_IDS["C6"])]  # C6 fails D2
+    table = build_claim_table(_report(edges), **_inputs(edges))
+    c6 = _row(table, "e" * 64)
+    assert c6["attribution"]["status"] == "not_applicable"
+    assert "chieff_not_attributable" not in c6["flags"]
+    assert "`C6`" not in render_claims_markdown(table).split("Attribution status")[-1].split("Interpretations")[0]

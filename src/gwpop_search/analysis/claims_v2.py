@@ -68,7 +68,10 @@ model still passes D2 -- ``ln BF - 2 sigma_total - |bias| >= 3`` at the cuts
 the label is INCONCLUSIVE with the reason ``not attributable (family:
 ...)``; a pair that was not evaluated (over the depth-2 cap, or not
 composable: any two of S1-S4 are alternative chi_eff families) counts as not
-attributable. The table reports the
+attributable. A chi_eff atom of the searched graph whose depth-1 D2 is
+undetermined (root edge not evaluated, or D2 incomplete) may itself pass D2,
+so it also blocks attribution (status ``incomplete``) until it is resolved.
+The table reports the
 family and the pairwise matrix (:func:`chieff_attribution`); the depth-2
 enumeration makes these pairs mandatory
 (:func:`gwpop_search.grammar.v2.plan_depth2`). The rule applies to the
@@ -930,31 +933,47 @@ def chieff_attribution(
     ``d2_of_edge`` maps ``(parent_hash, child_hash)`` of every evaluated edge
     to its :func:`d2_strength` result; ``atom_of`` maps mutation ids to atom
     ids (default: the v2 table). Returns ``{"family": [D2-passing chi_eff
-    atoms at depth 1], "matrix": {A: {B: entry}}, "atoms": {A: {"status",
-    "reason", "pairs"}}}`` where ``matrix[A][B]`` is the edge that adds ``A``
-    to ``B``'s depth-1 model (status ``pass``/``fail``/``incomplete`` from
-    D2, or ``missing`` when the pair was not evaluated, with
-    ``not_composable`` when the two atoms cannot form one model). An atom's
-    status is ``pass`` only if every entry against the other family members
-    passes (vacuously when it is the only member), ``fail`` otherwise; atoms
-    outside the chi_eff block are not listed (``not_applicable``).
+    atoms at depth 1], "undetermined": [...], "matrix": {A: {B: entry}},
+    "atoms": {A: {"status", "reason", "pairs"}}}`` where ``matrix[A][B]`` is
+    the edge that adds ``A`` to ``B``'s depth-1 model (status
+    ``pass``/``fail``/``incomplete`` from D2, or ``missing`` when the pair was
+    not evaluated, with ``not_composable`` when the two atoms cannot form one
+    model).
+
+    A family member's status is ``pass`` only if every entry against the
+    other family members passes (vacuously when it is the only member) *and*
+    no other chi_eff atom of the searched graph has an undetermined depth-1
+    D2 (its root edge not evaluated, or D2 ``incomplete``/``missing``): such
+    an atom may pass D2, so the rule cannot be verified and the status is
+    ``incomplete``. A failing or unevaluated pair gives ``fail``. Atoms that
+    do not pass D2 at depth 1 are ``not_applicable`` (they cannot be
+    SUPPORTED, so attribution is moot); atoms outside the chi_eff block are
+    not listed.
     """
     labels = dict(V2_MUTATION_ATOM)
     labels.update(atom_of or {})
     root = report.get("graph_root_hash")
     edges = _evaluated_edges(report)
+    order = {a: i for i, a in enumerate(V2_ATOM_ORDER)}
     depth1: dict[str, Mapping] = {}
     for e in edges:
         atom = labels.get(e["mutation_id"])
         if root is not None and _graph_parent(e) == root and atom in CHIEFF_ATOMS:
             depth1[atom] = e
-    order = {a: i for i, a in enumerate(V2_ATOM_ORDER)}
+    # chi_eff atoms of the searched graph (evaluated or not; alias edges excluded)
+    searched = {labels.get(e["mutation_id"]) for e in report.get("edges", [])
+                if not e.get("skipped") and root is not None and _graph_parent(e) == root}
+    searched = {a for a in searched if a in CHIEFF_ATOMS}
 
     def d2_status(e: Mapping) -> Mapping:
         return d2_of_edge.get((e["parent_hash"], e["child_hash"])) or {"status": "missing"}
 
     family = sorted((a for a, e in depth1.items() if d2_status(e)["status"] == "pass"),
                     key=lambda a: order.get(a, len(order)))
+    depth1_status = {a: (d2_status(depth1[a])["status"] if a in depth1 else "not_evaluated")
+                     for a in searched | set(depth1)}
+    undetermined = sorted((a for a, st in depth1_status.items() if st not in ("pass", "fail")),
+                          key=lambda a: order.get(a, len(order)))
     base_of_child = {_graph_child(e): a for a, e in depth1.items()}
     pair_edges: dict[tuple[str, str], Mapping] = {}
     for e in edges:
@@ -985,24 +1004,36 @@ def chieff_attribution(
     family_text = ", ".join(family) if family else "none"
     atoms = {}
     for a in sorted(depth1, key=lambda x: order.get(x, len(order))):
+        if a not in family:
+            atoms[a] = {"status": "not_applicable",
+                        "reason": f"D2 at depth 1 is {depth1_status[a]!r}, not 'pass' (attribution moot)",
+                        "family": list(family), "pairs": {}, "blocking": [], "undetermined": []}
+            continue
         others = [b for b in family if b != a]
-        pairs = matrix.get(a) or {b: entry(a, b) for b in others}
+        pairs = matrix[a]
         blocking = [b for b in others if pairs[b]["status"] != "pass"]
-        if not others:
-            status, reason = "pass", "no other D2-passing chi_eff atom"
-        elif blocking:
+        unknown = [b for b in undetermined if b != a]
+        if blocking:
             status = "fail"
             reason = (f"not attributable (family: {family_text}; adding {a} fails or is unevaluated "
                       f"against {', '.join(blocking)})")
+        elif unknown:
+            status = "incomplete"
+            reason = (f"not attributable (family: {family_text}; depth-1 D2 undetermined for "
+                      f"{', '.join(unknown)}, which may also pass D2)")
+        elif not others:
+            status, reason = "pass", "no other D2-passing chi_eff atom"
         else:
             status, reason = "pass", f"attributable against every other family member ({', '.join(others)})"
         atoms[a] = {"status": status, "reason": reason, "family": list(family), "pairs": pairs,
-                    "blocking": blocking}
+                    "blocking": blocking, "undetermined": unknown}
     return {
         "rule": "a chi_eff atom can be SUPPORTED only if adding it to every other chi_eff atom that "
                 "passes D2 at depth 1 still passes D2 (ln BF - 2 sigma_total - |bias| >= 3 at cuts 1 "
-                "and 0.9); matrix[A][B] = the edge adding A to B's depth-1 model",
+                "and 0.9); a chi_eff atom of the graph with an undetermined depth-1 D2 (not evaluated, "
+                "incomplete) blocks attribution; matrix[A][B] = the edge adding A to B's depth-1 model",
         "family": family,
+        "undetermined": undetermined,
         "matrix": matrix,
         "atoms": atoms,
     }
@@ -1190,7 +1221,8 @@ def build_claim_table(
             "Pairwise attribution (operator decision 2026-10-02): a depth-1 chi_eff atom is SUPPORTED "
             "only if adding it to every other D2-passing depth-1 chi_eff atom passes D2 at cuts 1 and "
             "0.9; an unevaluated or non-composable pair (any two of S1-S4, which are alternative chi_eff "
-            "families) leaves it INCONCLUSIVE ('not attributable'); a direct S_i vs S_j depth-1 "
+            "families), or another chi_eff atom of the graph whose depth-1 D2 is undetermined (not "
+            "evaluated or incomplete), leaves it INCONCLUSIVE ('not attributable'); a direct S_i vs S_j depth-1 "
             "comparison is not substituted without an operator decision. The family is D2-passing (not D1 + D2): an atom with failing "
             "numerics still competes for the signal.",
         ],
@@ -1226,6 +1258,10 @@ def render_claims_markdown(table: Mapping) -> str:
     family = list(att.get("family") or [])
     lines += ["", f"chi_eff attribution family (D2-passing chi_eff atoms at depth 1): "
                   f"**{', '.join(family) if family else 'none'}**"]
+    undetermined = list(att.get("undetermined") or [])
+    if undetermined:
+        lines += ["", "chi_eff atoms with undetermined depth-1 D2 (not evaluated or incomplete; they block "
+                      f"attribution until resolved): **{', '.join(undetermined)}**"]
     if len(family) > 1:
         matrix = att.get("matrix") or {}
         lines += ["", "Pairwise matrix: row = atom added, column = the other atom's depth-1 model; "
