@@ -550,6 +550,15 @@ def enumerate_v2_depth1(root: ModelSpec | None = None) -> ModelGraph:
 #: pairs, then every other passing pair.
 V2_DEPTH2_PRIORITY_PAIRS = (("C2", "S2"), ("C2", "C4"), ("C2", "C6"))
 V2_DEPTH2_CAP = 12
+#: Depth-2 priority tiers (operator decision 2026-10-02 added tier 0).
+V2_DEPTH2_TIERS = (
+    "mandatory chi_eff attribution pairs (both atoms chi_eff, both pass D2 at depth 1)",
+    "spec pairs",
+    "mass x chi_eff",
+    "chi_eff x chi_eff",
+    "other",
+)
+TIER_ATTRIBUTION, TIER_SPEC, TIER_MASS_CHIEFF, TIER_CHIEFF_CHIEFF, TIER_OTHER = range(5)
 
 
 class NotComposable(ValueError):
@@ -596,33 +605,77 @@ def _ordered_pair(a: str, b: str) -> tuple[str, str]:
     return (a, b) if order[a] <= order[b] else (b, a)
 
 
-def depth2_priority(passing: Iterable[str]) -> list[tuple[int, tuple[str, str]]]:
-    """All pairs of passing atoms in the pre-declared priority order ``(tier, pair)``."""
+def rank_chieff_atoms(atoms: Iterable[str], scores: Mapping[str, float] | None = None) -> list[str]:
+    """chi_eff atoms by decreasing strength: ``scores`` (the depth-1 D2 lower bound
+    ``ln BF - 2 sigma_total - |bias|``, larger = stronger) first; atoms without
+    a score, and ties, follow the spec priority: C2 (the atom of every spec
+    priority pair), then its spec partners S2, C4, C6, then the spec table
+    order."""
+    order = {aid: i for i, aid in enumerate(V2_ATOM_ORDER)}
+    atoms = [a for a in dict.fromkeys(atoms) if a in CHIEFF_ATOMS]
+    scores = dict(scores or {})
+    spec = list(dict.fromkeys(a for pair in V2_DEPTH2_PRIORITY_PAIRS for a in pair))
+    spec_rank = {a: i for i, a in enumerate(spec)}
+
+    def key(a):
+        score = scores.get(a)
+        has = score is not None
+        return (0 if has else 1, -float(score) if has else 0.0, spec_rank.get(a, len(spec)), order[a])
+
+    return sorted(atoms, key=key)
+
+
+def chieff_attribution_pairs(atoms: Iterable[str], scores: Mapping[str, float] | None = None
+                             ) -> list[tuple[str, str]]:
+    """The mandatory depth-2 attribution pairs, in priority order.
+
+    Every pair of distinct chi_eff atoms in ``atoms`` (the chi_eff atoms passing
+    D2 at depth 1), ordered by the rank (:func:`rank_chieff_atoms`) of the
+    stronger member, then of the weaker one: all pairs with the top atom
+    first, then the pairs with the second atom, and so on.
+    """
+    ranked = rank_chieff_atoms(atoms, scores)
+    return [_ordered_pair(a, b) for i, a in enumerate(ranked) for b in ranked[i + 1:]]
+
+
+def depth2_priority(passing: Iterable[str], *, chieff_d2_passing: Iterable[str] | None = None,
+                    scores: Mapping[str, float] | None = None) -> list[tuple[int, tuple[str, str]]]:
+    """All candidate pairs in the pre-declared priority order ``(tier, pair)``.
+
+    ``passing`` are the atoms passing D1 + D2 at depth 1; ``chieff_d2_passing``
+    the atoms passing D2 (default: ``passing``), whose chi_eff members form the
+    mandatory attribution pairs of tier 0 (:func:`chieff_attribution_pairs`;
+    the pairwise attribution rule of the claim table needs them).
+    """
     requested = set(passing)
-    unknown = requested - set(V2_ATOM_ORDER)
+    d2 = set(requested if chieff_d2_passing is None else chieff_d2_passing)
+    unknown = (requested | d2) - set(V2_ATOM_ORDER)
     if unknown:
         raise ValueError(f"unknown atom id(s) {sorted(unknown)}")
+    mandatory_atoms = [a for a in V2_ATOM_ORDER if a in CHIEFF_ATOMS and (a in d2 or a in requested)]
     passing = [a for a in V2_ATOM_ORDER if a in requested]
     seen: set[tuple[str, str]] = set()
     ranked: list[tuple[int, tuple[str, str]]] = []
 
-    def add(tier, a, b):
+    def add(tier, a, b, pool):
         pair = _ordered_pair(a, b)
-        if a != b and a in passing and b in passing and pair not in seen:
+        if a != b and a in pool and b in pool and pair not in seen:
             seen.add(pair)
             ranked.append((tier, pair))
 
+    for a, b in chieff_attribution_pairs(mandatory_atoms, scores):
+        add(TIER_ATTRIBUTION, a, b, mandatory_atoms)
     for a, b in V2_DEPTH2_PRIORITY_PAIRS:
-        add(0, a, b)
+        add(TIER_SPEC, a, b, passing)
     for m in MASS_ATOMS:
         for s in CHIEFF_ATOMS:
-            add(1, m, s)
+            add(TIER_MASS_CHIEFF, m, s, passing)
     for i, a in enumerate(CHIEFF_ATOMS):
         for b in CHIEFF_ATOMS[i + 1:]:
-            add(2, a, b)
+            add(TIER_CHIEFF_CHIEFF, a, b, passing)
     for i, a in enumerate(V2_ATOM_ORDER):
         for b in V2_ATOM_ORDER[i + 1:]:
-            add(3, a, b)
+            add(TIER_OTHER, a, b, passing)
     return ranked
 
 
@@ -644,31 +697,69 @@ class Depth2Plan:
     not_composable: tuple[tuple[tuple[str, str], str], ...] = ()
     over_cap: tuple[tuple[str, str], ...] = ()
     notes: tuple[str, ...] = field(default_factory=tuple)
+    #: chi_eff atoms passing D2 at depth 1, strongest first (the attribution family)
+    attribution_family: tuple[str, ...] = ()
+    #: mandatory attribution pairs that the cap excluded (their atoms stay unattributable)
+    mandatory_over_cap: tuple[tuple[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "rule": "pairs of depth-1 edges passing D1 + D2 only; priority tiers "
-                    "0 = spec pairs, 1 = mass x chi_eff, 2 = chi_eff x chi_eff, 3 = other; cap",
+            "rule": "pairs of depth-1 edges passing D1 + D2, plus the MANDATORY chi_eff attribution "
+                    "pairs (every pair of chi_eff atoms passing D2; pairs with the strongest atom "
+                    "first); priority tiers " + "; ".join(f"{i} = {t}" for i, t in enumerate(V2_DEPTH2_TIERS))
+                    + "; cap (mandatory pairs first; over-cap mandatory pairs are listed and leave "
+                    "their atoms not attributable)",
             "passing": list(self.passing),
             "cap": self.cap,
+            "attribution_family": list(self.attribution_family),
             "selected": [slot.to_dict() for slot in self.selected],
             "not_composable": [{"atoms": list(p), "reason": r} for p, r in self.not_composable],
             "over_cap": [list(p) for p in self.over_cap],
+            "mandatory_over_cap": [list(p) for p in self.mandatory_over_cap],
+            "notes": list(self.notes),
         }
 
 
 def plan_depth2(passing: Iterable[str], *, root: ModelSpec | None = None,
-                cap: int = V2_DEPTH2_CAP) -> Depth2Plan:
-    """Pre-declared depth-2 enumeration given the depth-1 atoms passing D1 + D2."""
+                cap: int = V2_DEPTH2_CAP, chieff_d2_passing: Iterable[str] | None = None,
+                scores: Mapping[str, float] | None = None) -> Depth2Plan:
+    """Pre-declared depth-2 enumeration given the depth-1 results.
+
+    ``passing``: atoms passing D1 + D2 at depth 1. ``chieff_d2_passing``:
+    atoms passing D2 (default ``passing``); every pair of its chi_eff members
+    is a **mandatory** attribution pair (tier 0), because the claim table's
+    pairwise attribution rule (:func:`gwpop_search.analysis.claims_v2.chieff_attribution`)
+    can label a chi_eff atom SUPPORTED only if adding it to every other
+    D2-passing chi_eff atom still passes D2. ``scores``: the depth-1 D2 lower
+    bounds ``ln BF - 2 sigma_total - |bias|`` (larger = stronger) that rank the
+    chi_eff atoms; the pairs with the strongest atom come first.
+
+    **The cap is respected.** Mandatory pairs are filled first, in rank order.
+    The strongest atom has at most nine partners (ten chi_eff atoms; any two
+    of S1-S4 are alternative chi_eff families and are not composable), so
+    with the cap of 12 its pairs always fit and its attribution can always be
+    tested; if the mandatory pairs exceed the cap
+    the remaining ones are recorded in ``mandatory_over_cap`` (and ``notes``),
+    the weaker atoms they involve stay INCONCLUSIVE ("not attributable") in
+    the claim table, and only an explicit operator decision to raise the cap
+    adds them. Non-mandatory pairs follow in the tiers of
+    :data:`V2_DEPTH2_TIERS` while slots remain. A pair that is not composable
+    (a family change that would discard one atom) cannot exist; it is listed
+    in ``not_composable`` and leaves its atoms not attributable to each other.
+    """
     root = v2_root_model_spec() if root is None else root
     if cap < 0:
         raise ValueError("cap cannot be negative")
     requested = set(passing)
-    ranked = depth2_priority(requested)  # validates the atom ids
+    ranked = depth2_priority(requested, chieff_d2_passing=chieff_d2_passing, scores=scores)  # validates ids
+    d2 = set(requested if chieff_d2_passing is None else chieff_d2_passing)
+    family = tuple(rank_chieff_atoms([a for a in V2_ATOM_ORDER if a in CHIEFF_ATOMS and (a in d2 or a in requested)],
+                                     scores))
     passing = tuple(a for a in V2_ATOM_ORDER if a in requested)
     selected: list[Depth2Slot] = []
     bad: list[tuple[tuple[str, str], str]] = []
     over: list[tuple[str, str]] = []
+    mandatory_over: list[tuple[str, str]] = []
     hashes: set[str] = set()
     for tier, pair in ranked:
         try:
@@ -680,10 +771,19 @@ def plan_depth2(passing: Iterable[str], *, root: ModelSpec | None = None,
             continue
         if len(selected) >= cap:
             over.append(pair)
+            if tier == TIER_ATTRIBUTION:
+                mandatory_over.append(pair)
             continue
         hashes.add(model.model_hash)
         selected.append(Depth2Slot(pair, tier, model))
-    return Depth2Plan(passing, cap, tuple(selected), tuple(bad), tuple(over))
+    notes = []
+    if mandatory_over:
+        notes.append(
+            f"the cap {cap} binds on the mandatory attribution pairs: {len(mandatory_over)} excluded "
+            f"({', '.join('+'.join(p) for p in mandatory_over)}); the chi_eff atoms they involve cannot "
+            "be attributed (INCONCLUSIVE) unless the operator raises the cap")
+    return Depth2Plan(passing, cap, tuple(selected), tuple(bad), tuple(over), tuple(notes),
+                      family, tuple(mandatory_over))
 
 
 def extend_graph_with_depth2(graph: ModelGraph, plan: Depth2Plan, *,
@@ -868,7 +968,10 @@ def v2_graph_payload(graph: ModelGraph, *, depth2: Depth2Plan | None = None) -> 
         "depth2_rule": {
             "cap": V2_DEPTH2_CAP,
             "priority_pairs": [list(p) for p in V2_DEPTH2_PRIORITY_PAIRS],
-            "tiers": ["spec pairs", "mass x chi_eff", "chi_eff x chi_eff", "other"],
+            "tiers": list(V2_DEPTH2_TIERS),
+            "mandatory": "every pair of chi_eff atoms passing D2 at depth 1 (attribution rule, operator "
+                         "decision 2026-10-02); pairs with the strongest atom (largest D2 lower bound) "
+                         "first; filled before every other tier; over-cap mandatory pairs are listed",
         },
         "alternative_roots": {name: {"atom": atom, "model_hash": spec.model_hash}
                               for (name, atom), spec in zip(V2_ALT_ROOT_ATOMS.items(),

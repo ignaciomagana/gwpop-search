@@ -484,3 +484,107 @@ def test_d6_needs_enough_draws_for_the_two_sided_tail():
     row = build_claim_table(_report(edges), **_inputs(edges, ppc=few))["edges"][0]
     assert row["D6_ppc"]["status"] == "incomplete"
     assert row["label"] == INCONCLUSIVE
+
+
+# ---------------------------------------------------------------------------
+# pairwise attribution of chi_eff atoms (operator decision 2026-10-02)
+# ---------------------------------------------------------------------------
+
+from gwpop_search.analysis.claims_v2 import chieff_attribution  # noqa: E402
+from gwpop_search.grammar.v2 import V2_ATOM_IDS  # noqa: E402
+
+C2_CHILD, C4_CHILD, M1_CHILD, PAIR = "a" * 64, "b" * 64, "c" * 64, "d" * 64
+
+
+def _attribution_case(pair_edges=(), *, extra_root=()):
+    """Root edges C2 (+20), C4 (+9) (both pass D2), M1 (+1, fails D2) and optional depth-2 edges."""
+    root_edges = [
+        _edge(C2_CHILD, 20.0, mutation=V2_ATOM_IDS["C2"]),
+        _edge(C4_CHILD, 9.0, mutation=V2_ATOM_IDS["C4"]),
+        _edge(M1_CHILD, 1.0, mutation=V2_ATOM_IDS["M1"]),
+        *extra_root,
+    ]
+    edges = root_edges + list(pair_edges)
+    inputs = _inputs(edges, alt_roots={"A1": _alt(root_edges), "A2": _alt(root_edges)})
+    return edges, inputs
+
+
+def test_chieff_atom_without_its_depth2_pairs_is_not_attributable():
+    edges, inputs = _attribution_case()
+    table = build_claim_table(_report(edges), **inputs)
+    assert table["chieff_attribution"]["family"] == ["C2", "C4"]
+    c2 = _row(table, C2_CHILD)
+    # D1-D6 all pass, but C4 also passes D2 and the C2 + C4 pair was never evaluated
+    assert c2["label"] == INCONCLUSIVE
+    assert c2["attribution"]["status"] == "fail" and c2["attribution"]["blocking"] == ["C4"]
+    assert c2["label_reason"].startswith("not attributable (family: C2, C4")
+    assert "chieff_not_attributable" in c2["flags"]
+    assert table["chieff_attribution"]["matrix"]["C2"]["C4"]["status"] == "missing"
+    assert _row(table, M1_CHILD)["attribution"]["status"] == "not_applicable"
+    md = render_claims_markdown(table)
+    assert "attribution family" in md and "| C2 | - | missing |" in md
+    assert "not attributable (family: C2, C4" in md
+
+
+def test_attribution_needs_d2_of_the_edge_adding_the_atom_to_every_other_family_member():
+    pair = [
+        _edge(PAIR, 11.0, mutation=V2_ATOM_IDS["C2"], parent=C4_CHILD),  # C2 on top of C4: passes D2
+        _edge(PAIR, 0.5, mutation=V2_ATOM_IDS["C4"], parent=C2_CHILD),   # C4 on top of C2: fails D2
+    ]
+    edges, inputs = _attribution_case(pair)
+    table = build_claim_table(_report(edges), **inputs)
+    c2, c4 = _row(table, C2_CHILD), next(
+        r for r in table["edges"] if r["child_hash"] == C4_CHILD and r["parent_hash"] == ROOT)
+    assert c2["label"] == SUPPORTED and c2["attribution"]["status"] == "pass"
+    assert c2["label_reason"] is None
+    assert c4["label"] == INCONCLUSIVE and c4["attribution"]["blocking"] == ["C2"]
+    matrix = table["chieff_attribution"]["matrix"]
+    assert matrix["C2"]["C4"]["status"] == "pass"
+    assert matrix["C2"]["C4"]["lower"] == pytest.approx(11.0 - 1.0 - 0.1)
+    assert matrix["C4"]["C2"]["status"] == "fail"
+    # depth-2 rows are attribution comparisons themselves: the rule does not apply to them
+    for r in table["edges"]:
+        if r["parent_hash"] != ROOT:
+            assert r["attribution"]["status"] == "not_applicable"
+    md = render_claims_markdown(table)
+    assert "| C2 | - | pass (+9.90) |" in md
+
+
+def test_attribution_is_checked_at_the_tighter_cut_too():
+    pair = [_edge(PAIR, 8.0, mutation=V2_ATOM_IDS["C2"], parent=C4_CHILD)]
+    edges, inputs = _attribution_case(pair)
+    # the pair model keeps little posterior mass below sigma^2 = 0.9: ln BF(0.9) = 8 + ln(0.01 / 0.6)
+    inputs["mass_below"] = dict(inputs["mass_below"], **{PAIR: _below(0.01)})
+    table = build_claim_table(_report(edges), **inputs)
+    entry = table["chieff_attribution"]["matrix"]["C2"]["C4"]
+    assert entry["lower"] == pytest.approx(6.9) and entry["status"] == "fail"
+    assert entry["min_lower"] == pytest.approx(8.0 + math.log(0.01 / 0.6) - 1.0 - 0.1, abs=0.05)
+    assert _row(table, C2_CHILD)["label"] == INCONCLUSIVE
+
+
+def test_sole_d2_passing_chieff_atom_is_attributable_and_d2_failures_do_not_join_the_family():
+    edges = [_edge(C2_CHILD, 20.0, mutation=V2_ATOM_IDS["C2"]),
+             _edge(C4_CHILD, 2.0, mutation=V2_ATOM_IDS["C4"])]  # C4 fails D2
+    table = build_claim_table(_report(edges), **_inputs(edges))
+    assert table["chieff_attribution"]["family"] == ["C2"]
+    c2 = _row(table, C2_CHILD)
+    assert c2["label"] == SUPPORTED
+    assert c2["attribution"] == {**c2["attribution"], "status": "pass", "blocking": []}
+    assert "no other" in c2["attribution"]["reason"]
+
+
+def test_non_composable_family_members_cannot_attribute_each_other():
+    edges = [_edge("e" * 64, 12.0, mutation=V2_ATOM_IDS["S1"]),
+             _edge("f" * 64, 10.0, mutation=V2_ATOM_IDS["S2"])]
+    report = _report(edges)
+    from gwpop_search.analysis.claims_v2 import d2_strength
+
+    d2 = {(e["parent_hash"], e["child_hash"]): d2_strength(
+        e, n_atoms_tried=2, mass_below={"parent": _below(), "child": _below()}) for e in edges}
+    result = chieff_attribution(report, d2)
+    assert result["family"] == ["S1", "S2"]
+    assert result["matrix"]["S1"]["S2"]["not_composable"] is True
+    assert result["atoms"]["S2"]["status"] == "fail"
+    table = build_claim_table(report, **_inputs(edges))
+    assert {r["label"] for r in table["edges"]} == {INCONCLUSIVE}
+    assert "not composable" in render_claims_markdown(table)

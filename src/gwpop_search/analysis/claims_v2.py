@@ -56,6 +56,25 @@ SUPPORTED requires all six:
   positive edge): no pre-declared statistic at ``p < 0.01``
   (:mod:`gwpop_search.analysis.ppc`).
 
+**Pairwise attribution (chi_eff block; operator decision 2026-10-02).** On
+the pilot (b) closure mock (truth: width(q), C2) both C2 and C4 (width(z))
+passed D2 at depth 1: the selection couples q and z, so a chi_eff atom can
+pass D2 by absorbing another atom's signal. A chi_eff-block atom (C1-C6,
+S1-S4) can therefore be SUPPORTED only if, for every OTHER chi_eff atom that
+passes D2 at depth 1 (the *family*), the depth-2 pair (this atom + the
+other) was evaluated and the edge adding this atom to the other's depth-1
+model still passes D2 -- ``ln BF - 2 sigma_total - |bias| >= 3`` at the cuts
+1 and 0.9, the same :func:`d2_strength` evaluation as every edge. Otherwise
+the label is INCONCLUSIVE with the reason ``not attributable (family:
+...)``; a pair that was not evaluated (over the depth-2 cap, or not
+composable: any two of S1-S4 are alternative chi_eff families) counts as not
+attributable. The table reports the
+family and the pairwise matrix (:func:`chieff_attribution`); the depth-2
+enumeration makes these pairs mandatory
+(:func:`gwpop_search.grammar.v2.plan_depth2`). The rule applies to the
+depth-1 chi_eff edges (out of the root); depth-2 edges are themselves the
+attribution comparisons and are labelled by D1-D6 alone.
+
 DISFAVOURED: ``ln BF + 2 sigma_total + |bias| <= -3`` at both cuts ``c = 1``
 and ``c' = 0.9`` (the symmetric D2 condition) with D1 passing and the sign
 stable under D3 (width variants, and the taper-2 rerun where one exists).
@@ -68,6 +87,7 @@ import math
 from typing import Mapping, Sequence
 
 from gwpop_search.grammar.paths import edge_path_key, mutation_paths
+from gwpop_search.grammar.v2 import CHIEFF_ATOMS, V2_ATOM_ORDER, V2_MUTATION_ATOM
 from gwpop_search.hbi.taper import DEFAULT_TAPER_KIND
 
 from ._common import AnalysisInputError, json_ready
@@ -865,7 +885,131 @@ def count_edges_evaluated(report: Mapping) -> int:
     return len(_evaluated_edges(report))
 
 
-def label_for(d1: Mapping, d2: Mapping, d3: Mapping, d4: Mapping, d5: Mapping, d6: Mapping) -> str:
+# ---------------------------------------------------------------------------
+# Pairwise attribution of chi_eff atoms
+# ---------------------------------------------------------------------------
+
+_ATTRIBUTION_OK = ("pass", "not_applicable")
+
+
+def _graph_parent(edge: Mapping) -> str:
+    return str(edge.get("graph_parent_hash") or edge["parent_hash"])
+
+
+def _graph_child(edge: Mapping) -> str:
+    return str(edge.get("graph_child_hash") or edge["child_hash"])
+
+
+def _composable(a: str, b: str) -> bool | None:
+    """Whether two v2 atoms compose into one depth-2 model on R0 (``None``: not v2 atoms)."""
+    from gwpop_search.grammar.v2 import NotComposable, compose_atoms, v2_root_model_spec
+
+    if a not in V2_ATOM_ORDER or b not in V2_ATOM_ORDER:
+        return None
+    key = tuple(sorted((a, b)))
+    if key not in _COMPOSABLE_CACHE:
+        try:
+            compose_atoms(v2_root_model_spec(), a, b)
+            _COMPOSABLE_CACHE[key] = True
+        except NotComposable:
+            _COMPOSABLE_CACHE[key] = False
+    return _COMPOSABLE_CACHE[key]
+
+
+_COMPOSABLE_CACHE: dict[tuple[str, str], bool] = {}
+
+
+def chieff_attribution(
+    report: Mapping,
+    d2_of_edge: Mapping[tuple[str, str], Mapping],
+    *,
+    atom_of: Mapping[str, str] | None = None,
+) -> dict:
+    """The pairwise attribution rule of the chi_eff block (module docstring).
+
+    ``d2_of_edge`` maps ``(parent_hash, child_hash)`` of every evaluated edge
+    to its :func:`d2_strength` result; ``atom_of`` maps mutation ids to atom
+    ids (default: the v2 table). Returns ``{"family": [D2-passing chi_eff
+    atoms at depth 1], "matrix": {A: {B: entry}}, "atoms": {A: {"status",
+    "reason", "pairs"}}}`` where ``matrix[A][B]`` is the edge that adds ``A``
+    to ``B``'s depth-1 model (status ``pass``/``fail``/``incomplete`` from
+    D2, or ``missing`` when the pair was not evaluated, with
+    ``not_composable`` when the two atoms cannot form one model). An atom's
+    status is ``pass`` only if every entry against the other family members
+    passes (vacuously when it is the only member), ``fail`` otherwise; atoms
+    outside the chi_eff block are not listed (``not_applicable``).
+    """
+    labels = dict(V2_MUTATION_ATOM)
+    labels.update(atom_of or {})
+    root = report.get("graph_root_hash")
+    edges = _evaluated_edges(report)
+    depth1: dict[str, Mapping] = {}
+    for e in edges:
+        atom = labels.get(e["mutation_id"])
+        if root is not None and _graph_parent(e) == root and atom in CHIEFF_ATOMS:
+            depth1[atom] = e
+    order = {a: i for i, a in enumerate(V2_ATOM_ORDER)}
+
+    def d2_status(e: Mapping) -> Mapping:
+        return d2_of_edge.get((e["parent_hash"], e["child_hash"])) or {"status": "missing"}
+
+    family = sorted((a for a, e in depth1.items() if d2_status(e)["status"] == "pass"),
+                    key=lambda a: order.get(a, len(order)))
+    base_of_child = {_graph_child(e): a for a, e in depth1.items()}
+    pair_edges: dict[tuple[str, str], Mapping] = {}
+    for e in edges:
+        base = base_of_child.get(_graph_parent(e))
+        added = labels.get(e["mutation_id"])
+        if base is not None and added in CHIEFF_ATOMS and added != base:
+            pair_edges[(added, base)] = e
+
+    def entry(added: str, base: str) -> dict:
+        e = pair_edges.get((added, base))
+        if e is None:
+            composable = _composable(added, base)
+            reason = ("not composable (the two atoms cannot form one model)" if composable is False
+                      else "depth-2 pair not evaluated")
+            return {"status": "missing", "reason": reason, "not_composable": composable is False}
+        d2 = d2_status(e)
+        return {
+            "status": d2["status"],
+            "parent_hash": e["parent_hash"],
+            "child_hash": e["child_hash"],
+            "log_bayes_factor": d2.get("log_bayes_factor"),
+            "lower": d2.get("lower"),
+            "min_lower": d2.get("min_lower"),
+            "reason": d2.get("reason"),
+        }
+
+    matrix = {a: {b: entry(a, b) for b in family if b != a} for a in family}
+    family_text = ", ".join(family) if family else "none"
+    atoms = {}
+    for a in sorted(depth1, key=lambda x: order.get(x, len(order))):
+        others = [b for b in family if b != a]
+        pairs = matrix.get(a) or {b: entry(a, b) for b in others}
+        blocking = [b for b in others if pairs[b]["status"] != "pass"]
+        if not others:
+            status, reason = "pass", "no other D2-passing chi_eff atom"
+        elif blocking:
+            status = "fail"
+            reason = (f"not attributable (family: {family_text}; adding {a} fails or is unevaluated "
+                      f"against {', '.join(blocking)})")
+        else:
+            status, reason = "pass", f"attributable against every other family member ({', '.join(others)})"
+        atoms[a] = {"status": status, "reason": reason, "family": list(family), "pairs": pairs,
+                    "blocking": blocking}
+    return {
+        "rule": "a chi_eff atom can be SUPPORTED only if adding it to every other chi_eff atom that "
+                "passes D2 at depth 1 still passes D2 (ln BF - 2 sigma_total - |bias| >= 3 at cuts 1 "
+                "and 0.9); matrix[A][B] = the edge adding A to B's depth-1 model",
+        "family": family,
+        "matrix": matrix,
+        "atoms": atoms,
+    }
+
+
+def label_for(d1: Mapping, d2: Mapping, d3: Mapping, d4: Mapping, d5: Mapping, d6: Mapping,
+              attribution: Mapping | None = None) -> str:
     supported = (
         d1["status"] == "pass"
         and d2["status"] == "pass"
@@ -873,6 +1017,7 @@ def label_for(d1: Mapping, d2: Mapping, d3: Mapping, d4: Mapping, d5: Mapping, d
         and d4["status"] in _D4_OK
         and d5["status"] == "pass"
         and d6["status"] == "pass"
+        and (attribution is None or attribution["status"] in _ATTRIBUTION_OK)
     )
     if supported:
         return SUPPORTED
@@ -928,6 +1073,14 @@ def build_claim_table(
     if prior_sensitivity is not None:
         factors = {(row["parent_hash"], row["child_hash"]): row.get("factor")
                    for row in prior_sensitivity.get("edges", [])}
+    d2_of_edge = {}
+    for e in _evaluated_edges(report):
+        below = {"parent": (mass_below or {}).get(e["parent_hash"]),
+                 "child": (mass_below or {}).get(e["child_hash"])}
+        d2_of_edge[(e["parent_hash"], e["child_hash"])] = d2_strength(e, n_atoms_tried=tried, mass_below=below)
+    attribution_table = chieff_attribution(report, d2_of_edge, atom_of=atom_labels)
+    labels_of = dict(V2_MUTATION_ATOM)
+    labels_of.update(atom_labels or {})
     rows = []
     for claim in report.get("claims", []):
         edge = edges.get((claim["parent_hash"], claim["child_hash"]))
@@ -938,14 +1091,29 @@ def build_claim_table(
         below = {"parent": (mass_below or {}).get(claim["parent_hash"]),
                  "child": (mass_below or {}).get(claim["child_hash"])}
         d2 = d2_strength(edge, n_atoms_tried=tried, mass_below=below, taper_mass=d1["taper_mass_fraction"])
+        atom_id = labels_of.get(claim["mutation_id"])
+        if (atom_id in CHIEFF_ATOMS and root_hash is not None and _graph_parent(edge) == root_hash
+                and atom_id in attribution_table["atoms"]):
+            attribution = dict(attribution_table["atoms"][atom_id])
+        elif atom_id in CHIEFF_ATOMS and root_hash is not None and _graph_parent(edge) == root_hash:
+            attribution = {"status": "missing", "reason": "depth-1 edge not evaluated"}
+        else:
+            attribution = {"status": "not_applicable",
+                           "reason": "not a depth-1 chi_eff-block edge"}
         d3 = d3_prior(claim, variants, lnbf, reruns=d3_reruns, taper2=taper2,
                       factor=factors.get((claim["parent_hash"], claim["child_hash"])))
         d4 = d4_sddr(claim, edge, sddr_index)
         key = _edge_key(edge, root_hash, paths)
         d5 = d5_alt_roots(claim, lnbf, key, alt, loo=loo)
         d6 = d6_ppc(claim, lnbf, ppc or {})
-        label = label_for(d1, d2, d3, d4, d5, d6)
+        label = label_for(d1, d2, d3, d4, d5, d6, attribution)
+        criteria_met = label_for(d1, d2, d3, d4, d5, d6) == SUPPORTED
+        label_reason = None
+        if criteria_met and label != SUPPORTED:
+            label_reason = attribution["reason"]
         flags = []
+        if attribution["status"] not in _ATTRIBUTION_OK:
+            flags.append("chieff_not_attributable")
         if d4["status"] == "flag_investigate":
             flags.append("sddr_disagreement_requires_human_review")
         if not d1["taper_mass_reported"]:
@@ -968,12 +1136,14 @@ def build_claim_table(
             "log_bayes_factor": lnbf,
             "n_atoms_tried": tried,
             "label": label,
+            "label_reason": label_reason,
             "D1_numerics": d1,
             "D2_strength": d2,
             "D3_prior_sensitivity": d3,
             "D4_sddr": d4,
             "D5_alternative_roots": d5,
             "D6_ppc": d6,
+            "attribution": attribution,
             "flags": flags,
         })
     rows.sort(key=lambda r: -r["log_bayes_factor"])
@@ -991,6 +1161,7 @@ def build_claim_table(
             "sddr_sigmas": SDDR_SIGMAS, "ppc_alpha": PPC_LEVEL, "alt_roots": ALT_ROOT_DESCRIPTIONS,
             "d2_primary_cut": D2_PRIMARY_CUT, "d2_tighter_cuts": list(D2_TIGHTER_CUTS),
         },
+        "chieff_attribution": {k: v for k, v in attribution_table.items() if k != "atoms"},
         "interpretations_pending_operator_confirmation": [
             "D1 is decided by the frozen per-model gate file; the tool's G-MC1..5 defaults are "
             "reported, not binding (v1 resolution carried over; the v2 taper replaces the variance guard).",
@@ -1010,9 +1181,18 @@ def build_claim_table(
             "D6 checks the claimed model: the child of a positive edge (the parent of a negative one; "
             "D6 is not required for DISFAVOURED).",
             "D6 p-values: one-sided P(T_pred >= T_obs) for the four KS distances, two-sided for the "
-            "two Spearman correlations; alpha = 0.01 per statistic without multiplicity correction "
-            "(family-wise false-fail rate of a correct model <= 5.9% over the six statistics); at least "
-            "1000 posterior draws (n_draws * alpha / 2 >= 5).",
+            "two Spearman correlations and the twelve width statistics (IQR of chi_eff in terciles of "
+            "q, z, m1; Spearman(x, |chi_eff - median|) for x = q, z, m1; operator decision "
+            "2026-10-02); alpha = 0.01 per statistic without multiplicity correction (a D6 false fail "
+            "only removes SUPPORTED); the family-wise false-fail rate of a correct model is disclosed "
+            "(independence bound 16.5% over 18 statistics; empirical estimate from the predicted "
+            "replicates in the PPC output); at least 1000 posterior draws (n_draws * alpha / 2 >= 5).",
+            "Pairwise attribution (operator decision 2026-10-02): a depth-1 chi_eff atom is SUPPORTED "
+            "only if adding it to every other D2-passing depth-1 chi_eff atom passes D2 at cuts 1 and "
+            "0.9; an unevaluated or non-composable pair (any two of S1-S4, which are alternative chi_eff "
+            "families) leaves it INCONCLUSIVE ('not attributable'); a direct S_i vs S_j depth-1 "
+            "comparison is not substituted without an operator decision. The family is D2-passing (not D1 + D2): an atom with failing "
+            "numerics still competes for the signal.",
         ],
         "edges": rows,
     })
@@ -1025,8 +1205,8 @@ def render_claims_markdown(table: Mapping) -> str:
         f"Atoms tried (trials count, distinct evaluated non-root models): **{table['n_atoms_tried']}** "
         f"({table.get('n_edges_evaluated', '?')} edges evaluated).",
         "",
-        "| atom | ln BF | D1 | D2 (lower; at tighter cuts) | D3 | D4 | D5 | D6 | label |",
-        "| --- | ---: | --- | ---: | --- | --- | --- | --- | --- |",
+        "| atom | ln BF | D1 | D2 (lower; at tighter cuts) | D3 | D4 | D5 | D6 | attribution | label |",
+        "| --- | ---: | --- | ---: | --- | --- | --- | --- | --- | --- |",
     ]
     for r in table["edges"]:
         d2 = r["D2_strength"]
@@ -1039,8 +1219,44 @@ def render_claims_markdown(table: Mapping) -> str:
             f"| `{name}` | {r['log_bayes_factor']:+.2f} | {r['D1_numerics']['status']} | {d2_cell} | "
             f"{r['D3_prior_sensitivity']['status']} | {r['D4_sddr']['status']} | "
             f"{r['D5_alternative_roots']['status']} | {r['D6_ppc']['status']} | "
+            f"{(r.get('attribution') or {}).get('status', 'n/a')} | "
             f"**{r['label']}** ({r['n_atoms_tried']} atoms tried) |"
         )
+    att = table.get("chieff_attribution") or {}
+    family = list(att.get("family") or [])
+    lines += ["", f"chi_eff attribution family (D2-passing chi_eff atoms at depth 1): "
+                  f"**{', '.join(family) if family else 'none'}**"]
+    if len(family) > 1:
+        matrix = att.get("matrix") or {}
+        lines += ["", "Pairwise matrix: row = atom added, column = the other atom's depth-1 model; "
+                      "cell = D2 status (minimum lower bound over cuts 1 and 0.9).", "",
+                  "| added \\ base | " + " | ".join(family) + " |",
+                  "| --- | " + " | ".join("---" for _ in family) + " |"]
+        for a in family:
+            cells = []
+            for b in family:
+                if a == b:
+                    cells.append("-")
+                    continue
+                e = (matrix.get(a) or {}).get(b) or {}
+                if e.get("min_lower") is not None:
+                    cells.append(f"{e['status']} ({e['min_lower']:+.2f})")
+                elif e.get("not_composable"):
+                    cells.append("not composable")
+                else:
+                    cells.append(str(e.get("status", "missing")))
+            lines.append(f"| {a} | " + " | ".join(cells) + " |")
+    reasons = [(r.get("atom_label") or r.get("atom") or r["mutation_id"], r["label_reason"])
+               for r in table["edges"] if r.get("label_reason")]
+    if reasons:
+        lines += ["", "Labels changed by the attribution rule:", ""]
+        lines += [f"- `{name}`: {why}" for name, why in reasons]
+    unattributed = [(r.get("atom_label") or r["mutation_id"], (r.get("attribution") or {}).get("reason"))
+                    for r in table["edges"]
+                    if (r.get("attribution") or {}).get("status") not in (None, "pass", "not_applicable")]
+    if unattributed:
+        lines += ["", "Attribution status (blocks SUPPORTED):", ""]
+        lines += [f"- `{name}`: {why}" for name, why in unattributed]
     lines += ["", "Interpretations pending operator confirmation:", ""]
     lines += [f"- {text}" for text in table.get("interpretations_pending_operator_confirmation", [])]
     return "\n".join(lines) + "\n"

@@ -26,6 +26,27 @@ Both catalogs are compared through the **pre-declared statistics** (plan
   observed and predicted catalogs are compared against the same reference.
 * ``spearman_chi_eff_q`` and ``spearman_chi_eff_z``: Spearman rank
   correlations of the catalog (average ranks for ties).
+* **Width-sensitive statistics** (operator decision 2026-10-02, pilot (b):
+  the six statistics above passed a root R0 with a constant chi_eff width on
+  a mock whose true width depends on q, so they do not test how the chi_eff
+  *spread* varies across the catalog). For each conditioning observable
+  ``x in (q, z, m1)``:
+
+  - ``iqr_chi_eff_<x>_t<k>`` (``k = 1, 2, 3``): the interquartile range of
+    the catalog's chi_eff values among the events in the ``k``-th tercile of
+    ``x`` (catalog sorted by ``x``, split into three equal-count groups,
+    ``t1`` = lowest ``x``; linear-interpolation quantiles);
+  - ``spearman_absdev_chi_eff_<x>``: the Spearman correlation of ``x`` with
+    ``|chi_eff - median(chi_eff)|`` (the catalog's own median), a
+    rank-based width-trend statistic.
+
+  These are computed identically on the observed catalog (the
+  population-reweighted PE draws) and on the predicted detected catalog.
+  They are statistics of *source* values, not of PE point estimates: a
+  point estimate carries the event's measurement scatter, which the
+  predicted catalog of found injections does not, so comparing point
+  estimates with injections would fail every model; the reweighted event
+  draws are the latent-variable discrepancy of Gelman, Meng & Stern (1996).
 
 The posterior predictive p-value of a statistic, estimated over the ``S``
 draws (ties counted 1/2), is
@@ -35,17 +56,37 @@ draws (ties counted 1/2), is
   the predicted ones indicates misfit. A small ``P(T_pred <= T_obs)`` means
   the observed catalog fits *better* than predicted, which is what the reuse
   of the data (below) produces for a correct model, so it is not a failure;
-* two-sided for the Spearman correlations (a misfit can have either sign):
+* two-sided for the Spearman correlations and for the width statistics (a
+  misfit can have either sign: a spread too large or too small):
   ``p = min(1, 2 min(P(T_pred >= T_obs), P(T_pred <= T_obs)))``.
 
 **Claim criterion (D6):** the model fails the check if ``p < alpha = 0.01``
 for any pre-declared statistic. The Monte-Carlo standard error of each p is
 reported, and a p within two standard errors of ``alpha`` is flagged
 ``borderline`` (the label is still decided by the point estimate, as
-pre-declared). The ``alpha`` is applied per statistic with no multiplicity
-correction (as the plan states: "any statistic at p < 0.01"); the family-wise
-false-fail probability of a correct model over the six correlated statistics
-is at most ``1 - (1 - alpha)^6 = 5.9%`` and is disclosed with every result.
+pre-declared).
+
+**Multiplicity (explicit).** ``alpha`` stays 0.01 *per statistic* with no
+Bonferroni-style correction, over the 18 pre-declared statistics (four KS,
+two correlations, twelve width statistics). Reason: a D6 failure can only
+*remove* a SUPPORTED label (D6 is required for SUPPORTED, never for
+DISFAVOURED), so a family-wise false fail costs power, never a false claim,
+whereas dividing ``alpha`` by 3 would cost power against exactly the width
+misfits the new statistics exist to catch, and would need three times the
+posterior draws (``n_draws alpha / 2 >= 5``). The family-wise false-fail
+rate of a correct model is disclosed two ways with every result:
+
+* the independence bound ``1 - (1 - alpha)^18 = 16.5%`` (the statistics are
+  strongly positively correlated -- three terciles of one variable, the
+  tercile spreads and the abs-deviation trend -- so the true rate is lower);
+* an empirical estimate from the predicted replicates themselves: each
+  predicted catalog ``r`` is scored as if it were the observed one against
+  the other ``S - 1`` predicted catalogs (same sidedness, ties 1/2), and the
+  rate is the fraction of replicates with any statistic below ``alpha``
+  (overall and per family). This keeps the full correlation structure of the
+  statistics; it ignores the data reuse below, which makes the real
+  posterior predictive p-values more conservative, so it is an upper-side
+  estimate for a correct model.
 The check is resolvable only if the rarest tail probability it tests
 (``alpha / 2`` for the two-sided statistics) has at least 5 expected counts:
 ``n_draws * alpha / 2 >= 5``, i.e. at least 1000 draws at ``alpha = 0.01``.
@@ -67,6 +108,25 @@ samples towards the population. For the one-sided KS discrepancies this makes
 a failure *less* likely (the check can miss mild misfits but does not
 manufacture failures); for the two-sided correlations the pull is towards the
 predicted correlation, again away from either tail.
+
+**Measured limitation of the width statistics (pilot (b) closure mock,
+2026-10-02; staging/v2/b3_investigation/ppc_revalidation).** When the
+per-event chi_eff measurement width (median PE std 0.13 on the mock) is
+comparable to or larger than the population width (0.06 at q ~ 1 to 0.15 at
+q ~ 0.5), a population-reweighted event draw is dominated by the model's own
+population: the root R0 (constant width) fitted to the width(q) closure mock
+retains only 9-28% of the true-catalog deviation of the q-tercile spreads
+and 14% of the Spearman(q, |chi_eff - median|) trend (-0.064 observed vs
+-0.004 predicted; the true source values give -0.44), and passes every width
+statistic (smallest p = 0.49 at 2000 draws), although the same statistics of
+the true source values reject it (two-sided p < 0.001: none of the
+2000 predicted catalogs is as extreme). The width statistics detect a
+width misfit only when the events resolve the width (well-measured toys,
+``tests/test_analysis_ppc.py``); on catalogs measured like GWTC-5, D6 cannot
+be relied on to reject a constant-width root. A data-space check (point
+estimates against predicted catalogs with simulated measurement noise) is
+the candidate replacement; it needs a measurement model for the injections
+and has not been pre-declared.
 """
 
 from __future__ import annotations
@@ -90,7 +150,7 @@ from ._common import (
 )
 from .terms import CatalogWeightEvaluator, pad_catalog
 
-PPC_FORMAT = "gwpop-search-ppc-1.1"  # 1.1: one-sided KS p, derived source frame
+PPC_FORMAT = "gwpop-search-ppc-1.2"  # 1.1: one-sided KS p, derived source frame; 1.2: width statistics
 #: D6 level: a pre-declared statistic with p < PPC_ALPHA is a failure.
 PPC_ALPHA = 0.01
 #: expected tail counts needed to resolve the smallest tested tail (alpha / 2)
@@ -104,15 +164,47 @@ DEFAULT_COLUMNS: Mapping[str, str] = {
 }
 MARGINAL_VARIABLES = ("m1", "q", "chi_eff", "z")
 CORRELATION_PAIRS = (("chi_eff", "q"), ("chi_eff", "z"))
-PREDECLARED_STATISTICS = tuple(f"ks_{x}" for x in MARGINAL_VARIABLES) + tuple(
-    f"spearman_{a}_{b}" for a, b in CORRELATION_PAIRS
+#: width statistics: chi_eff spread conditioned on each of these observables
+WIDTH_TARGET = "chi_eff"
+WIDTH_CONDITIONING = ("q", "z", "m1")
+#: equal-count bins of the conditioning observable (terciles)
+WIDTH_N_BINS = 3
+MARGINAL_STATISTICS = tuple(f"ks_{x}" for x in MARGINAL_VARIABLES)
+CORRELATION_STATISTICS = tuple(f"spearman_{a}_{b}" for a, b in CORRELATION_PAIRS)
+WIDTH_IQR_STATISTICS = tuple(
+    f"iqr_{WIDTH_TARGET}_{x}_t{k + 1}" for x in WIDTH_CONDITIONING for k in range(WIDTH_N_BINS)
 )
+WIDTH_TREND_STATISTICS = tuple(f"spearman_absdev_{WIDTH_TARGET}_{x}" for x in WIDTH_CONDITIONING)
+WIDTH_STATISTICS = WIDTH_IQR_STATISTICS + WIDTH_TREND_STATISTICS
+PREDECLARED_STATISTICS = MARGINAL_STATISTICS + CORRELATION_STATISTICS + WIDTH_STATISTICS
+#: statistic families (multiplicity is disclosed overall and per family)
+STATISTIC_FAMILIES: Mapping[str, tuple[str, ...]] = {
+    "marginal": MARGINAL_STATISTICS,
+    "correlation": CORRELATION_STATISTICS,
+    "width": WIDTH_STATISTICS,
+}
 #: statistics tested one-sided (distances: only a larger observed distance is a misfit)
-ONE_SIDED_STATISTICS = tuple(f"ks_{x}" for x in MARGINAL_VARIABLES)
+ONE_SIDED_STATISTICS = MARGINAL_STATISTICS
+
+
+def statistic_kind(name: str) -> str:
+    """``ks_marginal`` / ``spearman`` / ``width_iqr`` / ``width_spearman_absdev``."""
+    if name in MARGINAL_STATISTICS:
+        return "ks_marginal"
+    if name in WIDTH_IQR_STATISTICS:
+        return "width_iqr"
+    if name in WIDTH_TREND_STATISTICS:
+        return "width_spearman_absdev"
+    return "spearman"
 
 
 def family_wise_false_fail_bound(alpha: float = PPC_ALPHA, n_statistics: int = len(PREDECLARED_STATISTICS)) -> float:
-    """``1 - (1 - alpha)^n``: the family-wise false-fail rate for independent statistics (an upper bound)."""
+    """``1 - (1 - alpha)^n``: the family-wise false-fail rate for independent statistics.
+
+    For positively correlated statistics (the pre-declared ones) the true rate
+    is lower; :func:`replicate_family_wise_rate` estimates it with the
+    correlations kept.
+    """
     return 1.0 - (1.0 - float(alpha)) ** int(n_statistics)
 
 
@@ -204,6 +296,100 @@ def spearman_rho(x, y) -> float:
     if denom == 0.0:
         return 0.0
     return float(np.dot(rx, ry) / denom)
+
+
+def tercile_spreads(x, y, n_bins: int = WIDTH_N_BINS) -> np.ndarray:
+    """Interquartile range of ``y`` in each equal-count bin of ``x`` (lowest ``x`` first).
+
+    The catalog is sorted by ``x`` (stable) and split with
+    ``np.array_split`` (bin sizes differ by at most one).
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if x.shape != y.shape or x.ndim != 1:
+        raise ValueError("x and y must be 1-D arrays of equal length")
+    if x.size < 2 * n_bins:
+        raise ValueError(f"need at least {2 * n_bins} catalog entries for {n_bins} bins")
+    order = np.argsort(x, kind="stable")
+    out = np.empty(n_bins)
+    for k, idx in enumerate(np.array_split(order, n_bins)):
+        lo, hi = np.quantile(y[idx], [0.25, 0.75])
+        out[k] = hi - lo
+    return out
+
+
+def absdev_trend(x, y) -> float:
+    """Spearman correlation of ``x`` with ``|y - median(y)|`` (a rank width trend)."""
+    y = np.asarray(y, dtype=np.float64)
+    return spearman_rho(x, np.abs(y - np.median(y)))
+
+
+def width_statistics(catalog: Mapping[str, np.ndarray]) -> dict[str, float]:
+    """The twelve width statistics of one catalog (``{observable: values}``)."""
+    out: dict[str, float] = {}
+    target = catalog[WIDTH_TARGET]
+    for x in WIDTH_CONDITIONING:
+        spreads = tercile_spreads(catalog[x], target)
+        for k in range(WIDTH_N_BINS):
+            out[f"iqr_{WIDTH_TARGET}_{x}_t{k + 1}"] = float(spreads[k])
+        out[f"spearman_absdev_{WIDTH_TARGET}_{x}"] = absdev_trend(catalog[x], target)
+    return out
+
+
+def replicate_p_values(name: str, t_pred) -> np.ndarray:
+    """p-value of every predicted replicate scored against the other ``S - 1`` (ties 1/2).
+
+    Same sidedness as :func:`statistic_ppp`. Used to estimate the family-wise
+    false-fail rate with the statistics' correlations kept.
+    """
+    t = np.asarray(t_pred, dtype=np.float64)
+    s = t.size
+    if s < 2:
+        raise ValueError("need at least two replicates")
+    srt = np.sort(t)
+    below = np.searchsorted(srt, t, side="left")              # others strictly below
+    equal = np.searchsorted(srt, t, side="right") - below - 1  # others tied (minus itself)
+    above = s - 1 - below - equal
+    p_hi = (above + 0.5 * equal) / (s - 1)
+    p_lo = (below + 0.5 * equal) / (s - 1)
+    if name in ONE_SIDED_STATISTICS:
+        return p_hi
+    return np.minimum(1.0, 2.0 * np.minimum(p_hi, p_lo))
+
+
+def replicate_family_wise_rate(t_pred: Mapping[str, np.ndarray], alpha: float = PPC_ALPHA,
+                               names: Sequence[str] = PREDECLARED_STATISTICS) -> dict[str, object]:
+    """Empirical family-wise false-fail rate from the predicted replicates.
+
+    Each replicate is treated as the observed catalog of a correct model; the
+    rate is the fraction of replicates with any statistic at ``p < alpha``,
+    overall and per :data:`STATISTIC_FAMILIES` family, with the per-statistic
+    rates and the binomial standard error of the overall rate.
+    """
+    names = [n for n in names if n in t_pred]
+    fails = {n: replicate_p_values(n, t_pred[n]) < float(alpha) for n in names}
+    s = len(next(iter(t_pred.values())))
+    any_fail = np.zeros(s, dtype=bool)
+    for n in names:
+        any_fail |= fails[n]
+    rate = float(any_fail.mean())
+    per_family = {}
+    for fam, members in STATISTIC_FAMILIES.items():
+        members = [n for n in members if n in fails]
+        if members:
+            f = np.zeros(s, dtype=bool)
+            for n in members:
+                f |= fails[n]
+            per_family[fam] = float(f.mean())
+    return {
+        "rate": rate,
+        "standard_error": math.sqrt(max(rate * (1.0 - rate), 0.0) / s),
+        "n_replicates": int(s),
+        "per_family": per_family,
+        "per_statistic": {n: float(fails[n].mean()) for n in names},
+        "method": "each predicted replicate scored against the other S-1 (same sidedness, ties 1/2); "
+                  "keeps the statistics' correlations; ignores the data reuse (upper-side for a correct model)",
+    }
 
 
 def two_sided_ppp(t_obs, t_pred) -> dict[str, float]:
@@ -386,7 +572,7 @@ class PPCResult:
             if near:
                 borderline.append(name)
             stats[name] = {
-                "kind": "ks_marginal" if name.startswith("ks_") else "spearman",
+                "kind": statistic_kind(name),
                 "observed": _quantiles(self.t_obs[name]),
                 "predicted": _quantiles(self.t_pred[name]),
                 **p,
@@ -421,10 +607,14 @@ class PPCResult:
                 "stored_source_frame_max_relative_difference": dict(self.stored_column_difference),
             },
             "multiplicity": {
-                "correction": "none (plan: any pre-declared statistic at p < alpha)",
+                "correction": "none: alpha per statistic (a D6 false fail can only remove SUPPORTED)",
                 "n_statistics": len(PREDECLARED_STATISTICS),
+                "families": {k: list(v) for k, v in STATISTIC_FAMILIES.items()},
                 "family_wise_false_fail_upper_bound": family_wise_false_fail_bound(
                     alpha, len(PREDECLARED_STATISTICS)),
+                "family_wise_false_fail_independence_bound_per_family": {
+                    k: family_wise_false_fail_bound(alpha, len(v)) for k, v in STATISTIC_FAMILIES.items()},
+                "family_wise_false_fail_empirical": replicate_family_wise_rate(self.t_pred, alpha),
             },
         }
 
@@ -443,13 +633,16 @@ class PPCResult:
             "criterion": (
                 f"D6: fail if any pre-declared statistic has a posterior predictive p < "
                 f"{self.config.alpha:g} (one-sided P(T_pred >= T_obs) for the KS distances, "
-                "two-sided for the Spearman correlations; no multiplicity correction)"
+                "two-sided for the Spearman correlations and the width statistics; alpha per "
+                "statistic, family-wise false-fail rate disclosed)"
             ),
             "method": (
                 "predicted catalog: N found injections resampled with p_pop/p_draw*(T_k/N_k) "
                 "weights; observed catalog: one population-reweighted PE sample per event; "
                 "marginals: KS distance to the predicted detected distribution under the same "
-                "draw (mid-CDF of the weighted injections); correlations: Spearman rho; "
+                "draw (mid-CDF of the weighted injections); correlations: Spearman rho; width: "
+                "IQR of chi_eff in equal-count terciles of q, z, m1 and Spearman(x, |chi_eff - "
+                "median chi_eff|); "
                 "KS: p = P(T_pred>=T_obs); Spearman: p = min(1, 2 min(P(T_pred>=T_obs), "
                 "P(T_pred<=T_obs))); ties 1/2; source frame derived from (m1_detector, d_L) at the "
                 "population cosmology; no leave-one-out"
@@ -571,6 +764,10 @@ def posterior_predictive_check(
                 name = f"spearman_{a}_{c}"
                 t_obs[name][s] = spearman_rho(obs[a], obs[c])
                 t_pred[name][s] = spearman_rho(pred[a], pred[c])
+            for name, value in width_statistics(obs).items():
+                t_obs[name][s] = value
+            for name, value in width_statistics(pred).items():
+                t_pred[name][s] = value
 
     bands = {}
     for x in MARGINAL_VARIABLES:
@@ -626,6 +823,8 @@ def ppc_criterion(payload: Mapping[str, object] | None, *, alpha: float = PPC_AL
         "identity_verified": payload.get("identity_verified"),
         "sidedness": {name: stats[name].get("sidedness") for name in PREDECLARED_STATISTICS},
         "family_wise_false_fail_upper_bound": family_wise_false_fail_bound(alpha),
+        "family_wise_false_fail_empirical": (
+            ((payload.get("multiplicity") or {}).get("family_wise_false_fail_empirical") or {}).get("rate")),
     }
     if failed:
         return {"status": "fail", **detail}

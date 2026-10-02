@@ -32,6 +32,11 @@ from gwpop_search.grammar.schema import PriorConfig
 from gwpop_search.grammar.mutations import MutationSpec
 from gwpop_search.grammar.v2 import (
     CHIEFF_ATOMS,
+    TIER_ATTRIBUTION,
+    TIER_MASS_CHIEFF,
+    TIER_OTHER,
+    chieff_attribution_pairs,
+    rank_chieff_atoms,
     V2_DRAFT_PRIORS,
     V2_MUTATION_ATOM,
     V2_OPERATOR_DECISIONS,
@@ -262,16 +267,27 @@ def test_enumerate_models_cli_v2_profile(tmp_path, capsys):
 
 def test_depth2_priority_order_and_cap():
     ranked = depth2_priority(V2_ATOM_IDS)
+    # every chi_eff atom passes: all chi_eff pairs are mandatory (tier 0), C2 (the spec's top
+    # atom without scores) first with its spec partners S2, C4, C6 leading
     assert [p for _, p in ranked[:3]] == [("C2", "S2"), ("C2", "C4"), ("C2", "C6")]
     tiers = [t for t, _ in ranked]
     assert tiers == sorted(tiers)
     assert len(ranked) == 19 * 18 // 2
-    assert ranked[3] == (1, ("M1", "C1"))
+    n_mandatory = 10 * 9 // 2
+    assert tiers.count(TIER_ATTRIBUTION) == n_mandatory
+    assert ranked[n_mandatory] == (TIER_MASS_CHIEFF, ("M1", "C1"))  # spec pairs already mandatory
     plan = plan_depth2(V2_ATOM_IDS)
     assert len(plan.selected) == 12
     assert [s.atoms for s in plan.selected[:3]] == [("C2", "S2"), ("C2", "C4"), ("C2", "C6")]
-    assert all(s.tier == 1 for s in plan.selected[3:])
+    assert all(s.tier == TIER_ATTRIBUTION for s in plan.selected)
+    # all nine C2 pairs fit inside the cap (the top atom is always attributable)
+    assert sum("C2" in s.atoms for s in plan.selected) == 9
     assert len(plan.selected) + len(plan.over_cap) + len(plan.not_composable) == len(ranked)
+    # the cap binds on the mandatory pairs: they are listed, with a note
+    # any two of S1-S4 are alternative chi_eff families: their 6 pairs are not composable
+    assert len(plan.mandatory_over_cap) == n_mandatory - 6 - 12
+    assert plan.notes and "cap 12 binds" in plan.notes[0]
+    assert plan.to_dict()["mandatory_over_cap"][0] == list(plan.mandatory_over_cap[0])
 
 
 def test_depth2_only_uses_pairs_of_passing_edges():
@@ -280,10 +296,40 @@ def test_depth2_only_uses_pairs_of_passing_edges():
     plan = plan_depth2(["C4", "C2", "S2"])
     assert [s.atoms for s in plan.selected] == [("C2", "S2"), ("C2", "C4"), ("C4", "S2")]
     plan = plan_depth2(["M4", "C6", "Z1"])
-    assert [(s.tier, s.atoms) for s in plan.selected] == [(1, ("M4", "C6")), (3, ("M4", "Z1")), (3, ("C6", "Z1"))]
+    assert [(s.tier, s.atoms) for s in plan.selected] == [
+        (TIER_MASS_CHIEFF, ("M4", "C6")), (TIER_OTHER, ("M4", "Z1")), (TIER_OTHER, ("C6", "Z1"))]
     assert plan_depth2(V2_ATOM_IDS, cap=0).selected == ()
     with pytest.raises(ValueError):
         plan_depth2(["X9"])
+    with pytest.raises(ValueError):
+        plan_depth2(["C2"], chieff_d2_passing=["X9"])
+
+
+def test_depth2_attribution_pairs_are_mandatory_and_ranked_by_strength():
+    # D1 + D2: C2, M1, M2, M3, M4, M5 (five mass x chi_eff pairs would fill the old tiers);
+    # D2 alone: C4 (failing D1) and C6, S2. Every pair of the D2-passing chi_eff atoms is mandatory.
+    passing = ["C2", "M1", "M2", "M3", "M4", "M5", "S2"]
+    scores = {"C4": 25.0, "C2": 19.0, "S2": 4.0, "C6": 3.5}
+    plan = plan_depth2(passing, chieff_d2_passing=passing + ["C4", "C6"], scores=scores, cap=5)
+    assert plan.attribution_family == ("C4", "C2", "S2", "C6")
+    # pairs with the strongest atom (C4) first, then with C2, ...; C4 is not D1-passing but its
+    # pairs are mandatory because the attribution rule needs them
+    assert [s.atoms for s in plan.selected] == [("C2", "C4"), ("C4", "S2"), ("C4", "C6"),
+                                                ("C2", "S2"), ("C2", "C6")]
+    assert all(s.tier == TIER_ATTRIBUTION for s in plan.selected)
+    assert plan.mandatory_over_cap == (("C6", "S2"),)
+    assert ("M1", "C2") in plan.over_cap and ("M1", "C2") not in plan.mandatory_over_cap
+    # without the attribution family the old tiers apply
+    plan = plan_depth2(["C2", "M1"], scores={"C2": 19.0})
+    assert [(s.tier, s.atoms) for s in plan.selected] == [(TIER_MASS_CHIEFF, ("M1", "C2"))]
+    # ranking: scores first, then the spec priority (C2, S2, C4, C6), then the table order
+    assert rank_chieff_atoms(["C6", "C1", "S2", "C2", "M1"]) == ["C2", "S2", "C6", "C1"]
+    assert rank_chieff_atoms(["C6", "C1", "C2"], {"C1": 5.0}) == ["C1", "C2", "C6"]
+    assert chieff_attribution_pairs(["C6", "C2", "C4"], {"C6": 9.0}) == [
+        ("C2", "C6"), ("C4", "C6"), ("C2", "C4")]
+    # a non-composable mandatory pair is recorded, not selected
+    plan = plan_depth2(["S1", "S2"])
+    assert plan.selected == () and [p for p, _ in plan.not_composable] == [("S1", "S2")]
 
 
 @pytest.mark.parametrize("pair", [("S1", "S2"), ("S3", "S4"), ("M1", "M3"), ("P1", "P2"), ("Z1", "Z2"),

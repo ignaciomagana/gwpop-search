@@ -2,7 +2,8 @@
 """Write the DRAFT v2 (GWTC-5 atom search) model graph.
 
     python scripts/write_v2_model_graph.py --output <dir>/model_graph_v2.json
-    python scripts/write_v2_model_graph.py --output ... --depth2-passing C2 S2 C4
+    python scripts/write_v2_model_graph.py --output ... --depth2-passing C2 S2 C4 \
+        [--depth2-d2-passing C2 S2 C4 C6] [--depth2-score C2=19.5 --depth2-score C4=8.2 ...]
 
 Without ``--depth2-passing`` the graph is the depth-1 graph (root R0 + the 19
 atoms: 20 nodes, 19 edges); the depth-2 slots are conditional on the depth-1
@@ -43,6 +44,12 @@ def main(argv=None) -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--depth2-passing", nargs="*", default=None,
                         help="atom ids passing D1 + D2 at depth 1 (adds the depth-2 slots)")
+    parser.add_argument("--depth2-d2-passing", nargs="*", default=None,
+                        help="atom ids passing D2 at depth 1 (default: --depth2-passing); every pair of "
+                        "its chi_eff atoms is a mandatory attribution pair")
+    parser.add_argument("--depth2-score", action="append", default=[], metavar="ATOM=LOWER",
+                        help="depth-1 D2 lower bound ln BF - 2 sigma_total - |bias| of an atom; ranks the "
+                        "chi_eff atoms (pairs with the strongest first); repeatable")
     parser.add_argument("--pe", default=None, help="gwcat PE export: its z_max attr enters the G12 check")
     parser.add_argument("--selection", default=None,
                         help="gwcat selection export: its z_max attr enters the G12 check")
@@ -69,7 +76,13 @@ def main(argv=None) -> None:
     graph = enumerate_v2_depth1()
     plan = None
     if args.depth2_passing is not None:
-        plan = plan_depth2(args.depth2_passing)
+        scores = {}
+        for item in args.depth2_score:
+            atom, sep, value = str(item).partition("=")
+            if not sep:
+                raise SystemExit(f"--depth2-score expects ATOM=LOWER; got {item!r}")
+            scores[atom] = float(value)
+        plan = plan_depth2(args.depth2_passing, chieff_d2_passing=args.depth2_d2_passing, scores=scores)
         graph = extend_graph_with_depth2(graph, plan)
     payload = v2_graph_payload(graph, depth2=plan)
     payload["metadata"]["g12_model_checks"] = v2_model_graph_checks(graph, export_zmax=export_zmax)

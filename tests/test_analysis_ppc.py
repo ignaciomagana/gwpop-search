@@ -282,7 +282,7 @@ def test_ks_p_values_are_one_sided_and_correlations_two_sided():
     assert one["p_value"] == pytest.approx(np.mean(t_pred >= 0.5), abs=1e-12)
     assert one["mc_standard_error"] == pytest.approx(math.sqrt(one["p_value"] * (1 - one["p_value"]) / 2000))
     assert ppc_draws_resolve_alpha(1000) and not ppc_draws_resolve_alpha(999)
-    assert family_wise_false_fail_bound() == pytest.approx(1 - 0.99**6)
+    assert family_wise_false_fail_bound() == pytest.approx(1 - 0.99**18)
 
 
 def test_source_frame_is_derived_at_the_population_cosmology_even_if_stored():
@@ -310,3 +310,152 @@ def test_source_frame_is_derived_at_the_population_cosmology_even_if_stored():
     values, derived, diff = observable_samples(bare, columns, model, what="PE")
     assert derived == [] and diff == {}
     np.testing.assert_array_equal(values["z"], stored["z"])
+
+
+# ---------------------------------------------------------------------------
+# width-sensitive statistics (operator decision 2026-10-02)
+# ---------------------------------------------------------------------------
+
+from gwpop_search.analysis.ppc import (  # noqa: E402
+    STATISTIC_FAMILIES,
+    WIDTH_STATISTICS,
+    absdev_trend,
+    replicate_family_wise_rate,
+    replicate_p_values,
+    statistic_kind,
+    tercile_spreads,
+    width_statistics,
+)
+
+
+class MockWidthPopulation(MockPopulation):
+    """As :class:`MockPopulation` with chi_eff ~ N(mu, sigma(q)), ln sigma(q) = ls + slope (q - 1)."""
+
+    def __init__(self, q_dependent_width: bool):
+        super().__init__(correlated=False)
+        self.q_dependent_width = q_dependent_width
+
+    def __call__(self, samples, hp):
+        xp = jnp if isinstance(hp["alpha"], jax.Array) or isinstance(samples["q"], jax.Array) else np
+        hp = dict(hp)
+        slope = hp.pop("log_sigma_q_slope", 0.0) if self.q_dependent_width else 0.0
+        base = super().__call__(samples, dict(hp, log_sigma_chi=hp["log_sigma_chi"] + 0.0 * samples["q"]))
+        if not self.q_dependent_width:
+            return base
+        # replace the constant-width Gaussian by the q-dependent one
+        q, chi = samples["q"], samples["chi_eff"]
+        s0, s1 = xp.exp(hp["log_sigma_chi"]), xp.exp(hp["log_sigma_chi"] + slope * (q - 1.0))
+        lp0 = -0.5 * ((chi - hp["mu_chi"]) / s0) ** 2 - xp.log(s0)
+        lp1 = -0.5 * ((chi - hp["mu_chi"]) / s1) ** 2 - xp.log(s1)
+        return base - lp0 + lp1
+
+    def to_config(self):
+        return {"class": "MockWidthPopulation", "q_dependent_width": self.q_dependent_width}
+
+
+WIDTH_TRUTH = {"alpha": 2.3, "mu_chi": 0.03, "log_sigma_chi": math.log(0.05), "log_sigma_q_slope": -2.2}
+
+
+def make_width_mock(seed=11, n_events=200, n_pe=192, n_inj=150_000):
+    """Closure-like mock: chi_eff width grows towards low q (sigma(0.5) = 0.15, sigma(1) = 0.05)."""
+    rng = np.random.default_rng(seed)
+    events = {k: [] for k in SIG}
+    while len(events["q"]) < n_events:
+        src = _draw_sources(rng, 4000, dict(TRUTH, dmu_q=0.0, mu_chi=WIDTH_TRUTH["mu_chi"]))
+        sigma = np.exp(WIDTH_TRUTH["log_sigma_chi"] + WIDTH_TRUTH["log_sigma_q_slope"] * (src["q"] - 1.0))
+        src["chi_eff"] = WIDTH_TRUTH["mu_chi"] + sigma * rng.normal(size=src["q"].size)
+        keep = _detected(rng, src)
+        for k in SIG:
+            events[k].extend(src[k][keep].tolist())
+    events = {k: np.asarray(v[:n_events]) for k, v in events.items()}
+    pe, sel, _ = make_mock(seed=seed + 1, n_events=n_events, n_pe=n_pe, n_inj=n_inj)
+    samples = {}
+    for k, s in SIG.items():
+        datum = events[k] + s * rng.normal(size=n_events)
+        samples[k] = (datum[:, None] + s * rng.normal(size=(n_events, n_pe))).ravel()
+    pe = PosteriorCatalog(event_names=pe.event_names, offsets=pe.offsets, samples=samples,
+                          log_ref_density=np.zeros(n_events * n_pe), basis=TOY_BASIS)
+    return pe, sel, events
+
+
+@pytest.fixture(scope="module")
+def width_mock():
+    return make_width_mock()
+
+
+def test_width_statistics_definitions():
+    rng = np.random.default_rng(0)
+    x = rng.permutation((np.arange(300) + 0.5) / 300)  # exactly 100 values per tercile
+    y = rng.normal(size=300) * np.where(x < 1 / 3, 3.0, 1.0)
+    spreads = tercile_spreads(x, y)
+    order = np.argsort(x, kind="stable")
+    low = y[order[:100]]
+    assert spreads[0] == pytest.approx(np.quantile(low, 0.75) - np.quantile(low, 0.25))
+    assert spreads[0] > 2 * spreads[1] and spreads[0] > 2 * spreads[2]
+    # wider at low x: |y - median| anti-correlated with x
+    assert absdev_trend(x, y) < -0.2
+    assert absdev_trend(x, y) == pytest.approx(stats.spearmanr(x, np.abs(y - np.median(y))).statistic, abs=1e-12)
+    stats_ = width_statistics({"q": x, "z": 1.0 - x, "m1": x, "chi_eff": y})
+    assert set(stats_) == set(WIDTH_STATISTICS) and len(WIDTH_STATISTICS) == 12
+    assert stats_["iqr_chi_eff_q_t1"] == pytest.approx(spreads[0])
+    assert stats_["iqr_chi_eff_z_t3"] == pytest.approx(spreads[0])  # z decreases with x
+    assert stats_["spearman_absdev_chi_eff_z"] == pytest.approx(-stats_["spearman_absdev_chi_eff_q"])
+    assert len(PREDECLARED_STATISTICS) == 18
+    assert set(STATISTIC_FAMILIES["width"]) == set(WIDTH_STATISTICS)
+    assert statistic_kind("iqr_chi_eff_m1_t2") == "width_iqr"
+    assert statistic_kind("spearman_absdev_chi_eff_z") == "width_spearman_absdev"
+    assert statistic_kind("ks_q") == "ks_marginal" and statistic_kind("spearman_chi_eff_q") == "spearman"
+    # width statistics are two-sided
+    t_pred = rng.random(2000)
+    assert statistic_ppp("iqr_chi_eff_q_t1", np.full(2000, -1.0), t_pred)["p_value"] == 0.0
+    with pytest.raises(ValueError):
+        tercile_spreads(x[:5], y[:5])
+
+
+def test_replicate_family_wise_rate_keeps_the_correlations():
+    rng = np.random.default_rng(1)
+    s, k = 4000, 12
+    # independent statistics: the rate approaches the independence bound
+    independent = {f"spearman_x{i}": rng.normal(size=s) for i in range(k)}
+    rate = replicate_family_wise_rate(independent, 0.01, names=list(independent))
+    assert rate["rate"] == pytest.approx(1 - 0.99**k, abs=0.025)
+    # perfectly correlated copies: the rate is that of one statistic
+    one = rng.normal(size=s)
+    copies = {f"spearman_x{i}": one for i in range(k)}
+    rate = replicate_family_wise_rate(copies, 0.01, names=list(copies))
+    assert rate["rate"] == pytest.approx(0.01, abs=0.004)
+    # one-sided KS: only the upper tail counts
+    p = replicate_p_values("ks_m1", np.arange(100.0))
+    assert p[-1] == 0.0 and p[0] == 1.0
+    p = replicate_p_values("spearman_chi_eff_q", np.arange(100.0))
+    assert p[0] == 0.0 and p[-1] == 0.0 and p[50] == pytest.approx(1.0, abs=0.03)
+    # ties count 1/2
+    p = replicate_p_values("spearman_chi_eff_q", np.ones(10))
+    np.testing.assert_allclose(p, 1.0)
+
+
+def test_constant_width_model_fails_a_width_statistic_and_the_true_model_passes_all(width_mock):
+    pe, sel, events = width_mock
+    names = ("alpha", "mu_chi", "log_sigma_chi", "log_sigma_q_slope")
+    sample = _near(np.random.default_rng(5), WIDTH_TRUTH, names)
+    good = posterior_predictive_check(
+        sample, pe, sel, MockWidthPopulation(q_dependent_width=True),
+        config=PPCConfig(n_draws=1000, seed=7, batch_size=50), verify_identity=False,
+    ).summary()
+    p_good = {k: v["p_value"] for k, v in good["statistics"].items()}
+    assert good["failed_statistics"] == [], p_good
+    # the constant-width fit (R0 analogue): mean and width at the detected catalog's values
+    names0 = ("alpha", "mu_chi", "log_sigma_chi")
+    centre = {"alpha": 2.3, "mu_chi": float(np.median(events["chi_eff"])),
+              "log_sigma_chi": math.log(float(np.std(events["chi_eff"])))}
+    bad = posterior_predictive_check(
+        _near(np.random.default_rng(6), centre, names0), pe, sel, MockWidthPopulation(q_dependent_width=False),
+        config=PPCConfig(n_draws=1000, seed=8, batch_size=50), verify_identity=False,
+    ).summary()
+    failed = set(bad["failed_statistics"])
+    assert failed & set(WIDTH_STATISTICS), {k: v["p_value"] for k, v in bad["statistics"].items()}
+    assert "spearman_absdev_chi_eff_q" in failed
+    # the original six statistics do not see the width trend (the pilot (b) finding)
+    assert not failed & {"ks_m1", "ks_q", "ks_z", "spearman_chi_eff_q", "spearman_chi_eff_z"}
+    fw = bad["multiplicity"]["family_wise_false_fail_empirical"]
+    assert 0.0 <= fw["rate"] <= 0.3 and set(fw["per_family"]) == {"marginal", "correlation", "width"}
