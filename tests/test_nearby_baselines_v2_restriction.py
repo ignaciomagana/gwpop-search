@@ -1,4 +1,4 @@
-"""v2 D5: alternative-root scenarios restricted to root + candidates + all 10 chi_eff atoms."""
+"""v2 D5: alternative-root scenarios restricted to root + candidates + all 9 chi_eff atoms."""
 
 import json
 
@@ -25,7 +25,7 @@ from gwpop_search.validation import (
 )
 from gwpop_search.validation.baselines import mutation_catalogue
 
-#: stand-ins on the v1 grammar for the ten v2 chi_eff atoms (the v2 grammar
+#: stand-ins on the v1 grammar for the nine v2 chi_eff atoms (S4 dropped 2026-10-02) (the v2 grammar
 #: registers its own catalogue); S2 is a two-step path, as the follow-up
 #: mixture-fraction model is built
 CHI_EFF = {
@@ -38,7 +38,6 @@ CHI_EFF = {
     "S1": "chieff.family.gaussian_mixture",
     "S2": ("chieff.family.gaussian_mixture", "chieff.fraction.logistic_q"),
     "S3": "chieff.width.logistic_q",
-    "S4": "chieff.family.student_t",
 }
 
 
@@ -83,19 +82,21 @@ def test_alt_root_scenario_runs_exactly_root_candidates_and_chi_eff_atoms():
             model = apply_mutation(model, table[mutation_id])
             expected.add(model.model_hash)
     assert {m.model_hash for m in graph.nodes} == expected
-    # 1 root + 10 chi_eff nodes (S1 is S2's prefix) + mass + depth-2 = 13
-    assert len(graph.nodes) == 13
+    # 1 root + 9 chi_eff nodes (S1 is S2's prefix) + mass + depth-2 = 12
+    assert len(graph.nodes) == 12
     assert len(graph.nodes) <= scenario.max_models
     assert nearby_scenario_inapplicable_paths(scenario) == ("pairing.beta.logistic_m1",)
     listing = nearby_scenario_models(scenario, NearbyBaselineConfig(max_f3_models=20))
-    assert listing["n_graph_models"] == 13 and listing["f3_budget_fits_all_models"] is True
+    assert listing["n_graph_models"] == 12 and listing["f3_budget_fits_all_models"] is True
     # an unrestricted scenario on the same root enumerates the whole neighbourhood instead
     full = nearby_scenario_graph(NearbyBaselineScenario("full", root, max_depth=1, max_models=40))
     assert len(full.nodes) > len([n for n in graph.nodes if graph.depths[n.model_hash] <= 1])
 
 
-def test_all_ten_chi_eff_atoms_are_required():
-    assert V2_CHI_EFF_ATOMS == ("C1", "C2", "C3", "C4", "C5", "C6", "S1", "S2", "S3", "S4")
+def test_all_nine_chi_eff_atoms_are_required():
+    assert V2_CHI_EFF_ATOMS == ("C1", "C2", "C3", "C4", "C5", "C6", "S1", "S2", "S3")
+    with pytest.raises(ValueError, match="chi_eff atoms"):
+        _scenario(chi_eff_mutation_ids=dict(CHI_EFF, S4="chieff.family.student_t"))
     partial = {k: v for k, v in CHI_EFF.items() if k != "S3"}
     with pytest.raises(ValueError, match="chi_eff atoms"):
         _scenario(chi_eff_mutation_ids=partial)

@@ -5,8 +5,9 @@
     python scripts/write_v2_model_graph.py --output ... --depth2-passing C2 S2 C4 \
         [--depth2-d2-passing C2 S2 C4 C6] [--depth2-score C2=19.5 --depth2-score C4=8.2 ...]
 
-Without ``--depth2-passing`` the graph is the depth-1 graph (root R0 + the 19
-atoms: 20 nodes, 19 edges); the depth-2 slots are conditional on the depth-1
+Without ``--depth2-passing`` the graph is the depth-1 graph (root R0 + the 18
+atoms: 19 nodes, 18 edges; the Student-t S4 was dropped on 2026-10-02 and is
+listed under ``metadata.dropped_atoms`` only); the depth-2 slots are conditional on the depth-1
 results and are only added once the passing edges are known. The JSON is
 ``load_model_graph`` compatible and carries a ``metadata`` block (status DRAFT,
 atom ids, draft priors with their decision status, the operator decisions of

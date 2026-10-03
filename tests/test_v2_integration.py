@@ -386,7 +386,7 @@ def test_v2_catalogue_is_registered_for_d5():
         "A1", v2_alternative_roots()["A1"], candidate_paths=[V2_ATOM_IDS["C2"]],
         chi_eff_mutation_ids=atoms, mutation_catalogue_name="gwtc5-v2",
     )
-    assert scenario.max_models == 11 and scenario.mutation_catalogue == "gwtc5-v2"
+    assert scenario.max_models == 10 and scenario.mutation_catalogue == "gwtc5-v2"
 
 
 def _cli(argv):
@@ -403,7 +403,7 @@ def test_write_v2_alt_root_config_cli_defaults_to_the_v2_atoms(tmp_path):
     payload = json.loads(out.read_text())
     scenario = payload["scenarios"][0]
     assert scenario["mutation_catalogue"] == "gwtc5-v2"
-    assert len(scenario["mutation_paths"]) == 10
+    assert len(scenario["mutation_paths"]) == 9
     with pytest.raises(ValueError, match="exactly one"):
         _cli(["write-v2-alt-root-config", "--scenario-id", "x", "--output", str(out)])
 

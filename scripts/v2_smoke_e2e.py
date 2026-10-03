@@ -9,7 +9,7 @@ are shrunk):
 1. mock catalog (``scripts/v2_smoke_mock.py``): few events, thinned injections,
    in the canonical sky-marginal gwcat-v2 basis;
 2. enumeration: the v2 depth-1 graph (``scripts/write_v2_model_graph.py``,
-   20 nodes, 19 edges) with the G12 model + data-support checks on the mock;
+   19 nodes, 18 edges) with the G12 model + data-support checks on the mock;
 3. dataset manifest and production-campaign freeze (``freeze-dataset``,
    ``freeze-production-campaign --require-root-profile gwtc5-v2``) with the v2
    fidelity configuration (taper at sigma^2 = 1 inside the likelihood) and a
@@ -105,7 +105,7 @@ def main(argv=None) -> None:
     child_mutation = payload["metadata"]["atoms"][CHILD_ATOM]["mutation_id"]
     child = next(e["child_hash"] for e in payload["edges"]
                  if e["parent_hash"] == root and e["mutation_id"] == child_mutation)
-    assert len(payload["nodes"]) == 20 and len(payload["edges"]) == 19
+    assert len(payload["nodes"]) == 19 and len(payload["edges"]) == 18
     assert payload["metadata"]["g12_data_support"]["pass"] is True
 
     # 3. freezes (staging only) ----------------------------------------------

@@ -1,4 +1,4 @@
-"""v2 grammar: root R0, the 19 atoms, depth-2 enumeration rule, alt roots, G12 checks."""
+"""v2 grammar: root R0, the 18 atoms, depth-2 enumeration rule, alt roots, G12 checks."""
 
 from __future__ import annotations
 
@@ -38,6 +38,8 @@ from gwpop_search.grammar.v2 import (
     chieff_attribution_pairs,
     rank_chieff_atoms,
     V2_DRAFT_PRIORS,
+    V2_DROPPED_ATOMS,
+    V2_DROPPED_MUTATIONS,
     V2_MUTATION_ATOM,
     V2_OPERATOR_DECISIONS,
     V2_Q_PIVOT_HASHES,
@@ -92,11 +94,11 @@ def test_v2_profile_is_registered_and_v1_hashes_are_unchanged():
         "666c4ffc99f000e8c3783589866f0ab6bc120bf161fca5f47b5130983263ff67")
 
 
-def test_depth1_graph_has_exactly_20_nodes_and_19_single_axis_edges():
+def test_depth1_graph_has_exactly_19_nodes_and_18_single_axis_edges():
     root = v2_root_model_spec()
     graph = enumerate_v2_depth1(root)
-    assert len(graph.nodes) == 20 and len(graph.edges) == 19
-    assert len({n.model_hash for n in graph.nodes}) == 20
+    assert len(graph.nodes) == 19 and len(graph.edges) == 18
+    assert len({n.model_hash for n in graph.nodes}) == 19
     assert sorted(V2_MUTATION_ATOM[e.mutation_id] for e in graph.edges) == sorted(V2_ATOM_IDS)
     by_hash = graph.by_hash
     for edge in graph.edges:
@@ -125,7 +127,9 @@ def test_atom_priors_follow_the_spec():
     assert _prior(child["C3"], "chi_mu_z_slope") == ("uniform", -1, 1)
     assert _prior(child["C4"], "chi_log_sigma_z_slope") == ("uniform", -3, 5)
     assert _prior(child["S3"], "chi_eps") == ("uniform", -1, 1)
-    assert _prior(child["S4"], "chi_nu") == ("log_uniform", 1, 100)
+    # S4 (Student-t) was dropped on 2026-10-02: kept for the record only, with its prior
+    s4 = apply_mutation(root, V2_DROPPED_MUTATIONS["S4"])
+    assert _prior(s4, "chi_nu") == ("log_uniform", 1, 100) and "S4" not in child
     assert _prior(child["P1"], "beta_low") == _prior(child["P1"], "beta_high") == ("uniform", -2, 7)
     for c in ("pl", "p10", "p35"):
         assert _prior(child["P2"], f"beta_{c}") == ("uniform", -10, 13)
@@ -163,7 +167,9 @@ def test_atom_priors_follow_the_spec():
         assert {"prior", "source", "rationale", "status", "decision"} <= set(entry), key
         assert "OPEN" not in entry["source"] and "OPERATOR CHOICE" not in entry["rationale"], key
     decided = [k for k, e in V2_DRAFT_PRIORS.items() if e["status"] == "approved by operator 2026-10-01"]
-    assert len(decided) == 14 and {"Z2.normalisation", "C3/C4.z_pivot", "S4.form"} <= set(decided)
+    assert len(decided) == 13 and {"Z2.normalisation", "C3/C4.z_pivot"} <= set(decided)
+    assert V2_DRAFT_PRIORS["S4.form"]["status"] == "dropped by operator 2026-10-02"
+    assert "S4 Student-t dropped 2026-10-02" in V2_DRAFT_PRIORS["S4.form"]["decision"]
     assert "local mass function" in V2_DRAFT_PRIORS["Z2.normalisation"]["decision"]
     assert "z = 0.5" in V2_DRAFT_PRIORS["C3/C4.z_pivot"]["decision"]
     assert V2_DRAFT_PRIORS["C1/C2.q_pivot"]["status"] == "approved by operator 2026-10-02"
@@ -183,7 +189,6 @@ _UNCHANGED_FD73DA8 = {
     "S1": "f02bccfadd81161427a16e81dbb4719f76801af18fbc857bdc06cded52a4dadd",
     "S2": "2b499eb4783c77fd4aa0be5a4df7fbd4b02e3363b8022d25ba639e3c137d5eb8",
     "S3": "01c29eea19bb57a8f71a19505b14794040edefe87ccd93253d6e7c629248ebe9",
-    "S4": "ed8c1f68eedbf726c244c601c55c45994becc2f009c192cd8f7211defebdbe98",
     "P1": "84b98a9f9c610858c9a0e6290f2808b98822416f22a637b35f6415f97d6bfd94",
     "P2": "335e8ca9ed73be949c0c9d4886af62abfb2b521d3ff43f19bd09b852e913ef8e",
     "Z1": "76dfde20742e1032838317eb07c7e1318d9d3b9eaf8186399f9da049270375da",
@@ -192,7 +197,8 @@ _UNCHANGED_FD73DA8 = {
 
 def test_only_the_decided_models_change_hash_relative_to_the_pilot_code():
     """C3, C4, Z2 (= root A2) (2026-10-01) and C1, C2 (2026-10-02) change relative to fd73da8;
-    R0 and the other 14 nodes do not."""
+    R0 and the other 13 nodes do not (S4 was dropped on 2026-10-02; its spec, kept for the
+    record, still has the fd73da8 hash)."""
     root = v2_root_model_spec()
     now = {"R0": root.model_hash}
     now.update({aid: apply_mutation(root, V2_MUTATION_TABLE[mid]).model_hash for aid, mid in V2_ATOM_IDS.items()})
@@ -200,6 +206,8 @@ def test_only_the_decided_models_change_hash_relative_to_the_pilot_code():
                         | set(V2_SUPERSEDED_HASHES_Q_PIVOT))
     for aid, old in _UNCHANGED_FD73DA8.items():
         assert now[aid] == old, aid
+    assert apply_mutation(root, V2_DROPPED_MUTATIONS["S4"]).model_hash == V2_DROPPED_ATOMS["S4"]["model_hash"] == (
+        "ed8c1f68eedbf726c244c601c55c45994becc2f009c192cd8f7211defebdbe98")
     for aid, old in V2_SUPERSEDED_HASHES_FD73DA8.items():
         assert now[aid] != old, aid
     alts = v2_alternative_roots(root)
@@ -256,14 +264,14 @@ def test_auxiliary_options_travel_with_their_switch_and_are_not_structural_axes(
         assert getattr(child[aid], block).options.get(key) != getattr(root, block).options.get(key)
         assert structural_diff_axes(root, child[aid]) == (mutation.axis,)
     # the z pivot survives a chi_eff shape change in either order, and both z atoms share it
-    for other in ("C3", "C2", "C6", "S1", "S2", "S3", "S4", "M3", "P2", "Z2"):
+    for other in ("C3", "C2", "C6", "S1", "S2", "S3", "M3", "P2", "Z2"):
         model = compose_atoms(root, "C4", other)
         assert model == compose_atoms(root, other, "C4")
         assert model.chieff.options["z_pivot"] == 0.5 and model.chieff.options["log_sigma_z"] == "linear"
         assert apply_mutation(child["C4"], V2_MUTATION_TABLE[V2_ATOM_IDS[other]]) == model
         assert apply_mutation(child[other], V2_MUTATION_TABLE[V2_ATOM_IDS["C4"]]) == model
     # the q pivot likewise travels with C1 / C2 through shape changes, in either order
-    for other in ("C1", "C4", "C6", "S1", "S2", "S3", "S4", "M3", "P2", "Z2"):
+    for other in ("C1", "C4", "C6", "S1", "S2", "S3", "M3", "P2", "Z2"):
         model = compose_atoms(root, "C2", other)
         assert model == compose_atoms(root, other, "C2")
         assert model.chieff.options["q_pivot"] == 0.7 and model.chieff.options["log_sigma_q"] == "linear"
@@ -306,7 +314,7 @@ def test_enumerate_models_cli_v2_profile(tmp_path, capsys):
     args.func(args)
     payload = json.loads(out.read_text())
     assert payload["root_hash"] == v2_root_model_spec().model_hash
-    assert len(payload["nodes"]) == 20 and len(payload["edges"]) == 19
+    assert len(payload["nodes"]) == 19 and len(payload["edges"]) == 18
 
 
 # ---------------------------------------------------------------------------
@@ -321,20 +329,22 @@ def test_depth2_priority_order_and_cap():
     assert [p for _, p in ranked[:3]] == [("C2", "S2"), ("C2", "C4"), ("C2", "C6")]
     tiers = [t for t, _ in ranked]
     assert tiers == sorted(tiers)
-    assert len(ranked) == 19 * 18 // 2
-    n_mandatory = 10 * 9 // 2
+    assert len(ranked) == 18 * 17 // 2
+    n_mandatory = 9 * 8 // 2
     assert tiers.count(TIER_ATTRIBUTION) == n_mandatory
     assert ranked[n_mandatory] == (TIER_MASS_CHIEFF, ("M1", "C1"))  # spec pairs already mandatory
     plan = plan_depth2(V2_ATOM_IDS)
     assert len(plan.selected) == 12
     assert [s.atoms for s in plan.selected[:3]] == [("C2", "S2"), ("C2", "C4"), ("C2", "C6")]
     assert all(s.tier == TIER_ATTRIBUTION for s in plan.selected)
-    # all nine C2 pairs fit inside the cap (the top atom is always attributable)
-    assert sum("C2" in s.atoms for s in plan.selected) == 9
+    # all eight C2 pairs fit inside the cap (the top atom is always attributable)
+    assert sum("C2" in s.atoms for s in plan.selected) == 8
     assert len(plan.selected) + len(plan.over_cap) + len(plan.not_composable) == len(ranked)
     # the cap binds on the mandatory pairs: they are listed, with a note
-    # any two of S1-S4 are alternative chi_eff families: their 6 pairs are not composable
-    assert len(plan.mandatory_over_cap) == n_mandatory - 6 - 12
+    # any two of S1-S3 are alternative chi_eff families: their 3 pairs are not composable
+    assert sorted(p for p, _ in plan.not_composable if p[0][0] == p[1][0] == "S") == [
+        ("S1", "S2"), ("S1", "S3"), ("S2", "S3")]
+    assert len(plan.mandatory_over_cap) == n_mandatory - 3 - 12
     assert plan.notes and "cap 12 binds" in plan.notes[0]
     assert plan.to_dict()["mandatory_over_cap"][0] == list(plan.mandatory_over_cap[0])
 
@@ -381,7 +391,7 @@ def test_depth2_attribution_pairs_are_mandatory_and_ranked_by_strength():
     assert plan.selected == () and [p for p, _ in plan.not_composable] == [("S1", "S2")]
 
 
-@pytest.mark.parametrize("pair", [("S1", "S2"), ("S3", "S4"), ("M1", "M3"), ("P1", "P2"), ("Z1", "Z2"),
+@pytest.mark.parametrize("pair", [("S1", "S2"), ("S1", "S3"), ("S2", "S3"), ("M1", "M3"), ("P1", "P2"), ("Z1", "Z2"),
                                   ("M5", "M2")])
 def test_incompatible_pairs_are_not_composable(pair):
     root = v2_root_model_spec()
@@ -410,14 +420,14 @@ def test_depth2_graph_extension_roundtrips(tmp_path):
     graph = enumerate_v2_depth1()
     plan = plan_depth2(V2_ATOM_IDS)
     full = extend_graph_with_depth2(graph, plan)
-    assert len(full.nodes) == 32  # the spec cap: about 32 models including depth 2
+    assert len(full.nodes) == 31  # 19 depth-1 nodes + the 12 depth-2 slots
     depth2 = [e for e in full.edges if e.depth == 2]
     assert len(depth2) == 2 * 12  # every depth-2 node is reached from both of its atoms' children
     path = tmp_path / "g.json"
     save_model_graph(path, full)
     again = load_model_graph(path)
     assert again.by_hash.keys() == full.by_hash.keys()
-    assert len(again.edges) == 19 + 24
+    assert len(again.edges) == 18 + 24
 
 
 # ---------------------------------------------------------------------------
@@ -433,13 +443,13 @@ def test_alternative_roots_run_every_chi_eff_atom():
     for alt in alts.values():
         assert len(structural_diff_axes(root, alt)) == 1
         graph = enumerate_alt_root_graph(alt, CHIEFF_ATOMS)
-        assert len(graph.nodes) == 11 and len(graph.edges) == 10
+        assert len(graph.nodes) == 10 and len(graph.edges) == 9
 
 
 def test_g12_model_graph_checks():
     graph = enumerate_v2_depth1()
     ok = v2_model_graph_checks(graph, export_zmax={"pe": 1.9, "selection": 1.9})
-    assert ok["pass"] and ok["n_models"] == 20
+    assert ok["pass"] and ok["n_models"] == 19
     assert all(row["mlow_1_prior_low"] >= 3.0 and row["m1_ceiling"] <= 590.0 for row in ok["models"])
     assert not v2_model_graph_checks(graph, export_zmax={"selection": 2.5})["pass"]
     v1 = enumerate_model_graph(baseline_model_spec("gwtc5-v1"), max_depth=1, max_models=100)
@@ -474,7 +484,14 @@ def test_graph_payload_is_loadable_and_marked_draft(tmp_path):
     path = tmp_path / "graph.json"
     path.write_text(json.dumps(payload))
     loaded = load_model_graph(path)
-    assert len(loaded.nodes) == 20 and len(loaded.edges) == 19
+    assert len(loaded.nodes) == 19 and len(loaded.edges) == 18
+    assert "S4" not in meta["atoms"] and meta["dropped_atoms"] == V2_DROPPED_ATOMS
+    assert meta["operator_decisions"]["later_decisions"]["2026-10-02"]["decisions"]["S4.dropped"] == (
+        "S4 Student-t dropped 2026-10-02: 52 GB single allocation and ~130 iterations in 8 h on the pilot "
+        "mock; heavy tails remain covered by S1-S3")
+    assert meta["depth2_rule"]["chieff_block"] == list(CHIEFF_ATOMS)
+    assert (meta["trials"]["depth1_atoms"], meta["trials"]["depth2_cap"], meta["trials"]["max_searched_models"]) == (
+        18, 12, 30)
 
 
 @pytest.mark.parametrize("mass_atom, components", [
@@ -548,3 +565,35 @@ def test_z1_on_a2_and_p1_on_a1_are_inapplicable_not_different_hypotheses():
         apply_mutation(alts["A2"], V2_MUTATION_TABLE[V2_ATOM_IDS["Z1"]])
     with pytest.raises(InapplicableMutation, match="beta_dependence"):
         apply_mutation(alts["A1"], V2_MUTATION_TABLE[V2_ATOM_IDS["P1"]])
+
+
+def test_s4_student_t_is_dropped_from_every_v2_enumeration():
+    """Operator decision 2026-10-02: S4 is not in the atom set, the v2 catalogue, the depth-2
+    rule, the attribution family or the alternative-root suites; its family code stays."""
+    from gwpop_search.grammar import InapplicableMutation  # noqa: F401  (import check only)
+    from gwpop_search.grammar.v2 import V2_ATOM_ORDER, v2_d5_atom_semantics
+    from gwpop_search.validation import V2_CHI_EFF_ATOMS, v2_chi_eff_atom_mutations
+    from gwpop_search.validation.baselines import mutation_catalogue
+
+    s4 = V2_DROPPED_ATOMS["S4"]["mutation_id"]
+    assert "S4" not in V2_ATOM_IDS and "S4" not in V2_ATOM_ORDER and "S4" not in CHIEFF_ATOMS
+    assert s4 not in V2_MUTATION_TABLE and s4 not in V2_MUTATION_ATOM
+    assert all(m.mutation_id != s4 for m in V2_MUTATIONS)
+    assert s4 not in mutation_catalogue("gwtc5-v2")
+    assert CHIEFF_ATOMS == V2_CHI_EFF_ATOMS == ("C1", "C2", "C3", "C4", "C5", "C6", "S1", "S2", "S3")
+    assert "S4" not in v2_chi_eff_atom_mutations()
+    assert len(V2_ATOM_IDS) == 18 and len(V2_MUTATIONS) == 18
+    graph = enumerate_v2_depth1()
+    assert s4 not in {e.mutation_id for e in graph.edges}
+    assert all(n.chieff.family != "linear_student_t" for n in graph.nodes)
+    for alt in v2_alternative_roots().values():
+        alt_graph = enumerate_alt_root_graph(alt, CHIEFF_ATOMS)
+        assert all(n.chieff.family != "linear_student_t" for n in alt_graph.nodes)
+    assert all("S4" not in rows for rows in v2_d5_atom_semantics().values())
+    assert all("S4" not in pair for _, pair in depth2_priority(V2_ATOM_IDS))
+    with pytest.raises(ValueError, match="unknown atom"):
+        plan_depth2(["S4"])
+    with pytest.raises(ValueError, match="unknown atom"):
+        plan_depth2(["C2"], chieff_d2_passing=["C2", "S4"])
+    # the family code is kept: the recorded spec still validates
+    DEFAULT_COMPONENT_REGISTRY.validate_model(apply_mutation(v2_root_model_spec(), V2_DROPPED_MUTATIONS["S4"]))

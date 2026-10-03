@@ -1231,7 +1231,7 @@ def _write_v2_alt_root_config(args: argparse.Namespace) -> None:
             raise ValueError(f"--chi-eff-atom {label} given twice")
         chi_eff[label] = tuple(x for x in mutation_id.split(",") if x) if "," in mutation_id else mutation_id
     if not chi_eff and catalogue == "gwtc5-v2":
-        # the v2 grammar's own C1-C6 / S1-S4 atoms (each one mutation of R0)
+        # the v2 grammar's own C1-C6 / S1-S3 atoms (each one mutation of R0)
         chi_eff = v2_chi_eff_atom_mutations()
     candidates = [tuple(x for x in str(item).split(",") if x) for item in args.candidate or []]
     scenario = v2_alt_root_scenario(
@@ -2434,7 +2434,7 @@ def build_parser() -> argparse.ArgumentParser:
         "write-v2-alt-root-config",
         help=(
             "write a v2 D5 alternative-root scenario restricted to the root, the "
-            "candidate edges and all 10 chi_eff atoms (writes a config only; runs nothing)"
+            "candidate edges and all 9 chi_eff atoms (writes a config only; runs nothing)"
         ),
     )
     v2_alt.add_argument("--scenario-id", required=True)
@@ -2454,7 +2454,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--chi-eff-atom",
         action="append",
         help="LABEL=MUTATION_ID (or LABEL=A,B for a two-step atom) for each of C1-C6, "
-        "S1-S4 (all ten required; default with the gwtc5-v2 catalogue: the v2 atoms)",
+        "S1-S3 (all nine required; default with the gwtc5-v2 catalogue: the v2 atoms)",
     )
     v2_alt.add_argument(
         "--mutation-catalogue",

@@ -1,4 +1,4 @@
-"""The v2 GWTC-5 atom search: root R0, the 19 depth-1 atoms, depth-2 rule, checks.
+"""The v2 GWTC-5 atom search: root R0, the 18 depth-1 atoms, depth-2 rule, checks.
 
 Spec: the approved plan of 2026-09-30 (``scalable-stargazing-shamir.md``) and
 the node table of ``report/dag_artifact_v2/build_v2.py``. Families and the
@@ -36,6 +36,16 @@ U(-12, 4)). The headline width quantity of C2 is sigma(q = 0.7); the slope and
 sigma(1) are secondary (:data:`V2_REPORTED_QUANTITIES`). The C1 and C2 hashes
 and those of every model built on them change (:data:`V2_SUPERSEDED_HASHES_Q_PIVOT`);
 the pilot (b) C1/C2 runs (code fd73da8) used the q = 1 pivot.
+
+**S4 dropped (operator decision 2026-10-02).** The truncated Student-t chi_eff
+atom S4 is no longer part of the v2 atom set: it needed a 52 GB single
+allocation and reached only ~130 iterations in 8 h on the pilot mock, and heavy
+tails remain covered by S1-S3. The depth-1 graph is R0 + 18 atoms (19 nodes,
+18 edges); the chi_eff block (attribution family, mandatory depth-2 pairs, D5
+alternative-root suites) is C1-C6 and S1-S3. The Student-t family code stays
+(``linear_student_t``) and the dropped atom is recorded in
+:data:`V2_DROPPED_ATOMS` / :data:`V2_DROPPED_MUTATIONS` but is never
+enumerated. No other hash changes (model hashes do not depend on the atom set).
 
 Root R0 ("LVK Default BBH + Gaussian chi_eff"; GWTC-5 Table 5 priors):
 
@@ -150,7 +160,7 @@ def v2_root_model_spec(registry: ComponentRegistry = DEFAULT_COMPONENT_REGISTRY)
 
 
 # ---------------------------------------------------------------------------
-# The 19 depth-1 atoms
+# The 18 depth-1 atoms (S4 Student-t dropped 2026-10-02)
 # ---------------------------------------------------------------------------
 
 _SLOPES = tuple(CHIEFF_CORRELATION_OPTIONS.values())
@@ -251,8 +261,6 @@ V2_MUTATIONS: tuple[MutationSpec, ...] = (
            family_options={"fraction_dependence": "logistic_log_m1"}),
     _shape("v2.chieff.skew_normal", "linear_skew_normal", {"chi_eps": _u(-1.0, 1.0)},
            "S3: epsilon-skew-normal chi_eff"),
-    _shape("v2.chieff.student_t", "linear_student_t", {"chi_nu": _lu(1.0, 100.0)},
-           "S4: truncated Student-t chi_eff"),
     MutationSpec(
         "v2.pairing.beta_logistic_log_m1", "pairing", "set_option", "logistic_log_m1",
         option="beta_dependence", requires_family="tapered_powerlaw_q", prior_removals=("beta",),
@@ -296,6 +304,27 @@ V2_MUTATIONS: tuple[MutationSpec, ...] = (
 )
 V2_MUTATION_TABLE: dict[str, MutationSpec] = {m.mutation_id: m for m in V2_MUTATIONS}
 
+#: Atoms removed from the v2 atom set by operator decision, kept for the record
+#: only: they are NOT in :data:`V2_MUTATIONS`, :data:`V2_ATOM_IDS`, the v2
+#: mutation catalogue, the depth-2 rule or the alternative-root suites.
+V2_DROPPED_MUTATIONS: dict[str, MutationSpec] = {
+    "S4": _shape("v2.chieff.student_t", "linear_student_t", {"chi_nu": _lu(1.0, 100.0)},
+                 "S4: truncated Student-t chi_eff (DROPPED 2026-10-02; not enumerated)"),
+}
+S4_DROPPED_REASON = ("S4 Student-t dropped 2026-10-02: 52 GB single allocation and ~130 iterations in 8 h on "
+                     "the pilot mock; heavy tails remain covered by S1-S3")
+V2_DROPPED_ATOMS: dict[str, dict[str, str]] = {
+    "S4": {
+        "mutation_id": "v2.chieff.student_t",
+        "family": "linear_student_t",
+        "prior": "chi_nu ~ LU(1, 100)",
+        # the hash R0 + S4 had (fd73da8 .. bd48c78); pinned by the tests
+        "model_hash": "ed8c1f68eedbf726c244c601c55c45994becc2f009c192cd8f7211defebdbe98",
+        "date": "2026-10-02",
+        "decision": S4_DROPPED_REASON,
+    },
+}
+
 #: Spec atom id -> mutation id, in the spec's table order.
 V2_ATOM_IDS: dict[str, str] = {
     "M1": "v2.mass.drop_p35",
@@ -312,7 +341,6 @@ V2_ATOM_IDS: dict[str, str] = {
     "S1": "v2.chieff.mixture",
     "S2": "v2.chieff.mixture_fraction_log_m1",
     "S3": "v2.chieff.skew_normal",
-    "S4": "v2.chieff.student_t",
     "P1": "v2.pairing.beta_logistic_log_m1",
     "P2": "v2.pairing.beta_per_component",
     "Z1": "v2.redshift.madau_dickinson",
@@ -320,7 +348,7 @@ V2_ATOM_IDS: dict[str, str] = {
 }
 V2_ATOM_ORDER = tuple(V2_ATOM_IDS)
 V2_MUTATION_ATOM = {mid: aid for aid, mid in V2_ATOM_IDS.items()}
-CHIEFF_ATOMS = ("C1", "C2", "C3", "C4", "C5", "C6", "S1", "S2", "S3", "S4")
+CHIEFF_ATOMS = ("C1", "C2", "C3", "C4", "C5", "C6", "S1", "S2", "S3")
 MASS_ATOMS = ("M1", "M2", "M3", "M4", "M5")
 
 #: Decision status of the entries of :data:`V2_DRAFT_PRIORS` decided on 2026-10-01.
@@ -516,8 +544,10 @@ V2_DRAFT_PRIORS: dict[str, dict[str, str]] = {
         "prior": "location-scale Student-t truncated to [-1, 1], nu ~ LU(1, 100)",
         "source": "spec; LVK Student-t release not available on disk",
         "rationale": "form not verified against an LVK release",
-        "status": _APPROVED,
-        "decision": "item 10: accepted as drafted, noting that the form was not checked against an LVK release",
+        "status": "dropped by operator 2026-10-02",
+        "decision": "item 10 (2026-10-01): accepted as drafted, noting that the form was not checked against an "
+                    "LVK release. Superseded: " + S4_DROPPED_REASON + ". S4 is not enumerated "
+                    "(V2_DROPPED_ATOMS)",
     },
 }
 
@@ -591,13 +621,14 @@ V2_OPERATOR_DECISIONS: dict[str, object] = {
                               "means with ln sigma_2 ~ U(-5, 0); S2 f_low, f_high ~ U(0, 1), m_t ~ LU(10, 100), "
                               "width ~ LU(0.05, 1); P1 m_t ~ LU(10, 100), width ~ LU(0.05, 1); Z1 gamma ~ "
                               "U(-10, 10), kappa ~ U(0, 10), z_peak ~ U(0, 4); Z2 slope ~ U(-4, 4); S4 truncated "
-                              "location-scale Student-t with nu ~ LU(1, 100)",
+                              "location-scale Student-t with nu ~ LU(1, 100) (S4 dropped later, 2026-10-02)",
     },
     "hash_changes": {
         "relative_to": "fd73da8",
         "changed": "C3, C4, Z2 (= alternative root A2) and every model built on them: their depth-2 "
                    "compositions, the whole A2 suite, and C3 / C4 on A1",
-        "unchanged": "R0 and the other 16 depth-1 nodes (M1-M5, C1, C2, C5, C6, S1-S4, P1, P2 = A1, Z1)",
+        "unchanged": "R0 and the other 16 depth-1 nodes (M1-M5, C1, C2, C5, C6, S1-S4, P1, P2 = A1, Z1); "
+                     "S4 was dropped later (2026-10-02)",
         "superseded_hashes": dict(V2_SUPERSEDED_HASHES_FD73DA8),
     },
     "pilot_note": "the pilot (b) C4 runs (code fd73da8, staging/v2/pilot/fd73da8) used the z = 0 pivot: a "
@@ -626,14 +657,25 @@ V2_OPERATOR_DECISIONS: dict[str, object] = {
                                  "chi_eff-reference injection set is needed before any width(q) magnitude "
                                  "claim -- DECIDE AT FREEZE",
                 "gpu_confirmation_runs": "declined by the operator (diagnosis accepted on CPU evidence)",
+                "S4.dropped": S4_DROPPED_REASON,
+                "pilot_b": "pilot (b) ACCEPTED by the operator 2026-10-02 with the fixes on PR #7",
             },
             "hash_changes": {
                 "relative_to": "afd5f53 (C1 / C2 unchanged since fd73da8)",
                 "changed": "C1, C2 and every model built on them: their depth-2 compositions and C1 / C2 on "
                            "the alternative roots A1 and A2",
-                "unchanged": "R0 and the other 17 depth-1 nodes",
+                "unchanged": "R0 and the other 17 depth-1 nodes of the then 19-atom set (16 after S4 was "
+                             "dropped)",
                 "superseded_hashes": dict(V2_SUPERSEDED_HASHES_Q_PIVOT),
                 "new_hashes": dict(V2_Q_PIVOT_HASHES),
+            },
+            "graph_changes": {
+                "removed_atoms": ["S4"],
+                "removed_hashes": {"S4": V2_DROPPED_ATOMS["S4"]["model_hash"]},
+                "depth1_graph": "R0 + 18 atoms: 19 nodes, 18 edges (was 20 nodes, 19 edges)",
+                "chieff_block": "C1-C6, S1-S3 (attribution family, mandatory depth-2 pairs, D5 alternative-root "
+                                "suites)",
+                "unchanged": "R0 and every remaining depth-1 hash (a model hash does not depend on the atom set)",
             },
             "pilot_note": "the pilot (b) C1 / C2 runs (code fd73da8) used the q = 1 pivot, a "
                           "reparameterisation of the same family of densities; the pilot is not rerun",
@@ -650,7 +692,7 @@ def mutations_for_profile(profile: str) -> tuple[MutationSpec, ...]:
 
 
 def enumerate_v2_depth1(root: ModelSpec | None = None) -> ModelGraph:
-    """Root + one child per atom (20 nodes, 19 edges for R0)."""
+    """Root + one child per atom (19 nodes, 18 edges for R0)."""
     root = v2_root_model_spec() if root is None else root
     return enumerate_model_graph(root, mutations=V2_MUTATIONS, max_depth=1, max_models=100)
 
@@ -673,6 +715,19 @@ V2_DEPTH2_TIERS = (
     "other",
 )
 TIER_ATTRIBUTION, TIER_SPEC, TIER_MASS_CHIEFF, TIER_CHIEFF_CHIEFF, TIER_OTHER = range(5)
+
+#: The searched-graph trials ceiling on R0 (written into the graph metadata).
+#: The claim table discloses the realised trials count, the distinct evaluated
+#: non-root models (``analysis.claims_v2.count_atoms_tried``); since S4 was
+#: dropped (2026-10-02) at most 18 depth-1 atoms + 12 depth-2 slots = 30.
+V2_TRIALS: dict[str, object] = {
+    "depth1_atoms": len(V2_ATOM_ORDER),
+    "depth2_cap": V2_DEPTH2_CAP,
+    "max_searched_models": len(V2_ATOM_ORDER) + V2_DEPTH2_CAP,
+    "disclosed": "distinct evaluated non-root models of the searched graph (claim table n_atoms_tried, "
+                 "analysis.claims_v2.count_atoms_tried)",
+    "note": "S4 (Student-t) dropped 2026-10-02: 18 depth-1 atoms (was 19, ceiling 31)",
+}
 
 
 class NotComposable(ValueError):
@@ -849,8 +904,8 @@ def plan_depth2(passing: Iterable[str], *, root: ModelSpec | None = None,
     chi_eff atoms; the pairs with the strongest atom come first.
 
     **The cap is respected.** Mandatory pairs are filled first, in rank order.
-    The strongest atom has at most nine partners (ten chi_eff atoms; any two
-    of S1-S4 are alternative chi_eff families and are not composable), so
+    The strongest atom has at most eight partners (nine chi_eff atoms; any two
+    of S1-S3 are alternative chi_eff families and are not composable), so
     with the cap of 12 its pairs always fit and its attribution can always be
     tested; if the mandatory pairs exceed the cap
     the remaining ones are recorded in ``mandatory_over_cap`` (and ``notes``),
@@ -990,7 +1045,7 @@ def v2_d5_atom_semantics(root: ModelSpec | None = None) -> dict[str, dict[str, d
 
 
 def enumerate_alt_root_graph(alt_root: ModelSpec, atoms: Iterable[str]) -> ModelGraph:
-    """Depth-1 graph of the given atoms (e.g. the 10 chi_eff atoms + candidates) on an alt root."""
+    """Depth-1 graph of the given atoms (e.g. the 9 chi_eff atoms + candidates) on an alt root."""
     mutations = [V2_MUTATION_TABLE[V2_ATOM_IDS[a]] for a in atoms]
     return enumerate_model_graph(alt_root, mutations=mutations, max_depth=1, max_models=100)
 
@@ -1072,6 +1127,7 @@ def v2_graph_payload(graph: ModelGraph, *, depth2: Depth2Plan | None = None) -> 
                            if aid in V2_REPORTED_QUANTITIES else {})}
                   for aid, mid in V2_ATOM_IDS.items()},
         "edge_atoms": atom_of_edge,
+        "dropped_atoms": V2_DROPPED_ATOMS,
         "draft_priors": V2_DRAFT_PRIORS,
         "operator_decisions": V2_OPERATOR_DECISIONS,
         "conventions": {
@@ -1081,6 +1137,7 @@ def v2_graph_payload(graph: ModelGraph, *, depth2: Depth2Plan | None = None) -> 
             KAPPA_M1_CONVENTION_OPTION: KAPPA_M1_CONVENTION,
         },
         "depth2": None if depth2 is None else depth2.to_dict(),
+        "trials": dict(V2_TRIALS),
         "depth2_rule": {
             "cap": V2_DEPTH2_CAP,
             "priority_pairs": [list(p) for p in V2_DEPTH2_PRIORITY_PAIRS],
@@ -1088,6 +1145,8 @@ def v2_graph_payload(graph: ModelGraph, *, depth2: Depth2Plan | None = None) -> 
             "mandatory": "every pair of chi_eff atoms passing D2 at depth 1 (attribution rule, operator "
                          "decision 2026-10-02); pairs with the strongest atom (largest D2 lower bound) "
                          "first; filled before every other tier; over-cap mandatory pairs are listed",
+            "chieff_block": list(CHIEFF_ATOMS),
+            "not_composable": "any two of S1-S3 (alternative chi_eff families; S4 dropped 2026-10-02)",
         },
         "alternative_roots": {name: {"atom": atom, "model_hash": spec.model_hash}
                               for (name, atom), spec in zip(V2_ALT_ROOT_ATOMS.items(),

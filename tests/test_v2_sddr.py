@@ -49,7 +49,6 @@ EXPECTED = {
     "S1": ("exact", "child", "chi_fraction"),
     "S2": ("evidence_only", None, None),
     "S3": ("exact", "child", "chi_eps"),
-    "S4": ("evidence_only", None, None),
     "P1": ("exact", "child", "beta_high-beta_low"),
     "P2": ("evidence_only", None, None),
     "Z1": ("exact", "child", "md_kappa"),
@@ -71,7 +70,13 @@ def test_every_depth1_edge_has_the_expected_nesting_class():
             assert row.reason and not row.embeddings
     assert "partially overlap" in rows["M3"].reason
     assert "two-dimensional" in rows["P2"].reason and "two-dimensional" in rows["S2"].reason
-    assert "nu -> infinity" in rows["S4"].reason
+    # S4 (Student-t) was dropped on 2026-10-02; the family code and its classification stay
+    from gwpop_search.grammar.v2 import V2_DROPPED_MUTATIONS
+
+    root = v2_root_model_spec()
+    s4 = V2_DROPPED_MUTATIONS["S4"]
+    dropped = classify_edge(root, apply_mutation(root, s4), s4.mutation_id)
+    assert dropped.classification == "evidence_only" and "nu -> infinity" in dropped.reason
 
 
 def test_exact_embeddings_reproduce_the_smaller_model_numerically():

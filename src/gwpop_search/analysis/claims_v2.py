@@ -70,14 +70,14 @@ pooled posterior with ``--posterior HASH=pooled_posterior.npz``).
 the pilot (b) closure mock (truth: width(q), C2) both C2 and C4 (width(z))
 passed D2 at depth 1: the selection couples q and z, so a chi_eff atom can
 pass D2 by absorbing another atom's signal. A chi_eff-block atom (C1-C6,
-S1-S4) can therefore be SUPPORTED only if, for every OTHER chi_eff atom that
+S1-S3; the Student-t S4 was dropped on 2026-10-02) can therefore be SUPPORTED only if, for every OTHER chi_eff atom that
 passes D2 at depth 1 (the *family*), the depth-2 pair (this atom + the
 other) was evaluated and the edge adding this atom to the other's depth-1
 model still passes D2 -- ``ln BF - 2 sigma_total - |bias| >= 3`` at the cuts
 1 and 0.9, the same :func:`d2_strength` evaluation as every edge. Otherwise
 the label is INCONCLUSIVE with the reason ``not attributable (family:
 ...)``; a pair that was not evaluated (over the depth-2 cap, or not
-composable: any two of S1-S4 are alternative chi_eff families) counts as not
+composable: any two of S1-S3 are alternative chi_eff families) counts as not
 attributable. A chi_eff atom of the searched graph whose depth-1 D2 is
 undetermined (root edge not evaluated, or D2 incomplete) may itself pass D2,
 so it also blocks attribution (status ``incomplete``) until it is resolved.
@@ -1285,7 +1285,7 @@ def build_claim_table(
             "width).",
             "Pairwise attribution (operator decision 2026-10-02): a depth-1 chi_eff atom is SUPPORTED "
             "only if adding it to every other D2-passing depth-1 chi_eff atom passes D2 at cuts 1 and "
-            "0.9; an unevaluated or non-composable pair (any two of S1-S4, which are alternative chi_eff "
+            "0.9; an unevaluated or non-composable pair (any two of S1-S3, which are alternative chi_eff "
             "families), or another chi_eff atom of the graph whose depth-1 D2 is undetermined (not "
             "evaluated or incomplete), leaves it INCONCLUSIVE ('not attributable'); a direct S_i vs S_j depth-1 "
             "comparison is not substituted without an operator decision. The family is D2-passing (not D1 + D2): an atom with failing "

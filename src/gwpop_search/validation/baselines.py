@@ -63,8 +63,10 @@ MUTATION_CATALOGUES: dict[str, tuple[MutationSpec, ...]] = {
     "default+followup": tuple(DEFAULT_MUTATIONS) + tuple(FOLLOWUP_MUTATIONS),
 }
 
-#: the v2 chi_eff atoms every D5 alternative root must run (plan 2026-09-30)
-V2_CHI_EFF_ATOMS = ("C1", "C2", "C3", "C4", "C5", "C6", "S1", "S2", "S3", "S4")
+#: the v2 chi_eff atoms every D5 alternative root must run (plan 2026-09-30; the
+#: Student-t S4 was dropped by operator decision 2026-10-02). Equal to
+#: ``gwpop_search.grammar.v2.CHIEFF_ATOMS`` (pinned by the tests).
+V2_CHI_EFF_ATOMS = ("C1", "C2", "C3", "C4", "C5", "C6", "S1", "S2", "S3")
 
 
 def _register_v2_catalogue() -> None:
@@ -77,7 +79,7 @@ _register_v2_catalogue()
 
 
 def v2_chi_eff_atom_mutations() -> dict[str, str]:
-    """Plan label -> mutation id of the ten v2 chi_eff atoms (each one mutation of R0)."""
+    """Plan label -> mutation id of the nine v2 chi_eff atoms (each one mutation of R0)."""
     from gwpop_search.grammar.v2 import V2_ATOM_IDS
 
     return {label: V2_ATOM_IDS[label] for label in V2_CHI_EFF_ATOMS}
@@ -122,7 +124,7 @@ class NearbyBaselineScenario:
     #: ``None``: the full depth-``max_depth`` neighbourhood of the root (the
     #: v1 behaviour). Otherwise the scenario runs exactly the root plus the
     #: nodes reached by these ordered mutation paths (and their prefixes),
-    #: e.g. the v2 D5 restriction "root + candidates + all 10 chi_eff atoms".
+    #: e.g. the v2 D5 restriction "root + candidates + all 9 chi_eff atoms".
     mutation_paths: tuple[tuple[str, ...], ...] | None = None
     mutation_catalogue: str = "default"
 
@@ -524,13 +526,13 @@ def v2_alt_root_scenario(
     mutation_catalogue_name: str = "default",
     note: str = "",
 ) -> NearbyBaselineScenario:
-    """The v2 D5 scenario: an alternative root + the candidates + all 10 chi_eff atoms.
+    """The v2 D5 scenario: an alternative root + the candidates + all 9 chi_eff atoms.
 
     ``chi_eff_mutation_ids`` maps every plan atom label of
-    :data:`V2_CHI_EFF_ATOMS` (C1-C6, S1-S4) to its mutation id, or to an
+    :data:`V2_CHI_EFF_ATOMS` (C1-C6, S1-S3) to its mutation id, or to an
     ordered mutation path when the grammar builds the atom in more than one
-    step (e.g. a mixture followed by its fraction law); all ten are required
-    (plan 2026-09-30, D5). ``candidate_paths`` are the ordered
+    step (e.g. a mixture followed by its fraction law); all nine are required
+    (plan 2026-09-30, D5; S4 dropped 2026-10-02). ``candidate_paths`` are the ordered
     mutation paths of the candidate edges from the searched graph
     (``"<id>"`` for a depth-1 atom, ``(a, b)`` for the depth-2 edge applying
     ``b`` to the root + ``a`` node). Nothing else of the alternative root's
@@ -559,7 +561,7 @@ def v2_alt_root_scenario(
         root_spec=root_spec,
         max_depth=depth,
         max_models=1 + len(paths),
-        note=note or "v2 D5: alternative root + candidates + all 10 chi_eff atoms",
+        note=note or "v2 D5: alternative root + candidates + all 9 chi_eff atoms",
         mutation_paths=tuple(sorted(paths)),
         mutation_catalogue=mutation_catalogue_name,
     )

@@ -22,7 +22,7 @@ from gwpop_search.grammar import (  # noqa: E402
     enumerate_v2_depth1,
     v2_root_model_spec,
 )
-from gwpop_search.grammar.v2 import V2_SUPERSEDED_HASHES_FD73DA8, v2_alternative_roots  # noqa: E402
+from gwpop_search.grammar.v2 import V2_DROPPED_MUTATIONS, V2_SUPERSEDED_HASHES_FD73DA8, v2_alternative_roots  # noqa: E402
 from gwpop_search.grammar.v2_structure import (  # noqa: E402
     KAPPA_M1_CONVENTION_OPTION,
     required_hyperparameters,
@@ -412,7 +412,9 @@ def test_chi_eff_families_normalise_with_every_correlation(aid, corr):
     if corr is not None:
         spec = atom(spec, corr)
     if aid is not None:
-        spec = apply_mutation(spec, V2_MUTATION_TABLE[V2_ATOM_IDS[aid]])
+        # S4 (Student-t) was dropped from the v2 atom set on 2026-10-02; its family code stays
+        mutation = V2_DROPPED_MUTATIONS["S4"] if aid == "S4" else V2_MUTATION_TABLE[V2_ATOM_IDS[aid]]
+        spec = apply_mutation(spec, mutation)
     overrides = {k: v for k, v in dict(
         chi_mu_q_slope=-0.4, chi_log_sigma_q_slope=-2.2, chi_mu_z_slope=0.3, chi_log_sigma_z_slope=1.0,
         chi_mu_log_m1_slope=0.2, chi_log_sigma_log_m1_slope=0.7, chi_fraction=0.2, chi_mu_2_frac=0.4,
