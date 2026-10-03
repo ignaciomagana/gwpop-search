@@ -234,6 +234,7 @@ def hbi_config_from_identity(identity: Mapping[str, object] | None):
         rate_treatment=payload["rate_treatment"],
         raw_selection_use_observing_time=bool(payload["raw_selection_use_observing_time"]),
         selection_chunk_size=None,
+        variance_taper=payload.get("variance_taper"),
     )
 
 

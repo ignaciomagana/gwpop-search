@@ -14,6 +14,14 @@ Markdown for the model-comparison report).
 * ``analyze-sddr``               — Savage–Dickey cross-checks of eligible edges
 * ``analyze-model-comparison``   — the full report with claim criteria
 * ``run-psis-loo-influence``     — PSIS-LOO influence, optional exact-refit config
+* ``run-ppc``                    — v2 D6 posterior predictive checks with selection
+* ``reweight-data-variants``     — importance reweighting to the 249-event / SNR 9 / SNR 11
+  variants with ESS and the (operator-gated) rerun flag; never runs a sampler
+* ``collect-v2-evaluations``     — per-model D1 gates, taper mass and D2 posterior fractions
+  below the cuts from evaluation.json
+* ``posthoc-posterior-mass-below`` — D2 cut bracketing for an existing evaluation:
+  recompute P(sigma^2 <= c) from its stored dynesty results (CPU-capable, read-only)
+* ``v2-claim-table``             — the v2 claim table, criteria D1-D6
 """
 
 from __future__ import annotations
@@ -166,6 +174,7 @@ def _analyze_edge_mc_error(args) -> None:
         edge_mc_error,
         edge_mc_report,
         mc_covariance_matrix,
+        mc_taper_treatment,
         save_model_mc_weights,
     )
     from ._common import hbi_config_from_identity
@@ -174,7 +183,7 @@ def _analyze_edge_mc_error(args) -> None:
     posterior, selection = _load_data(args)
     graph, grouped = _load_graph_and_results(args)
     out = Path(args.output_dir)
-    weights, samples, models, catalogs = {}, {}, {}, {}
+    weights, samples, models, catalogs, treatments = {}, {}, {}, {}, {}
     for model_hash, results in sorted(grouped.items()):
         spec = graph.by_hash[model_hash]
         models[model_hash] = compile_model_spec(spec)
@@ -185,9 +194,11 @@ def _analyze_edge_mc_error(args) -> None:
         # sampled under: raw_selection_use_observing_time changes the per-campaign
         # log(T_k / N_k) factors, hence the self-normalized selection weights that
         # C_PP, sigma_A^2 and the edge sigma_MC are built from
+        run_hbi = hbi_config_from_identity(samples[model_hash].likelihood_identity)
+        treatments[model_hash] = mc_taper_treatment(run_hbi)
         catalogs[model_hash] = pad_catalog(
             posterior, selection, models[model_hash],
-            hbi_config=hbi_config_from_identity(samples[model_hash].likelihood_identity),
+            hbi_config=run_hbi, taper_treatment=treatments[model_hash],
         )
         weights[model_hash] = compute_model_mc_weights(
             samples[model_hash], posterior, selection, models[model_hash], label=model_hash,
@@ -230,6 +241,13 @@ def _analyze_edge_mc_error(args) -> None:
         "sigma_mc": {"model_hashes": keys, "matrix": mc_covariance_matrix([weights[h] for h in keys]).tolist()},
         "edges": edges,
     }
+    if any(treatments.values()):
+        from .terms import TAPER_TREATMENTS
+
+        payload["taper_treatment"] = {
+            h: treatments[h] for h in keys
+        }
+        payload["taper_treatment_note"] = TAPER_TREATMENTS["first_order_untapered_mc"]
     _write(out / "edge_mc_error.json", payload)
 
 
@@ -421,10 +439,11 @@ def _run_psis_loo_influence(args) -> None:
     check_same_catalog(grouped)
     config = PSISLOOConfig(k_threshold=args.k_threshold, min_loo_ess=args.min_loo_ess,
                            max_complement_mass=args.max_complement_mass)
-    results = {}
+    results, loo_tapers = {}, {}
     for model_hash, runs in sorted(grouped.items()):
         terms = evaluate_model_loo_terms(runs, posterior, selection, compile_model_spec(graph.by_hash[model_hash]),
                                          label=model_hash, batch_size=args.batch_size)
+        loo_tapers[model_hash] = terms.taper_treatment
         results[model_hash] = psis_loo_model(terms, config=config, forced_events=args.force_event or ())
     edges = [e.to_dict() for e in _edges_with(graph, grouped)]
     log_priors = membership = None
@@ -438,8 +457,14 @@ def _run_psis_loo_influence(args) -> None:
                                           ComplexityModelPrior(float(args.penalty)))
         membership = membership_by_atom(graph.by_hash[graph.root_hash], specs)
         results = {h: results[h] for h in heads}
+    extra = {"graph_root_hash": graph.root_hash}
+    if any(loo_tapers.values()):
+        from .terms import TAPER_TREATMENTS
+
+        extra["taper_treatment"] = dict(sorted(loo_tapers.items()))
+        extra["taper_treatment_note"] = TAPER_TREATMENTS["taper_as_prior"]
     report = psis_loo_report(results, edges=edges, log_model_priors=log_priors,
-                             structure_membership=membership, extra={"graph_root_hash": graph.root_hash})
+                             structure_membership=membership, extra=extra)
     _write(args.output, report)
     if args.write_exact_refit_config:
         from gwpop_search.search import Fidelity
@@ -460,6 +485,276 @@ def _run_psis_loo_influence(args) -> None:
         )
         save_event_stress_suite_spec(Path(args.write_exact_refit_config), spec)
         print(f"written: {args.write_exact_refit_config} ({len(scenarios)} exact-refit scenario(s))")
+
+
+def _parse_columns(items) -> dict[str, str]:
+    from .ppc import DEFAULT_COLUMNS
+
+    columns = dict(DEFAULT_COLUMNS)
+    for item in items or []:
+        name, sep, column = str(item).partition("=")
+        if not sep or name not in columns or not column:
+            raise ValueError(f"--column expects OBSERVABLE=COLUMN with OBSERVABLE in {sorted(columns)}; got {item!r}")
+        columns[name] = column
+    return columns
+
+
+def _run_ppc(args) -> None:
+    _enable_x64()
+    from gwpop_search.models import compile_model_spec
+
+    from ._common import pool_dynesty_results
+    from .ppc import PPCConfig, posterior_predictive_check, ppc_report
+
+    posterior, selection = _load_data(args)
+    graph, grouped = _load_graph_and_results(args)
+    config = PPCConfig(
+        n_draws=args.n_draws, seed=args.seed, columns=_parse_columns(args.column),
+        batch_size=args.batch_size,
+    )
+    results = []
+    for model_hash, runs in sorted(grouped.items()):
+        sample = pool_dynesty_results(runs)
+        results.append(
+            posterior_predictive_check(
+                sample, posterior, selection, compile_model_spec(graph.by_hash[model_hash]),
+                config=config, label=model_hash,
+            )
+        )
+        summary = results[-1].summary()
+        print(f"{model_hash[:16]}: {summary['status']} failed={summary['failed_statistics']}")
+    _write(args.output, ppc_report(results, include_draws=not args.no_draws))
+
+
+def _import_callable(spec: str):
+    import importlib
+
+    module, sep, attr = str(spec).partition(":")
+    if not sep:
+        raise ValueError(f"--log-taper expects module:function; got {spec!r}")
+    return getattr(importlib.import_module(module), attr)
+
+
+def _run_reweight_data_variants(args) -> None:
+    _enable_x64()
+    import numpy as np
+
+    from gwpop_search.data import SelectionCatalog
+    from gwpop_search.models import compile_model_spec
+
+    from ._common import pool_dynesty_results, read_json
+    from .data_variants import (
+        RERUN_POLICY,
+        VARIANT_FORMAT,
+        make_data_variant,
+        reweight_to_variant,
+        variant_edge_log_bayes_factor,
+    )
+
+    posterior, selection = _load_data(args)
+    graph, grouped = _load_graph_and_results(args)
+    spec_path = Path(args.variants)
+    spec = read_json(spec_path)
+    base = spec_path.parent
+
+    def _path(value):
+        path = Path(value)
+        return path if path.is_absolute() else base / path
+
+    variants = []
+    for row in spec["variants"]:
+        override = None if not row.get("selection") else SelectionCatalog.from_hdf5(_path(row["selection"]))
+        mask = None if not row.get("selection_row_mask") else np.load(_path(row["selection_row_mask"]))
+        variants.append(
+            make_data_variant(
+                str(row["variant_id"]), posterior, selection,
+                drop_events=row.get("drop_events", ()), drop_o1o2_events=bool(row.get("drop_o1o2_events")),
+                selection_override=override, selection_row_mask=mask, description=str(row.get("description", "")),
+            )
+        )
+    log_taper = None if not args.log_taper else _import_callable(args.log_taper)
+    rows: dict[str, dict[str, dict]] = {}
+    for model_hash, runs in sorted(grouped.items()):
+        sample = pool_dynesty_results(runs)
+        model = compile_model_spec(graph.by_hash[model_hash])
+        for variant in variants:
+            out = reweight_to_variant(
+                sample, posterior, selection, model, variant, log_taper=log_taper,
+                label=model_hash, batch_size=args.batch_size, seed=args.seed,
+            )
+            rows.setdefault(model_hash, {})[variant.variant_id] = out
+            print(
+                f"{model_hash[:16]} {variant.variant_id}: ESS={out['ess_variant']:.0f} "
+                f"khat={out['pareto_khat']:.2f} dlnZ={out['delta_log_evidence']:+.3f} {out['status']}"
+            )
+    edges = []
+    for edge in spec.get("edges", []):
+        p, c = edge["parent_hash"], edge["child_hash"]
+        if p not in rows or c not in rows:
+            continue
+        for variant in variants:
+            edges.append({
+                "mutation_id": edge.get("mutation_id"),
+                **variant_edge_log_bayes_factor(
+                    rows[c][variant.variant_id], rows[p][variant.variant_id], float(edge["log_bayes_factor"])
+                ),
+            })
+    flagged = sorted(
+        {f"{h[:16]}:{v}" for h, per in rows.items() for v, r in per.items() if r["rerun_recommended"]}
+        | {f"edge {e['parent_hash'][:8]}->{e['child_hash'][:8]}:{e['variant_id']}" for e in edges if e["rerun_recommended"]}
+    )
+    _write(args.output, {
+        "format_version": VARIANT_FORMAT + "-report",
+        "graph_root_hash": graph.root_hash,
+        "rerun_policy": RERUN_POLICY,
+        "reruns_launched": 0,
+        "rerun_recommended_for": flagged,
+        "models": rows,
+        "edges": edges,
+    })
+    if flagged:
+        print("RERUN RECOMMENDED (operator-gated; nothing was launched): " + ", ".join(flagged))
+
+
+def _collect_v2_evaluations(args) -> None:
+    from .claims_v2 import collect_v2_evaluations
+
+    collected = collect_v2_evaluations(args.evaluations)
+    _write(args.gates_output, collected["gates"])
+    if args.taper_mass_output:
+        _write(args.taper_mass_output, collected["taper_mass"])
+    if args.mass_below_output:
+        from .posthoc_cut import posthoc_report
+
+        rows = [{"model_hash": h, "entry": e} for h, e in sorted(collected["mass_below"].items())]
+        _write(args.mass_below_output, posthoc_report(rows, cuts=(), provenance={"source": "evaluation.json"}))
+
+
+def _posthoc_posterior_mass_below(args) -> None:
+    """D2 cut bracketing for evaluations that finished without ``posterior_mass_below``."""
+    _enable_x64()
+    from gwpop_search.production import load_dataset_manifest, load_frozen_dataset, load_production_campaign
+
+    from .posthoc_cut import posthoc_mass_below, posthoc_report
+
+    manifest = load_dataset_manifest(Path(args.manifest))
+    campaign = load_production_campaign(Path(args.campaign))
+    posterior, selection = load_frozen_dataset(manifest, data_base_dir=Path(args.base_dir))
+    cuts = _float_list(args.cuts)
+    rows = []
+    for run_dir in args.run_dir:
+        row = posthoc_mass_below(
+            Path(run_dir), posterior, selection, campaign.fidelity,
+            dataset_identity=manifest.manifest_hash, cuts=cuts,
+            max_points_per_run=args.max_points_per_run, seed=args.seed, batch_size=args.batch_size,
+        )
+        rows.append(row)
+        for key, cut in sorted(row["entry"]["cuts"].items(), key=lambda kv: kv[1]["cut"]):
+            print(f"{row['model_hash'][:16]} P(sigma^2 <= {cut['cut']:g}) = {cut['fraction']:.4f} "
+                  f"+- {cut['error']:.4f} (n_eff {cut['n_eff']:.0f})")
+    import jax
+
+    _write(args.output, posthoc_report(rows, cuts=cuts, provenance={
+        "manifest": str(args.manifest), "manifest_hash": manifest.manifest_hash,
+        "campaign": str(args.campaign), "base_dir": str(args.base_dir),
+        "max_points_per_run": args.max_points_per_run, "seed": args.seed,
+        "jax_backend": jax.default_backend(),
+    }))
+
+
+def _read_posteriors(items) -> dict | None:
+    """``HASH=path/pooled_posterior.npz`` items -> {hash: {parameter_names, samples}}."""
+    import numpy as np
+
+    out = {}
+    for item in items or []:
+        model_hash, sep, path = str(item).partition("=")
+        if not sep:
+            raise ValueError(f"--posterior expects HASH=PATH; got {item!r}")
+        with np.load(path, allow_pickle=False) as z:
+            out[model_hash] = {"parameter_names": [str(n) for n in z["parameter_names"]],
+                               "samples": np.asarray(z["samples"], dtype=float)}
+    return out or None
+
+
+def _v2_claim_table(args) -> None:
+    from ._common import read_json
+    from .claims_v2 import build_claim_table, render_claims_markdown
+
+    report = read_json(args.report)
+    sddr = read_json(args.sddr) if args.sddr else None
+    prior = read_json(args.prior_sensitivity) if args.prior_sensitivity else None
+    reruns = read_json(args.d3_reruns)["rows"] if args.d3_reruns else []
+    taper2 = read_json(args.taper2)["rows"] if args.taper2 else []
+    if args.taper2_evaluations:
+        if not args.graph:
+            raise ValueError("--taper2-evaluations needs --graph")
+        from gwpop_search.grammar import load_model_graph
+
+        from .claims_v2 import taper2_rows_from_evaluations
+
+        taper2 = [*taper2, *taper2_rows_from_evaluations(load_model_graph(Path(args.graph)),
+                                                          args.taper2_evaluations)]
+    alt = {}
+    for item in args.alt_root or []:
+        name, sep, path = str(item).partition("=")
+        if not sep:
+            raise ValueError(f"--alt-root expects NAME=PATH; got {item!r}")
+        alt[name] = read_json(path)
+    ppc = {}
+    for path in args.ppc or []:
+        payload = read_json(path)
+        models = payload.get("models", {payload.get("model_hash"): payload})
+        ppc.update(models)
+    loo = read_json(args.loo) if args.loo else None
+    taper_mass = None
+    if args.taper_mass:
+        taper_mass = {str(k): float(v) for k, v in read_json(args.taper_mass).items() if k != "format_version"}
+    mass_below = {}
+    for path in args.mass_below or []:
+        from .posthoc_cut import read_mass_below
+
+        for model_hash, entry in read_mass_below(read_json(path)).items():
+            if model_hash in mass_below:
+                raise ValueError(f"model {model_hash} appears in more than one --mass-below file")
+            mass_below[model_hash] = entry
+    if args.evaluations:
+        from .claims_v2 import collect_v2_evaluations
+
+        everything = collect_v2_evaluations(args.evaluations)
+        collected = everything["taper_mass"]
+        clash = sorted(k for k in set(collected) & set(taper_mass or {}) if collected[k] != taper_mass[k])
+        if clash:
+            raise ValueError(f"--taper-mass disagrees with --evaluations for {clash}")
+        taper_mass = {**collected, **(taper_mass or {})}
+        both = sorted(set(everything["mass_below"]) & set(mass_below))
+        if both:
+            raise ValueError(f"posterior fractions below the cuts given twice (--mass-below and "
+                             f"--evaluations) for {both}")
+        mass_below = {**everything["mass_below"], **mass_below}
+    labels = None
+    if args.atom_labels:
+        labels = {str(k): str(v) for k, v in read_json(args.atom_labels).items()}
+    graph = None
+    if args.graph:
+        from gwpop_search.grammar import load_model_graph
+
+        from .claims_v2 import atom_labels_from_graph_payload
+
+        graph = load_model_graph(Path(args.graph))
+        if labels is None:
+            labels = atom_labels_from_graph_payload(read_json(args.graph)) or None
+    table = build_claim_table(
+        report, sddr=sddr, prior_sensitivity=prior, d3_reruns=reruns, taper2=taper2, alt_roots=alt,
+        ppc=ppc, loo=loo, taper_mass=taper_mass, mass_below=mass_below or None, graph=graph,
+        n_atoms_tried=args.n_atoms_tried, atom_labels=labels, posteriors=_read_posteriors(args.posterior),
+    )
+    _write(args.output, table)
+    markdown = render_claims_markdown(table)
+    if args.markdown:
+        Path(args.markdown).write_text(markdown)
+        print(f"written: {args.markdown}")
+    print(markdown)
 
 
 # ---------------------------------------------------------------------------
@@ -576,3 +871,97 @@ def register_analysis_subcommands(subparsers) -> None:
     loo.add_argument("--refit-stop-fidelity", choices=("F3", "F4"), default="F3")
     loo.add_argument("--output", required=True)
     loo.set_defaults(func=_run_psis_loo_influence)
+
+    ppc = subparsers.add_parser(
+        "run-ppc",
+        help="v2 D6 posterior predictive checks (selection-aware, pre-declared statistics)",
+    )
+    _add_data_arguments(ppc)
+    _add_results_arguments(ppc)
+    ppc.add_argument("--n-draws", type=int, default=2000)
+    ppc.add_argument("--seed", type=int, default=0)
+    ppc.add_argument("--batch-size", type=int, default=16)
+    ppc.add_argument("--column", action="append",
+                     help="OBSERVABLE=COLUMN override (observables m1, q, chi_eff, z)")
+    ppc.add_argument("--no-draws", action="store_true", help="omit the per-draw statistics from the output")
+    ppc.add_argument("--output", required=True)
+    ppc.set_defaults(func=_run_ppc)
+
+    variants = subparsers.add_parser(
+        "reweight-data-variants",
+        help="importance-reweight posteriors to the 249-event / SNR 9 / SNR 11 variants "
+        "(ESS + rerun flag; never launches a rerun)",
+    )
+    _add_data_arguments(variants)
+    _add_results_arguments(variants)
+    variants.add_argument("--variants", required=True,
+                          help="JSON {variants: [{variant_id, drop_o1o2_events?, drop_events?, selection? "
+                          "| selection_row_mask?}], edges?: [{parent_hash, child_hash, log_bayes_factor}]}")
+    variants.add_argument("--log-taper", help="module:function of the likelihood's log variance taper")
+    variants.add_argument("--batch-size", type=int, default=16)
+    variants.add_argument("--seed", type=int, default=0)
+    variants.add_argument("--output", required=True)
+    variants.set_defaults(func=_run_reweight_data_variants)
+
+    collect = subparsers.add_parser(
+        "collect-v2-evaluations",
+        help="per-model D1 gates and taper mass from evaluation.json files "
+        "(inputs of analyze-model-comparison --gates and v2-claim-table --taper-mass)",
+    )
+    collect.add_argument("--evaluations", action="append", required=True,
+                         help="evaluation.json file or directory; repeatable")
+    collect.add_argument("--gates-output", required=True, help="JSON {model_hash: gates passed}")
+    collect.add_argument("--taper-mass-output", help="JSON {model_hash: posterior taper mass}")
+    collect.add_argument("--mass-below-output",
+                         help="posthoc-format JSON of the recorded P(sigma^2 <= c) (v2-claim-table --mass-below)")
+    collect.set_defaults(func=_collect_v2_evaluations)
+
+    posthoc = subparsers.add_parser(
+        "posthoc-posterior-mass-below",
+        help="D2 cut bracketing for an existing evaluation: recompute P(sigma^2 <= c) at every weighted "
+        "dynesty point with the run's own data/model/HBI configuration (read-only on the run directory)",
+    )
+    posthoc.add_argument("--run-dir", action="append", required=True,
+                         help="<output root>/<F3|F4>/<model hash> (holds evaluation.json); repeatable")
+    posthoc.add_argument("--manifest", required=True, help="the frozen dataset manifest of the evaluation")
+    posthoc.add_argument("--campaign", required=True, help="the campaign JSON the evaluation ran under")
+    posthoc.add_argument("--base-dir", default=".")
+    posthoc.add_argument("--cuts", default="0.9", help="comma-separated variance cuts (the threshold is added)")
+    posthoc.add_argument("--max-points-per-run", type=int,
+                         help="evaluate a systematic-resampling subset of this many draws per run "
+                         "(errors include the subsampling stage); default: every weighted point")
+    posthoc.add_argument("--seed", type=int, default=0, help="subsampling seed")
+    posthoc.add_argument("--batch-size", type=int, default=64)
+    posthoc.add_argument("--output", required=True)
+    posthoc.set_defaults(func=_posthoc_posterior_mass_below)
+
+    claims = subparsers.add_parser("v2-claim-table", help="the v2 claim table (criteria D1-D6)")
+    claims.add_argument("--report", required=True, help="analyze-model-comparison JSON")
+    claims.add_argument("--graph", help="model graph JSON (keys depth-2 edges for D5)")
+    claims.add_argument("--sddr", help="analyze-sddr JSON")
+    claims.add_argument("--prior-sensitivity", help="analyze-prior-sensitivity JSON (checks the factor 2)")
+    claims.add_argument("--d3-reruns", help="JSON {rows: [...]} of halved/doubled-prior reruns")
+    claims.add_argument("--taper2", help="JSON {rows: [{parent_hash, child_hash, log_bayes_factor, valid}]}")
+    claims.add_argument("--taper2-evaluations", action="append",
+                        help="evaluation.json file or directory of the cut-at-4 sensitivity reruns "
+                        "(rows are built per graph edge; needs --graph); repeatable")
+    claims.add_argument("--alt-root", action="append", help="A1=<summary.json> / A2=<summary.json>")
+    claims.add_argument("--ppc", action="append", help="run-ppc output; repeatable")
+    claims.add_argument("--loo", help="run-psis-loo-influence output (reported, not binding)")
+    claims.add_argument("--taper-mass", help="JSON {model_hash: posterior mass fraction inside the taper}")
+    claims.add_argument("--mass-below", action="append",
+                        help="posthoc-posterior-mass-below (or collect-v2-evaluations --mass-below-output) "
+                        "JSON: D2 posterior fractions below the tighter cuts; repeatable")
+    claims.add_argument("--evaluations", action="append",
+                        help="evaluation.json file or directory (the taper mass and recorded posterior "
+                        "fractions below the cuts of every tapered "
+                        "evaluation is read from it); repeatable")
+    claims.add_argument("--atom-labels",
+                        help="JSON {mutation_id: plan atom label} (default: the v2 graph's metadata.atoms)")
+    claims.add_argument("--n-atoms-tried", type=int, help="override the trials count (default: evaluated edges)")
+    claims.add_argument("--posterior", action="append",
+                        help="HASH=pooled_posterior.npz of a C1 / C2 child: values of its pre-declared reported "
+                             "quantities (sigma(q = 0.7) headline; slope and sigma(1) secondary); repeatable")
+    claims.add_argument("--output", required=True)
+    claims.add_argument("--markdown")
+    claims.set_defaults(func=_v2_claim_table)

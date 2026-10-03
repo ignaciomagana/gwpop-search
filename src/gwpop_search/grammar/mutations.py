@@ -14,6 +14,35 @@ class InapplicableMutation(ValueError):
 
 
 @dataclass(frozen=True)
+class ConditionalPriors:
+    """Extra prior changes applied only when the *parent* has ``block.options[option] == value``
+    (or, with ``option=None``, ``block.family == value``).
+
+    Used when an atom on one block owns hyperparameters of another block, e.g.
+    the v2 mass add/drop-a-peak atoms on a root whose pairing slope is per mass
+    component: the pairing slope ``beta_<c>`` of the added/dropped component
+    must be added/removed together with the component (one structural axis);
+    and the per-component pairing atom adds one slope per component of the
+    parent's mass family.
+    """
+
+    block: str
+    option: str | None
+    value: JsonValue
+    prior_updates: Mapping[str, PriorConfig] = field(default_factory=dict)
+    prior_removals: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "prior_removals", tuple(self.prior_removals))
+
+    def applies(self, parent: ModelSpec) -> bool:
+        block = getattr(parent, self.block)
+        if self.option is None:
+            return block.family == self.value
+        return block.options.get(self.option) == self.value
+
+
+@dataclass(frozen=True)
 class MutationSpec:
     mutation_id: str
     block: str
@@ -29,6 +58,31 @@ class MutationSpec:
     #: family change they are part of the one atomic axis, not extra mutations.
     #: Empty for every DEFAULT_MUTATIONS entry.
     companion_options: Mapping[str, JsonValue] = field(default_factory=dict)
+    #: ``set_option`` only: auxiliary options written together with ``option``
+    #: *over* the parent's value (``companion_options`` only fill a missing one).
+    #: Used by the v2 chi_eff - z atoms C3/C4, which set the z pivot to 0.5 (the
+    #: family default 0.0 is inert while no z slope is active, and is kept so
+    #: that the hash of every model without a z slope is unchanged). Part of the
+    #: one atomic axis. Empty for every DEFAULT_MUTATIONS entry.
+    companion_overrides: Mapping[str, JsonValue] = field(default_factory=dict)
+    #: ``change_family`` only: options written over the new family's defaults
+    #: (e.g. the v2 mass-dependent mixture fraction). Part of the one family axis.
+    family_options: Mapping[str, JsonValue] = field(default_factory=dict)
+    #: ``change_family`` only: parent-block options copied into the new block
+    #: when the new family declares them (e.g. the v2 chi_eff correlation
+    #: switches, so a spin-shape change keeps an already-added correlation and
+    #: two-atom compositions commute). Their priors are inherited unchanged.
+    carry_options: tuple[str, ...] = ()
+    #: The mutation applies only if the block family is one of these (empty: no
+    #: restriction beyond ``requires_family``). Used by the v2 correlation atoms,
+    #: which apply to every v2 chi_eff family.
+    requires_any_family: tuple[str, ...] = ()
+    #: The mutation applies only if the parent block carries these option
+    #: values (e.g. the v2 pairing-slope step P1 is defined relative to a
+    #: constant slope; Madau-Dickinson Z1 relative to a constant kappa).
+    requires_options: Mapping[str, JsonValue] = field(default_factory=dict)
+    #: Cross-block prior changes conditioned on the parent's option state.
+    conditional_priors: tuple[ConditionalPriors, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.mutation_id:
@@ -43,6 +97,19 @@ class MutationSpec:
             raise ValueError("companion_options require a set_option mutation")
         if self.option is not None and self.option in self.companion_options:
             raise ValueError("companion_options cannot repeat the mutated option")
+        if self.companion_overrides and self.operation != "set_option":
+            raise ValueError("companion_overrides require a set_option mutation")
+        if self.option is not None and self.option in self.companion_overrides:
+            raise ValueError("companion_overrides cannot repeat the mutated option")
+        if set(self.companion_options) & set(self.companion_overrides):
+            raise ValueError("an option cannot be both a companion default and an override")
+        if (self.family_options or self.carry_options) and self.operation != "change_family":
+            raise ValueError("family_options/carry_options require a change_family mutation")
+        if set(self.family_options) & set(self.carry_options):
+            raise ValueError("an option cannot be both set and carried")
+        object.__setattr__(self, "carry_options", tuple(self.carry_options))
+        object.__setattr__(self, "requires_any_family", tuple(self.requires_any_family))
+        object.__setattr__(self, "conditional_priors", tuple(self.conditional_priors))
 
     @property
     def axis(self) -> str:
@@ -63,6 +130,17 @@ def apply_mutation(
             f"{mutation.mutation_id} requires {mutation.block} family "
             f"{mutation.requires_family!r}, found {block.family!r}"
         )
+    if mutation.requires_any_family and block.family not in mutation.requires_any_family:
+        raise InapplicableMutation(
+            f"{mutation.mutation_id} requires {mutation.block} family in "
+            f"{list(mutation.requires_any_family)}, found {block.family!r}"
+        )
+    for key, value in mutation.requires_options.items():
+        if block.options.get(key) != value:
+            raise InapplicableMutation(
+                f"{mutation.mutation_id} requires {mutation.block}.{key}={value!r}, "
+                f"found {block.options.get(key)!r}"
+            )
 
     if mutation.operation == "change_family":
         family = str(mutation.value)
@@ -71,6 +149,19 @@ def apply_mutation(
                 f"{mutation.mutation_id} would leave family unchanged"
             )
         child_block = registry.block(mutation.block, family)
+        if mutation.family_options or mutation.carry_options:
+            definition = registry.definition(mutation.block, family)
+            declared = (
+                set(definition.default_options)
+                | set(definition.option_choices)
+                | set(definition.optional_options)
+            )
+            options = dict(child_block.options)
+            for key in mutation.carry_options:
+                if key in block.options and key in declared:
+                    options[str(key)] = block.options[key]
+            options.update({str(k): v for k, v in mutation.family_options.items()})
+            child_block = type(child_block)(family=family, options=options)
     else:
         options = dict(block.options)
         if options.get(mutation.option) == mutation.value:
@@ -80,20 +171,28 @@ def apply_mutation(
         options[str(mutation.option)] = mutation.value
         for key, value in mutation.companion_options.items():
             options.setdefault(str(key), value)
+        for key, value in mutation.companion_overrides.items():
+            options[str(key)] = value
         child_block = type(block)(family=block.family, options=options)
 
     priors = dict(parent.priors)
     for name in mutation.prior_removals:
         priors.pop(name, None)
     priors.update(mutation.prior_updates)
+    for rule in mutation.conditional_priors:
+        if rule.applies(parent):
+            for name in rule.prior_removals:
+                priors.pop(name, None)
+            priors.update(rule.prior_updates)
 
     child = replace(parent, **{mutation.block: child_block, "priors": priors})
     registry.validate_model(child)
 
     axes = structural_diff_axes(parent, child)
-    if mutation.companion_options:
+    if mutation.companion_options or mutation.companion_overrides:
         companions = {
-            f"{mutation.block}.options.{key}" for key in mutation.companion_options
+            f"{mutation.block}.options.{key}"
+            for key in (*mutation.companion_options, *mutation.companion_overrides)
         }
         axes = tuple(axis for axis in axes if axis not in companions)
     if axes != (mutation.axis,):

@@ -577,3 +577,570 @@ def chi_eff_logistic_mixture_logpdf(
         & (chi_eff <= 1.0)
     )
     return jnp.where(valid, mixture, -jnp.inf)
+
+
+# ===========================================================================
+# v2 components: the LVK GWTC-4/5 default BBH family and its atoms.
+#
+# Ported from the gate-verified popres implementation
+# (populations-research/popres/models_core.py, models_ext.py; gate G2a,
+# gates/G2a_grids.md: dR/dm1 and dR/dq reproduce the GWTC-5.0 popsummary
+# release to 4.4e-14). Conventions kept exactly:
+#
+# * Planck low-mass taper of gwpopulation (clip of the scaled mass to
+#   [1e-6, 1 - 1e-6], hard window, S = 1 when delta = 0);
+# * primary mixture [lam_pl BPL + sum_k lam_k N_[mlow_1, mmax](mu_k, sigma_k)]
+#   S(m1; mlow_1, delta_m_1) / Z_m1, BPL continuous at the break with an
+#   analytic normalisation on [mlow_1, mmax]; Z_m1 by trapz on the m1 nodes
+#   (1 when delta_m_1 == 0);
+# * p(q | m1) = PL(q; beta, qmin(m1), 1) S(q m1; mlow_2, delta_m_2) / Z_q(m1), Z_q
+#   by trapz over the q nodes at every m1 node, interpolated linearly in ln m1
+#   (LVK "geomspace" grid; index clipped to the end segments), evaluated in log
+#   space (finite where Z_q underflows); Z_q = 1 when delta_m_2 == 0.
+#   Known, inherited accuracy limit (accepted as LVK-faithful; review of
+#   fe32657): near m1 -> mlow_2 the q support spans only a few q nodes and the
+#   linear-in-Z interpolation error of Z_q is large pointwise; weighted by
+#   p(m1) over prior draws it is small (median 7e-6, max 2.6% when mlow_1 ~
+#   mlow_2 ~ 3 and delta_m_1 is small). The pilot reports it at the posterior.
+#
+# Generalisation (the only one): a population floor ``q_floor``. The pairing
+# lower edge is qmin(m1) = max(q_floor, mlow_2 / m1) and the q nodes are
+# linspace(q_floor, 1, n_q). With q_floor = 0.001 this is the LVK grid
+# linspace(0.001, 1, 500) exactly, and qmin = mlow_2/m1 whenever
+# mlow_2/m1 >= 0.001 (always for mlow_2 >= 3, m1 <= 300).
+# ===========================================================================
+
+NEG_INF = -jnp.inf
+LOG_4PI = float(np.log(4.0 * np.pi))
+_SQRT2 = float(np.sqrt(2.0))
+_LOG_SQRT_PI_OVER_2 = float(0.5 * np.log(np.pi / 2.0))
+
+
+def _log_powerlaw_integral_lvk(a1, log_low, log_high):
+    """log of int_low^high x^(a1-1) dx = (high^a1 - low^a1)/a1 (popres, stable)."""
+    span = log_high - log_low
+    x = a1 * span
+    small = jnp.abs(x) < 1e-8
+    a1_safe = jnp.where(small, 1.0, a1)
+    ratio = jnp.where(small, span * (1.0 + 0.5 * x), jnp.expm1(a1_safe * span) / a1_safe)
+    return a1 * log_low + jnp.log(ratio)
+
+
+def log_planck_taper(m, mmin, mmax, delta_m):
+    """log of gwpopulation's smoothing window S(m; mmin, mmax, delta_m).
+
+    S = expit(-(1/s - 1/(1-s))), s = clip((m - mmin)/delta_m, 1e-6, 1 - 1e-6),
+    times the hard window mmin <= m <= mmax; S = 1 inside the window when
+    delta_m == 0.
+    """
+    positive = delta_m > 0
+    dm_safe = jnp.where(positive, delta_m, 1.0)
+    s = jnp.clip((m - mmin) / dm_safe, 1e-6, 1.0 - 1e-6)
+    exponent = 1.0 / s - 1.0 / (1.0 - s)
+    log_window = jnp.where(positive, -jax.nn.softplus(exponent), 0.0)
+    inside = (m >= mmin) & (m <= mmax)
+    return jnp.where(inside, log_window, NEG_INF)
+
+
+def trapz_weights(x) -> np.ndarray:
+    """Trapezoid weights: ``trapz(y, x) == sum(w * y)`` (NumPy)."""
+    x = np.asarray(x, dtype=float)
+    dx = np.diff(x)
+    w = np.zeros_like(x)
+    w[:-1] += 0.5 * dx
+    w[1:] += 0.5 * dx
+    return w
+
+
+def _trapz_w(y, w, axis=-1):
+    shape = [1] * y.ndim
+    shape[axis] = -1
+    return jnp.sum(y * jnp.reshape(w, shape), axis=axis)
+
+
+def _log_z_from_linear(z):
+    pos = z > 0
+    return jnp.where(pos, jnp.log(jnp.where(pos, z, 1.0)), NEG_INF)
+
+
+def _log_trapz_shifted(lp, shift, w):
+    """ln trapz over axis 0 of exp(lp) as c + ln sum_i w_i exp(lp_i - c) (popres)."""
+    shift = jax.lax.stop_gradient(shift)
+    none = jnp.isneginf(shift)
+    shift = jnp.where(none, 0.0, shift)
+    tot = _trapz_w(jnp.exp(lp - shift[None, :]), w, axis=0)
+    pos = tot > 0
+    return jnp.where(pos, shift + jnp.log(jnp.where(pos, tot, 1.0)), NEG_INF)
+
+
+def _log_interp_regular(x, x0, dx, n, lz):
+    """ln of the linear interpolant (regular grid, end segments extrapolated) of exp(lz)."""
+    la, lb = lz[:-1], lz[1:]
+    shift = jax.lax.stop_gradient(jnp.maximum(la, lb))
+    shift = jnp.where(jnp.isneginf(shift), 0.0, shift)
+    za = jnp.exp(la - shift)
+    table = jnp.stack([za, (jnp.exp(lb - shift) - za) / dx, shift], axis=-1)
+    idx = jnp.clip(jnp.floor((x - x0) / dx).astype(jnp.int32), 0, n - 2)
+    seg = table[idx]
+    u = seg[..., 0] + (x - (x0 + idx * dx)) * seg[..., 1]
+    pos = u > 0
+    return jnp.where(pos, seg[..., 2] + jnp.log(jnp.where(pos, u, 1.0)), NEG_INF)
+
+
+def log_mix(log_terms):
+    """log sum_k exp(t_k) of a list of equal-shape arrays; -inf where all are -inf."""
+    terms = [jnp.asarray(t) for t in log_terms]
+    mx = terms[0]
+    for t in terms[1:]:
+        mx = jnp.maximum(mx, t)
+    none = jnp.isneginf(mx)
+    ms = jnp.where(none, 0.0, mx)
+    tot = sum(jnp.exp(t - ms) for t in terms)
+    return jnp.where(none, NEG_INF, ms + jnp.log(jnp.where(none, 1.0, tot)))
+
+
+def log_broken_power_law(m, log_m, alpha_1, alpha_2, break_mass, low, high):
+    """gwpopulation double power law with the break at ``break_mass`` (popres).
+
+    (m/m_b)^-alpha_1 on [low, m_b), (m/m_b)^-alpha_2 on [m_b, high], continuous,
+    normalised analytically on [low, high].
+    """
+    log_mb = jnp.log(break_mass)
+    log_i1 = log_mb + _log_powerlaw_integral_lvk(1.0 - alpha_1, jnp.log(low) - log_mb, 0.0)
+    log_i2 = log_mb + _log_powerlaw_integral_lvk(1.0 - alpha_2, 0.0, jnp.log(high) - log_mb)
+    log_norm = jnp.logaddexp(log_i1, log_i2)
+    slope = jnp.where(m < break_mass, alpha_1, alpha_2)
+    inside = (m >= low) & (m <= high)
+    return jnp.where(inside, -slope * (log_m - log_mb) - log_norm, NEG_INF)
+
+
+def log_single_power_law(m, log_m, alpha, low, high):
+    """m^-alpha normalised on [low, high] (gwpopulation ``powerlaw`` with slope -alpha)."""
+    ok = high > low
+    low_s = jnp.where(ok, low, 0.5 * high)
+    log_int = _log_powerlaw_integral_lvk(1.0 - alpha, jnp.log(low_s), jnp.log(high))
+    inside = ok & (m >= low) & (m <= high)
+    return jnp.where(inside, -alpha * log_m - log_int, NEG_INF)
+
+
+class LVKMassGrid:
+    """Static normalisation nodes of the v2 mass and pairing blocks.
+
+    ``m1_grid="geomspace"`` is the LVK GWTC-4/5 convention (log-uniform nodes,
+    Z_q interpolated linearly in ln m1); ``"linspace"`` is gwpopulation's.
+    q nodes are ``linspace(q_floor, 1, n_q)``.
+    """
+
+    def __init__(self, *, mmin: float, mmax: float, n_m1: int, n_q: int,
+                 q_floor: float, m1_grid: str = "geomspace"):
+        if m1_grid not in ("geomspace", "linspace"):
+            raise ValueError("m1_grid must be 'geomspace' or 'linspace'")
+        if not 0.0 < mmin < mmax:
+            raise ValueError("need 0 < mmin < mmax")
+        if not 0.0 < q_floor < 1.0:
+            raise ValueError("q_floor must lie in (0, 1)")
+        self.mmin, self.mmax = float(mmin), float(mmax)
+        self.n_m1, self.n_q = int(n_m1), int(n_q)
+        self.q_floor = float(q_floor)
+        self.m1_grid = m1_grid
+        if m1_grid == "geomspace":
+            m1s = np.geomspace(self.mmin, self.mmax, self.n_m1)
+            self.x0 = float(np.log(self.mmin))
+            self.dx = float((np.log(self.mmax) - np.log(self.mmin)) / (self.n_m1 - 1))
+        else:
+            m1s = np.linspace(self.mmin, self.mmax, self.n_m1)
+            self.x0 = self.mmin
+            self.dx = float(m1s[1] - m1s[0])
+        qs = np.linspace(self.q_floor, 1.0, self.n_q)
+        # Nodes are stored as NumPy float64 and converted where they are used,
+        # so a model compiled before jax_enable_x64 is switched on does not keep
+        # float32 grids (review of fe32657).
+        self._np = {
+            "m1s": np.asarray(m1s, dtype=np.float64),
+            "log_m1s": np.log(m1s).astype(np.float64),
+            "w_m1": trapz_weights(m1s).astype(np.float64),
+            "qs": np.asarray(qs, dtype=np.float64),
+            "log_qs": np.log(qs).astype(np.float64),
+            "w_q": trapz_weights(qs).astype(np.float64),
+        }
+        self.log_q_floor = float(np.log(self.q_floor))
+
+    @property
+    def m1s(self):
+        return jnp.asarray(self._np["m1s"])
+
+    @property
+    def log_m1s(self):
+        return jnp.asarray(self._np["log_m1s"])
+
+    @property
+    def w_m1(self):
+        return jnp.asarray(self._np["w_m1"])
+
+    @property
+    def qs(self):
+        return jnp.asarray(self._np["qs"])
+
+    @property
+    def log_qs(self):
+        return jnp.asarray(self._np["log_qs"])
+
+    @property
+    def w_q(self):
+        return jnp.asarray(self._np["w_q"])
+
+    def log_interp(self, m1, log_m1, lz_nodes):
+        x = log_m1 if self.m1_grid == "geomspace" else m1
+        return _log_interp_regular(x, self.x0, self.dx, self.n_m1, lz_nodes)
+
+
+class BrokenPowerLawPeaksMass:
+    """Primary mass: (broken) power law + truncated-Gaussian peaks, Planck taper.
+
+    ``continuum`` is ``"broken"`` (alpha_1, alpha_2, m_break; the LVK BP2P
+    continuum) or ``"single"`` (alpha). ``peaks`` are the peak labels ``L``
+    with parameters ``mu_L``, ``sigma_L``. Weights enter as ``log_lam_<c>``
+    for the components ``("pl",) + peaks`` (physical parameters; the
+    declarative layer maps the Dirichlet coordinates). The continuum is
+    normalised on [mlow_1, grid.mmax] and the Gaussians are truncated to
+    [mlow_1, grid.mmax] (the fixed mmax = maximum_mass of the LVK runs).
+    """
+
+    def __init__(self, continuum: str, peaks: tuple[str, ...], grid: LVKMassGrid,
+                 *, continuum_high: float | None = None):
+        if continuum not in ("broken", "single"):
+            raise ValueError("continuum must be 'broken' or 'single'")
+        self.continuum = continuum
+        self.peaks = tuple(peaks)
+        self.components = ("pl",) + self.peaks
+        self.grid = grid
+        # The LVK var_cut-4 run normalises the power law to mmax = 300 while its
+        # grid (and Gaussian truncation / taper window) stops at 200.
+        self.continuum_high = grid.mmax if continuum_high is None else float(continuum_high)
+
+    def log_component_terms(self, m, log_m, p):
+        """[log lam_c + log p_c(m)] for every component (untapered, normalised)."""
+        lo = p["mlow_1"]
+        hi = self.grid.mmax
+        if self.continuum == "broken":
+            lpl = log_broken_power_law(m, log_m, p["alpha_1"], p["alpha_2"], p["m_break"],
+                                       lo, self.continuum_high)
+        else:
+            lpl = log_single_power_law(m, log_m, p["alpha"], lo, self.continuum_high)
+        terms = [p["log_lam_pl"] + lpl]
+        for peak in self.peaks:
+            lg = truncated_normal_logpdf(m, mu=p[f"mu_{peak}"], sigma=p[f"sigma_{peak}"], low=lo, high=hi)
+            terms.append(p[f"log_lam_{peak}"] + lg)
+        return terms
+
+    def log_taper(self, m, p):
+        return log_planck_taper(m, p["mlow_1"], self.grid.mmax, p["delta_m_1"])
+
+    def log_unnormalised_nodes(self, p):
+        """ln of the tapered, unnormalised primary density at the m1 nodes."""
+        g = self.grid
+        return log_mix(self.log_component_terms(g.m1s, g.log_m1s, p)) + self.log_taper(g.m1s, p)
+
+    def log_norm(self, p):
+        """log Z_m1 = log trapz over the m1 nodes (0 when delta_m_1 == 0)."""
+        z = _trapz_w(jnp.exp(self.log_unnormalised_nodes(p)), self.grid.w_m1)
+        return jnp.where(p["delta_m_1"] != 0, _log_z_from_linear(z), 0.0)
+
+    def log_node_measure(self, p):
+        """ln[w_k p~(m_k)]: the unnormalised p(m1) dm1 measure of the m1 nodes.
+
+        ``sum_k exp(.) f(m_k) / sum_k exp(.)`` is the p(m1)-weighted mean of f
+        on the model's own normalisation nodes (trapezoid rule); the ratio
+        does not depend on Z_m1, so it is the same whether the density is
+        normalised on the nodes or analytically (delta_m_1 == 0).
+        """
+        return self.log_unnormalised_nodes(p) + jnp.log(self.grid.w_m1)
+
+    def log_prob_from_terms(self, m, terms, p):
+        return log_mix(terms) + self.log_taper(m, p) - self.log_norm(p)
+
+    def log_prob(self, m, log_m, p):
+        return self.log_prob_from_terms(m, self.log_component_terms(m, log_m, p), p)
+
+
+class TaperedPowerLawPairing:
+    """p(q | m1) = PL(q; beta, qmin(m1), 1) S(q m1; mlow_2, delta_m_2) / Z_q(m1).
+
+    ``form``:
+
+    * ``"constant"``: one ``beta`` (the LVK default);
+    * ``"logistic_log_m1"``: beta(m1) = beta_low + (beta_high - beta_low)
+      expit(ln(m1 / beta_m_t) / beta_width), Z_q at each node with beta(m1_k)
+      (popres ``MassDependentBetaPairing`` "logistic");
+    * ``"per_mass_component"``: one ``beta_c`` per mass component (the LVK
+      "Extended" pairing): p(q | m1) = sum_c w_c(m1) p(q | m1; beta_c), with
+      w_c(m1) = lam_c p_c(m1) / sum_k lam_k p_k(m1) the component membership at
+      m1, so the m1 marginal is unchanged and p(q | m1) is normalised.
+    """
+
+    def __init__(self, form: str, grid: LVKMassGrid, components: tuple[str, ...] = ()):
+        if form not in ("constant", "logistic_log_m1", "per_mass_component"):
+            raise ValueError(f"unknown pairing form {form!r}")
+        if form == "per_mass_component" and not components:
+            raise ValueError("per_mass_component pairing needs the mass components")
+        self.form = form
+        self.grid = grid
+        self.components = tuple(components)
+
+    def beta(self, log_m1, p):
+        if self.form == "constant":
+            return p["beta"] + 0.0 * log_m1
+        t = jax.nn.sigmoid((log_m1 - jnp.log(p["beta_m_t"])) / p["beta_width"])
+        return p["beta_low"] + (p["beta_high"] - p["beta_low"]) * t
+
+    def _log_num(self, q, log_q, m1, log_m1, beta, p):
+        lo2 = p["mlow_2"]
+        log_lo = jnp.maximum(self.grid.log_q_floor, jnp.log(lo2) - log_m1)
+        ok = log_lo < 0.0
+        log_int = _log_powerlaw_integral_lvk(1.0 + beta, jnp.where(ok, log_lo, -1.0), 0.0)
+        inside = ok & (q * m1 >= lo2) & (q >= self.grid.q_floor) & (q <= 1.0)
+        lp = jnp.where(inside, beta * log_q - log_int, NEG_INF)
+        return lp + log_planck_taper(m1 * q, lo2, m1, p["delta_m_2"])
+
+    def log_norm_nodes(self, beta_nodes, p):
+        """ln Z_q at the m1 nodes (0 where delta_m_2 == 0; -inf without support)."""
+        g = self.grid
+        lp = self._log_num(g.qs[:, None], g.log_qs[:, None], g.m1s[None, :], g.log_m1s[None, :],
+                           beta_nodes[None, :], p)
+        top = self._log_num(jnp.ones_like(g.m1s), jnp.zeros_like(g.m1s), g.m1s, g.log_m1s, beta_nodes, p)
+        lz = _log_trapz_shifted(lp, top - jnp.maximum(-beta_nodes, 0.0) * g.log_qs[0], g.w_q)
+        return jnp.where(p["delta_m_2"] != 0, lz, 0.0)
+
+    def _log_conditional(self, q, log_q, m1, log_m1, beta_sample, beta_nodes, p):
+        num = self._log_num(q, log_q, m1, log_m1, beta_sample, p)
+        log_zq = self.grid.log_interp(m1, log_m1, self.log_norm_nodes(beta_nodes, p))
+        ok = jnp.isfinite(log_zq)
+        return jnp.where(ok, num - jnp.where(ok, log_zq, 0.0), NEG_INF)
+
+    def log_prob(self, q, log_q, m1, log_m1, p, *, mass_terms=None):
+        g = self.grid
+        if self.form != "per_mass_component":
+            return self._log_conditional(q, log_q, m1, log_m1, self.beta(log_m1, p),
+                                         self.beta(g.log_m1s, p), p)
+        if mass_terms is None:
+            raise ValueError("per_mass_component pairing needs the mass component terms")
+        log_total = log_mix(mass_terms)
+        safe_total = jnp.where(jnp.isneginf(log_total), 0.0, log_total)
+        parts = []
+        for component, term in zip(self.components, mass_terms):
+            b = p[f"beta_{component}"]
+            cond = self._log_conditional(q, log_q, m1, log_m1, b + 0.0 * log_m1, b + 0.0 * g.log_m1s, p)
+            parts.append(term - safe_total + cond)
+        return jnp.where(jnp.isneginf(log_total), NEG_INF, log_mix(parts))
+
+
+def madau_dickinson_log_psi(log1p_z, gamma, kappa, z_peak):
+    """gwpopulation MadauDickinsonRedshift psi(z) with psi(0) = 1 (popres M6)."""
+    log1p_zp = jnp.log1p(z_peak)
+    return (gamma * log1p_z - jnp.logaddexp(0.0, kappa * (log1p_z - log1p_zp))
+            + jnp.logaddexp(0.0, -kappa * log1p_zp))
+
+
+def redshift_madau_dickinson_psi_logpdf(z, *, gamma, kappa, z_peak, zmax, cosmology,
+                                        quadrature_order=96):
+    """p(z) = psi(z) / (1+z) dVc/dz / V on [0, zmax] (gwpopulation form, psi(0) = 1)."""
+    z = jnp.asarray(z)
+    nodes, weights = _legendre_nodes(int(quadrature_order))
+    zq = 0.5 * zmax * (jnp.asarray(nodes) + 1.0)
+    wq = 0.5 * zmax * jnp.asarray(weights)
+    log_shape_q = (jnp.log(cosmology.dVc_dz(zq))
+                   + madau_dickinson_log_psi(jnp.log1p(zq), gamma, kappa, z_peak) - jnp.log1p(zq))
+    log_norm = jax.scipy.special.logsumexp(log_shape_q + jnp.log(wq))
+    safe_z = jnp.where(z >= 0.0, z, 0.0)
+    log1p_z = jnp.log1p(safe_z)
+    log_shape = (jnp.log(cosmology.dVc_dz(safe_z))
+                 + madau_dickinson_log_psi(log1p_z, gamma, kappa, z_peak) - log1p_z)
+    valid = (z >= 0.0) & (z <= zmax) & (z_peak >= 0.0) & jnp.isfinite(log_shape) & jnp.isfinite(log_norm)
+    return jnp.where(valid, log_shape - log_norm, NEG_INF)
+
+
+def _dvc_dz_float64(cosmology, z) -> np.ndarray:
+    """``dVc/dz`` in NumPy float64 (independent of the JAX x64 flag).
+
+    Mirrors :meth:`FlatLambdaCDM.dVc_dz` on its precomputed float64 grid;
+    other cosmology objects fall back to their own (JAX) method.
+    """
+    z = np.asarray(z, dtype=np.float64)
+    grid_z = getattr(cosmology, "_z_grid", None)
+    grid_dl = getattr(cosmology, "_dL_grid", None)
+    if grid_z is None or grid_dl is None:
+        return np.asarray(cosmology.dVc_dz(jnp.asarray(z)), dtype=np.float64)
+    from .cosmology import C_KM_S
+
+    dc = np.interp(z, grid_z, grid_dl) / (1.0 + z)
+    e = np.sqrt(cosmology.Om0 * (1.0 + z) ** 3 + (1.0 - cosmology.Om0))
+    return 4.0 * np.pi * (C_KM_S / cosmology.H0) * dc**2 / e
+
+
+class PowerLawRedshiftNormTable:
+    """ln N(kappa) = ln int_0^zmax dVc/dz (1+z)^(kappa-1) dz on a fixed kappa grid.
+
+    Used by the kappa(m1) redshift model: N(kappa(m1)) at every m1 node enters
+    the one normalisation of the joint (m1, z) density
+    (:func:`redshift_powerlaw_local_mass_function_logpdf`).
+    Values and derivatives d ln N / d kappa = E[ln(1+z)] are tabulated once
+    (Gauss-Legendre in z, float64) and interpolated with a cubic Hermite
+    spline; outside [kappa_low, kappa_high] the density is -inf.
+    """
+
+    def __init__(self, cosmology, zmax: float, *, quadrature_order: int = 96,
+                 kappa_low: float = -40.0, kappa_high: float = 40.0, n: int = 8001):
+        nodes, weights = _legendre_nodes(int(quadrature_order))
+        zq = 0.5 * float(zmax) * (np.asarray(nodes) + 1.0)
+        wq = 0.5 * float(zmax) * np.asarray(weights)
+        log_dvc = np.log(_dvc_dz_float64(cosmology, zq))
+        l1pz = np.log1p(zq)
+        kappas = np.linspace(kappa_low, kappa_high, int(n))
+        a = log_dvc[None, :] + (kappas[:, None] - 1.0) * l1pz[None, :] + np.log(wq)[None, :]
+        amax = a.max(axis=1, keepdims=True)
+        e = np.exp(a - amax)
+        # NumPy float64 storage, converted at use (see LVKMassGrid)
+        self._log_norm = (amax[:, 0] + np.log(e.sum(axis=1))).astype(np.float64)
+        self._dlog_norm = ((e * l1pz[None, :]).sum(axis=1) / e.sum(axis=1)).astype(np.float64)
+        self.kappa_low, self.kappa_high = float(kappa_low), float(kappa_high)
+        self.h = float(kappas[1] - kappas[0])
+        self.n = int(n)
+
+    @property
+    def log_norm(self):
+        return jnp.asarray(self._log_norm)
+
+    @property
+    def dlog_norm(self):
+        return jnp.asarray(self._dlog_norm)
+
+    def __call__(self, kappa):
+        t_all = (kappa - self.kappa_low) / self.h
+        idx = jnp.clip(jnp.floor(t_all).astype(jnp.int32), 0, self.n - 2)
+        t = t_all - idx
+        y0, y1 = self.log_norm[idx], self.log_norm[idx + 1]
+        d0, d1 = self.dlog_norm[idx] * self.h, self.dlog_norm[idx + 1] * self.h
+        t2, t3 = t * t, t * t * t
+        value = ((2 * t3 - 3 * t2 + 1) * y0 + (t3 - 2 * t2 + t) * d0
+                 + (-2 * t3 + 3 * t2) * y1 + (t3 - t2) * d1)
+        inside = (kappa >= self.kappa_low) & (kappa <= self.kappa_high)
+        return jnp.where(inside, value, jnp.nan)
+
+
+def redshift_powerlaw_conditional_logpdf(z, kappa, *, zmax, cosmology, norm_table):
+    """p(z | kappa) = dVc/dz (1+z)^(kappa-1) / N(kappa) with per-sample kappa.
+
+    The per-sample normalised power-law redshift density. With kappa =
+    kappa(m1) it is the DRAFT kappa(m1) convention of fd73da8 (the mass block
+    is then the spectrum integrated over the volume to zmax). The operator
+    decision of 2026-10-01 replaced it by
+    :func:`redshift_powerlaw_local_mass_function_logpdf`; it is kept for specs
+    written by fd73da8 (no ``kappa_m1_convention`` option), whose hash must
+    keep denoting the density it was defined with, and as a check of the
+    table against the direct quadrature.
+    """
+    z = jnp.asarray(z)
+    safe_z = jnp.where(z >= 0.0, z, 0.0)
+    log_norm = norm_table(kappa)
+    val = jnp.log(cosmology.dVc_dz(safe_z)) + (kappa - 1.0) * jnp.log1p(safe_z) - log_norm
+    valid = (z >= 0.0) & (z <= zmax) & jnp.isfinite(log_norm) & jnp.isfinite(val)
+    return jnp.where(valid, val, NEG_INF)
+
+
+def redshift_powerlaw_local_mass_function_logpdf(
+    z, *, kappa, delta_kappa, delta_kappa_nodes, log_node_measure, zmax, cosmology, norm_table,
+    quadrature_order=96,
+):
+    """Redshift factor of the kappa(m1) model in the local mass function convention.
+
+    The merger rate density is R(m1, z) = R(m1, 0) (1 + z)^kappa(m1) with
+    kappa(m1) = ``kappa`` + ``delta_kappa`` (the per-sample excess over the
+    pivot value), so the mass block p_m is the z = 0 mass spectrum and the
+    joint source-frame density is
+
+        p(m1, z) = p_m(m1) dVc/dz (1 + z)^(kappa(m1) - 1) / Z,
+        Z = int p_m(m1) N(kappa(m1)) dm1,
+        N(k) = int_0^zmax dVc/dz (1 + z)^(k - 1) dz.
+
+    This function returns ln[p(m1, z) / p_m(m1)]. It is *not* a conditional
+    density: its z integral at fixed m1 is N(kappa(m1)) / Z, which is 1 only
+    for a mass-independent kappa. (The DRAFT form of fd73da8 divided by
+    N(kappa(m1)) instead, :func:`redshift_powerlaw_conditional_logpdf`; then
+    p_m was the mass spectrum integrated over the volume to zmax.)
+
+    It is evaluated as
+
+        ln p_R0(z | kappa) + delta_kappa ln(1 + z) - ln <N(kappa(m1)) / N(kappa)>,
+
+    where p_R0 is the root's redshift density (:func:`redshift_rate_logpdf`)
+    and <.> is the p_m-weighted mean over the model's m1 normalisation nodes
+    (``log_node_measure`` = ln[w_k p~_m(m_k)], ``delta_kappa_nodes`` =
+    kappa(m_k) - kappa; ln N from ``norm_table``). With delta_kappa = 0
+    everywhere the last two terms are exactly zero, so the model reduces to
+    the root bit for bit (the Savage-Dickey null of the Z2 edge). The value is
+    -inf outside [0, zmax], when kappa(m_k) leaves the table at a node that
+    carries mass, or when no node carries mass.
+
+    Accuracy. The mean uses the same m1 nodes as Z_m1, so the (m1, z) mass on
+    the nodes equals the m1 mass on the nodes exactly, and the true integral
+    is 1 to the accuracy of the mass block's own normalisation. Over 1000
+    prior draws of the Z2 model (reference: panelled Gauss-Legendre in m1)
+    |int int p dz dm1 - 1| has median 3.5e-6 and 90% quantile 1.1e-5, against
+    3.5e-6 and 6.9e-6 for |int p_m dm1 - 1| of the mass block alone. The
+    remaining draws with a large error (99% quantile 3e-2, against 4e-2 for the
+    mass block) all have a peak narrower than the m1 node spacing (sigma <~
+    0.05 Msun), where the LVK grid normalisation Z_m1 itself fails: inherited
+    from the LVK convention, as for every v2 model.
+    """
+    z = jnp.asarray(z)
+    inside = (z >= 0.0) & (z <= zmax)
+    safe_z = jnp.where(inside, z, 0.0)
+    base = redshift_rate_logpdf(safe_z, kappa=kappa, zmax=zmax, cosmology=cosmology,
+                                quadrature_order=quadrature_order)
+    carries = jnp.isfinite(log_node_measure)
+    # ln[N(kappa(m_k)) / N(kappa)]; nodes without mass do not enter the mean
+    kappa_nodes = jnp.where(carries, kappa + delta_kappa_nodes, kappa)
+    excess = norm_table(kappa_nodes) - norm_table(kappa)
+    measure = jnp.where(carries, log_node_measure, NEG_INF)
+    log_mean = (jax.scipy.special.logsumexp(measure + excess)
+                - jax.scipy.special.logsumexp(measure))
+    val = base + delta_kappa * jnp.log1p(safe_z) - log_mean
+    valid = inside & jnp.isfinite(log_mean) & jnp.isfinite(val)
+    return jnp.where(valid, val, NEG_INF)
+
+
+def log_eps_skewnorm(x, mu, sigma, eps, low=-1.0, high=1.0):
+    """epsilon-skew-normal (Mudholkar & Hutson 2000) truncated to [low, high] (popres M7).
+
+    Widths sigma (1 + eps) below mu and sigma (1 - eps) above, continuous at
+    mu, analytic normalisation; the form of the LVK 260512 release. Needs
+    sigma > 0 and |eps| < 1. The normalisation
+
+        Z = sqrt(2 pi) [s_L (Phi((min(high, mu) - mu)/s_L) - Phi((low - mu)/s_L))
+                        + s_R (Phi((high - mu)/s_R) - Phi((max(low, mu) - mu)/s_R))]
+
+    is popres's erf expression written with the tail-stable
+    ``_log_normal_interval_mass``, so it stays finite when mu leaves [low, high]
+    and equals the truncated Gaussian exactly at eps = 0.
+    """
+    s_l = sigma * (1.0 + eps)
+    s_r = sigma * (1.0 - eps)
+    ok = (sigma > 0) & (s_l > 0) & (s_r > 0)
+    s_l = jnp.where(ok, s_l, 1.0)
+    s_r = jnp.where(ok, s_r, 1.0)
+    left_hi = jnp.minimum(high, mu)
+    right_lo = jnp.maximum(low, mu)
+
+    def side(a, b, s):
+        has = b > a
+        a_s = jnp.where(has, a, 0.0)
+        b_s = jnp.where(has, b, 1.0)
+        return jnp.where(has, jnp.log(s) + _log_normal_interval_mass(a_s, b_s), NEG_INF)
+
+    log_left = side((low - mu) / s_l, (left_hi - mu) / s_l, s_l)
+    log_right = side((right_lo - mu) / s_r, (high - mu) / s_r, s_r)
+    log_z = 0.5 * LOG2PI + log_mix([log_left, log_right])
+    s = jnp.where(x < mu, s_l, s_r)
+    val = -0.5 * ((x - mu) / s) ** 2 - jnp.where(jnp.isfinite(log_z), log_z, 0.0)
+    inside = ok & (x >= low) & (x <= high) & jnp.isfinite(log_z)
+    return jnp.where(inside, val, NEG_INF)

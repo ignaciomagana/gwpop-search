@@ -1,0 +1,438 @@
+"""v2 (GWTC-5 BBH atom search) numerical configuration: taper, seeds, fidelity.
+
+DRAFT: every value here is a pre-registration draft for operator approval at
+freeze; nothing in this module has been frozen.
+
+Numerics decided for v2 (plan ``scalable-stargazing-shamir``, "Numerics"):
+
+* Variance guard *inside* the likelihood: the sharp cut of
+  :mod:`gwpop_search.hbi.taper` at ``sigma^2_lnL = 1`` -- the exact LVK GWTC-5
+  implementation (arXiv:2605.27226 Sec. III; gwpopulation ``hyperpe.py``
+  L185-189 via gwpopulation_pipe ``--maximum-uncertainty``; verified on the
+  GWTC-5 Default release posteriors, staging/v2/TAPER_FORM.md; operator
+  decision 1, 2026-09-30). Claimed edges are re-run with the cut at 4
+  (sensitivity; D3), the LVK relaxed-cut release value (operator decision
+  2026-10-01). The smooth (Callister & Farr form) taper stays available
+  as a diagnostic alternative.
+* One dynesty run per model: nlive 500, bound ``multi``, sample ``rslice``,
+  dlogz 0.1 (``F3`` rung, one repeat).
+* A second seed only for decision-relevant edges (:class:`SecondSeedRule`):
+  ``|ln BF|`` within ``2 sigma`` of ``+-3``, or any claimed edge.
+* Pilot seed-scatter rule (:class:`PilotSeedScatterRule`): if the measured
+  scatter of ``ln Z`` over the pilot's root seeds exceeds 1.5 x dynesty's own
+  error estimate, fall back to 2 seeds for every model.
+* Binding (D1): every nested-sampling and evidence check binds; the
+  importance-sampling checks (ESS, maximum weights, ``Var[ln L]``) are
+  reported but non-binding, because the taper (not a post-hoc gate) now
+  handles an unreliable Monte-Carlo estimate; the posterior mass inside the
+  taper region (the near-cut band ``sigma^2 > 0.95``) is always reported.
+* Cut bracketing (D2; operator decision 2026-10-01): every tapered evaluation
+  records the posterior fraction ``P(sigma^2 <= c)`` at the pre-declared
+  cuts :data:`V2_POSTERIOR_MASS_BELOW_CUTS` (default 0.9) and at the primary
+  cut 1 (and at the run's own threshold), with the Kish ESS of the weights.
+  Under the sharp cut the evidence at a tighter cut is exactly
+  ``Z(c') = Z(c) P_post(sigma^2 <= c' | cut c)``, so D2 is checked at
+  ``c = 1`` and ``c' = 0.9`` without a rerun; with the cut-4 D3 rerun this
+  brackets the cut. This replaces the DRAFT near-cut mass limit (0.10).
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+import json
+import math
+from pathlib import Path
+from typing import Mapping, Sequence
+
+import numpy as np
+
+from gwpop_search.hbi import HBIConfig
+from gwpop_search.hbi.taper import DEFAULT_SHARP_REGION_BAND, VarianceTaper
+
+from .dynesty_backend import DynestyConfig
+from .evidence_campaign import EvidenceCampaignConfig
+from .fidelity import (
+    REQUIRED_BOUND,
+    REQUIRED_SAMPLE,
+    F0SanityConfig,
+    FidelityRunConfig,
+    NumericalCriteria,
+    fidelity_config_sha256,
+    fidelity_run_config_to_dict,
+)
+
+V2_NUMERICS_FORMAT_VERSION = "gwpop-search-v2-numerics-draft-1.0"
+V2_TAPER_THRESHOLD = 1.0
+#: D3 sensitivity: the LVK GWTC-5 relaxed-cut release uses 4 (operator decision 2026-10-01).
+V2_TAPER_SENSITIVITY_THRESHOLD = 4.0
+#: The LVK GWTC-5 variance guard (gwpopulation maximum_uncertainty): a sharp cut.
+V2_TAPER_KIND = "sharp"
+#: Pre-declared tighter variance cuts at which every tapered evaluation records
+#: P(sigma^2 <= c) (D2 is checked at the primary cut and at each of these;
+#: operator decision 2026-10-01). The primary cut V2_TAPER_THRESHOLD and the
+#: run's own threshold are always added to the recorded list.
+V2_POSTERIOR_MASS_BELOW_CUTS: tuple[float, ...] = (0.9,)
+V2_NLIVE = 500
+V2_DLOGZ = 0.1
+#: F0 taper-support gate (DRAFT): the sharp cut must keep at least this
+#: fraction of the prior. dynesty 3.1.0 needs min(nlive - 20, 100) = 100
+#: finite initial live points within 1000 batches of nlive = 500 draws (a
+#: kept fraction >= 2e-4, below which the run fails with NoFiniteSupportError);
+#: the gate asks for twice that, i.e. <= 500 initialization batches.
+V2_F0_MIN_TAPER_KEPT_FRACTION = 4.0e-4
+#: draws of the sequential F0 kept-fraction scan: ~26 kept draws expected at
+#: the gate, so the gate decision is resolved
+V2_F0_TAPER_SUPPORT_MAX_DRAWS = 65536
+
+# Importance-sampling check families: reported, non-binding in v2 (see module doc).
+V2_NON_BINDING_FAMILIES = (
+    "importance.min_event_ess",
+    "importance.selection_ess",
+    "importance.max_event_weight_fraction",
+    "importance.selection_max_weight_fraction",
+    "importance.shape_log_likelihood_variance",
+)
+
+
+def _positive(name: str, value) -> float:
+    value = float(value)
+    if not (math.isfinite(value) and value > 0.0):
+        raise ValueError(f"{name} must be finite and positive; got {value}")
+    return value
+
+
+@dataclass(frozen=True)
+class SecondSeedRule:
+    """Pre-declared rule: which edges get a second dynesty seed.
+
+    An edge (child vs parent model) is decision-relevant when its
+    ``ln BF`` lies within ``n_sigma * sigma_total`` of either decision
+    threshold ``+-decision_threshold`` (the D2 claim / DISFAVOURED boundary,
+    3), i.e. ``| |ln BF| - 3 | <= 2 sigma_total``, or when the edge is
+    claimed. ``sigma_total`` is the edge's total ``ln BF`` uncertainty as used
+    in D2 (Monte-Carlo and nested-sampling errors combined).
+    """
+
+    decision_threshold: float = 3.0
+    n_sigma: float = 2.0
+    always_for_claimed: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "decision_threshold", _positive("decision_threshold", self.decision_threshold)
+        )
+        object.__setattr__(self, "n_sigma", _positive("n_sigma", self.n_sigma))
+        if not isinstance(self.always_for_claimed, bool):
+            raise TypeError("always_for_claimed must be a bool")
+
+    def assess(self, ln_bf: float, sigma_total: float, *, claimed: bool = False) -> dict[str, object]:
+        ln_bf = float(ln_bf)
+        sigma = float(sigma_total)
+        if not math.isfinite(ln_bf):
+            raise ValueError("ln_bf must be finite")
+        if not (math.isfinite(sigma) and sigma >= 0.0):
+            raise ValueError("sigma_total must be finite and non-negative")
+        distance = abs(abs(ln_bf) - self.decision_threshold)
+        near = distance <= self.n_sigma * sigma
+        claimed_rule = bool(claimed) and self.always_for_claimed
+        return {
+            "ln_bf": ln_bf,
+            "sigma_total": sigma,
+            "distance_to_threshold": distance,
+            "window": self.n_sigma * sigma,
+            "near_threshold": bool(near),
+            "claimed": bool(claimed),
+            "second_seed": bool(near or claimed_rule),
+            "reason": (
+                "claimed edge"
+                if claimed_rule
+                else (
+                    f"|ln BF| within {self.n_sigma:g} sigma of +-{self.decision_threshold:g}"
+                    if near
+                    else "not decision-relevant"
+                )
+            ),
+        }
+
+    def requires_second_seed(
+        self, ln_bf: float, sigma_total: float, *, claimed: bool = False
+    ) -> bool:
+        return bool(self.assess(ln_bf, sigma_total, claimed=claimed)["second_seed"])
+
+
+@dataclass(frozen=True)
+class PilotSeedScatterRule:
+    """Pilot validation of the one-seed design.
+
+    The pilot runs the root model with ``n_pilot_seeds`` seeds. The measured
+    scatter is the sample standard deviation (ddof 1) of their ``ln Z``;
+    dynesty's estimate is the root-mean-square of the runs' ``logzerr``. If
+    ``scatter > max_scatter_ratio * estimate`` every model falls back to
+    ``fallback_seeds`` seeds.
+    """
+
+    max_scatter_ratio: float = 1.5
+    n_pilot_seeds: int = 3
+    fallback_seeds: int = 2
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "max_scatter_ratio", _positive("max_scatter_ratio", self.max_scatter_ratio)
+        )
+        for name, minimum in (("n_pilot_seeds", 2), ("fallback_seeds", 2)):
+            value = getattr(self, name)
+            if isinstance(value, bool) or int(value) != value or int(value) < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+            object.__setattr__(self, name, int(value))
+
+    def assess(self, log_evidences: Sequence[float], log_evidence_errors: Sequence[float]) -> dict:
+        lnz = np.asarray(log_evidences, dtype=float)
+        err = np.asarray(log_evidence_errors, dtype=float)
+        if lnz.ndim != 1 or lnz.shape != err.shape:
+            raise ValueError("log_evidences and log_evidence_errors must be 1-D of equal length")
+        if lnz.size < self.n_pilot_seeds:
+            raise ValueError(
+                f"the pilot rule needs {self.n_pilot_seeds} seeds; got {lnz.size}"
+            )
+        if not (np.all(np.isfinite(lnz)) and np.all(np.isfinite(err)) and np.all(err > 0)):
+            raise ValueError("log evidences must be finite and errors finite and positive")
+        scatter = float(np.std(lnz, ddof=1))
+        estimate = float(np.sqrt(np.mean(err**2)))
+        ratio = scatter / estimate
+        fallback = ratio > self.max_scatter_ratio
+        return {
+            "n_seeds": int(lnz.size),
+            "measured_scatter": scatter,
+            "dynesty_estimate_rms_logzerr": estimate,
+            "ratio": ratio,
+            "max_scatter_ratio": float(self.max_scatter_ratio),
+            "fallback_to_two_seeds_everywhere": bool(fallback),
+            "seeds_per_model": int(self.fallback_seeds if fallback else 1),
+        }
+
+
+@dataclass(frozen=True)
+class SeedPolicy:
+    """Seeds per model: one, plus the second-seed and pilot fallback rules."""
+
+    seeds_per_model: int = 1
+    second_seed: SecondSeedRule = field(default_factory=SecondSeedRule)
+    pilot: PilotSeedScatterRule = field(default_factory=PilotSeedScatterRule)
+
+    def seeds_for_edge(
+        self,
+        ln_bf: float,
+        sigma_total: float,
+        *,
+        claimed: bool = False,
+        pilot_fallback: bool = False,
+    ) -> int:
+        """Seeds each end of an edge needs (the pilot fallback overrides everything)."""
+        base = self.pilot.fallback_seeds if pilot_fallback else self.seeds_per_model
+        if self.second_seed.requires_second_seed(ln_bf, sigma_total, claimed=claimed):
+            return max(base, 2)
+        return base
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "seeds_per_model": int(self.seeds_per_model),
+            "second_seed": asdict(self.second_seed),
+            "pilot": asdict(self.pilot),
+        }
+
+
+def v2_variance_taper(threshold: float = V2_TAPER_THRESHOLD, *, kind: str = V2_TAPER_KIND) -> VarianceTaper:
+    """The v2 variance guard at ``threshold`` (1; 4 for D3): the LVK sharp cut.
+
+    ``kind="smooth"`` gives the Callister & Farr-form diagnostic alternative
+    (p = 30; not the LVK Default form, see :mod:`gwpop_search.hbi.taper`).
+    """
+    if kind == "sharp":
+        return VarianceTaper(kind="sharp", threshold=threshold,
+                             sharp_region_band=DEFAULT_SHARP_REGION_BAND)
+    return VarianceTaper(kind=kind, threshold=threshold)
+
+
+def v2_posterior_mass_below_cuts(cuts: Sequence[float] | None = None) -> tuple[float, ...]:
+    """Recorded cuts: ``cuts`` (default :data:`V2_POSTERIOR_MASS_BELOW_CUTS`) plus the primary cut 1."""
+    cuts = V2_POSTERIOR_MASS_BELOW_CUTS if cuts is None else tuple(cuts)
+    return tuple(sorted({*(float(c) for c in cuts), float(V2_TAPER_THRESHOLD)}))
+
+
+def v2_criteria(*, repeats: int, posterior_mass_below_cuts: Sequence[float] | None = None) -> NumericalCriteria:
+    """v2 criteria: nested-sampling/evidence binding; importance reported, non-binding.
+
+    ``repeats >= 2`` (the second-seed rung) adds the cross-run gates.
+    DRAFT thresholds: Kish ESS 250 per run (half of v1's F3 value, as nlive
+    halves); evidence error 0.5 (the D2 sigma budget); importance thresholds
+    kept at v1 F3 values for the advisory record. ``posterior_mass_below_cuts``
+    (default :data:`V2_POSTERIOR_MASS_BELOW_CUTS`; the primary cut 1 is
+    always added) are the reported ``P(sigma^2 <= c)`` cuts of the D2 cut
+    bracketing.
+    """
+    multi = int(repeats) >= 2
+    return NumericalCriteria(
+        max_cross_run_r_hat=1.05 if multi else None,
+        min_kish_ess_per_run=250.0,
+        require_dlogz_termination=True,
+        require_selection_support=True,
+        max_evidence_error=0.50,
+        max_evidence_repeat_std=None,
+        max_repeat_consistency_z=3.0 if multi else None,
+        min_event_ess=10.0,
+        min_selection_ess=100.0,
+        max_event_weight_fraction=0.35,
+        max_selection_weight_fraction=0.15,
+        max_shape_log_likelihood_variance=V2_TAPER_THRESHOLD,
+        binding={name: False for name in V2_NON_BINDING_FAMILIES},
+        max_posterior_taper_mass=None,
+        posterior_mass_below_cuts=v2_posterior_mass_below_cuts(posterior_mass_below_cuts),
+    )
+
+
+def v2_evidence(*, repeats: int) -> EvidenceCampaignConfig:
+    return EvidenceCampaignConfig(
+        repeats=int(repeats),
+        dynesty=DynestyConfig(
+            nlive=V2_NLIVE, bound=REQUIRED_BOUND, sample=REQUIRED_SAMPLE, dlogz=V2_DLOGZ
+        ),
+        slices_multiplier=2,
+    )
+
+
+def v2_fidelity_run_config(threshold: float = V2_TAPER_THRESHOLD) -> FidelityRunConfig:
+    """DRAFT v2 fidelity configuration.
+
+    ``F3``: one run per model (nlive 500, ``multi``/``rslice``, dlogz 0.1).
+    ``F4``: the second-seed rung for decision-relevant edges (2 runs, same
+    settings, cross-run gates). The likelihood carries the sharp variance
+    cut at ``threshold`` (the LVK form).
+    """
+    return FidelityRunConfig(
+        f0=F0SanityConfig(
+            min_taper_finite_fraction=V2_F0_MIN_TAPER_KEPT_FRACTION,
+            taper_support_max_draws=V2_F0_TAPER_SUPPORT_MAX_DRAWS,
+        ),
+        f3_evidence=v2_evidence(repeats=1),
+        f4_evidence=v2_evidence(repeats=2),
+        f3_criteria=v2_criteria(repeats=1),
+        f4_criteria=v2_criteria(repeats=2),
+        hbi=HBIConfig(selection_chunk_size=None, variance_taper=v2_variance_taper(threshold)),
+    )
+
+
+def v2_campaign_numerics(
+    *,
+    fidelity_files: Mapping[str, str] | None = None,
+    policy: SeedPolicy | None = None,
+) -> dict[str, object]:
+    """DRAFT campaign-level numerics (seed rules, taper, sensitivity rerun)."""
+    policy = SeedPolicy() if policy is None else policy
+    primary = v2_fidelity_run_config(V2_TAPER_THRESHOLD)
+    sensitivity = v2_fidelity_run_config(V2_TAPER_SENSITIVITY_THRESHOLD)
+    return {
+        "format_version": V2_NUMERICS_FORMAT_VERSION,
+        "status": "DRAFT - pre-registration draft; operator approves at freeze",
+        "likelihood": {
+            "rate_treatment": "shape (rate-marginalised, p(R) ~ 1/R)",
+            "variance": "sigma^2 = sum_i Var[ln I_i] + N^2 Var[xi]/xi^2",
+            "taper": primary.hbi.variance_taper.to_dict(),
+            "taper_form": "sharp cut: ln L -> -inf where sigma^2 > threshold (sigma^2 = threshold kept)",
+            "taper_region_diagnostic": primary.hbi.variance_taper.region_definition(),
+            "taper_sources": [
+                "GWTC-5.0 populations, arXiv:2605.27226, Sec. III (source__3-methods.tex L15): "
+                "'maximum variance of 1 ... sharp or smoothly-tapered cutoff'",
+                "gwpopulation @b3a34f9 gwpopulation/hyperpe.py L185-189: "
+                "ln_l -= nan_to_num(inf * (maximum_uncertainty < variance), nan=0)",
+                "gwpopulation_pipe @88c2e2944b (git.ligo.org) parser.py L317-326 --maximum-uncertainty, "
+                "data_analysis.py L232-254 create_likelihood(maximum_uncertainty=...)",
+                "GWInferno @dd810e4 gwinferno/pipeline/analysis.py L305-318: "
+                "where(less_equal(variance, 1), log_l, -inf)",
+                "GWTC-5 Default release posteriors: max variance 1 - 5.9e-6, 0 of 8200 samples above 1 "
+                "(var_4 run: max 4 - 1.8e-5); staging/v2/TAPER_FORM.md",
+            ],
+            "taper_not_adopted": (
+                "Callister & Farr 2024 (PRX 14, 021005) S(x) = 1/(1 + x^-30) acts on N_eff^inj/(4 N_obs), "
+                "not on sigma^2; available as VarianceTaper(kind='smooth') for diagnostics only"
+            ),
+            "lvk_relaxed_cut": "GWTC-5 relaxed run uses variance 4; the v2 D3 sensitivity uses 4 too",
+            "sensitivity_taper": sensitivity.hbi.variance_taper.to_dict(),
+            "sensitivity_applies_to": "claimed edges (D3: the cut-at-4 rerun keeps the sign)",
+            "tighter_cuts_reported": list(primary.f3_criteria.posterior_mass_below_cuts),
+            "tighter_cut_identity": (
+                "sharp cut: Z(c') = Z(c) P_post(sigma^2 <= c' | cut c) for c' < c, so per edge "
+                "ln BF(c') = ln BF(c) + ln P_child(sigma^2 <= c') - ln P_parent(sigma^2 <= c'); "
+                "P is the importance-weighted dead + live point fraction, its binomial error "
+                "sqrt(p (1 - p) / Kish ESS) is added to sigma_total in quadrature"
+            ),
+            "d2_cut_bracketing": (
+                "D2 (and DISFAVOURED) must hold at c = 1 and at c' = 0.9 (operator decision "
+                "2026-10-01); the cut-4 D3 rerun brackets the cut from above. The near-cut band "
+                "mass (sigma^2 > 0.95) is reported, not gating (replaces the DRAFT 0.10 limit)"
+            ),
+        },
+        "fidelity": {
+            "primary": {
+                "file": (fidelity_files or {}).get("primary"),
+                "sha256": fidelity_config_sha256(primary),
+            },
+            "taper_sensitivity": {
+                "file": (fidelity_files or {}).get("taper_sensitivity"),
+                "sha256": fidelity_config_sha256(sensitivity),
+            },
+            "rungs": {
+                "F0": "prior-support scan + JAX/NumPy parity (every node)",
+                "F3": "one dynesty run per model, nlive 500, dlogz 0.1, multi/rslice",
+                "F4": (
+                    "second-seed rung (2 runs) for decision-relevant edges only. The executor's "
+                    "evaluation seed depends on the rung, so both F4 runs are fresh seeds (the F3 "
+                    "run is not repeated); F3 and F4 share one trajectory configuration, so the "
+                    "evidence analysis pools all three runs of such a model and D1 uses the F4 "
+                    "evaluation (claims_v2.collect_v2_evaluations). Cost: 2 extra runs per "
+                    "endpoint, not 1 (the plan's second-seed line assumed 1)"
+                ),
+            },
+        },
+        "seed_policy": policy.to_dict(),
+        "second_seed_rule": (
+            "second seed iff | |ln BF| - 3 | <= 2 sigma_total, or the edge is claimed"
+        ),
+        "pilot_seed_scatter_rule": (
+            "pilot root with 3 seeds: if std(ln Z, ddof=1) > 1.5 x rms(logzerr) then 2 seeds "
+            "for every model"
+        ),
+        "binding": {
+            "binding": "every nested-sampling and evidence check (D1)",
+            "non_binding_reported": list(V2_NON_BINDING_FAMILIES),
+            "reported": (
+                "posterior mass inside the taper region (per run and pooled) and P(sigma^2 <= c) "
+                "at the recorded cuts with the Kish ESS"
+            ),
+        },
+        "nulls": "none (trials factor = number of atoms tried, disclosed with every claim)",
+    }
+
+
+def write_v2_draft_configs(out_dir: str | Path) -> dict[str, str]:
+    """Write the DRAFT v2 fidelity (primary + taper-2 sensitivity) and campaign JSONs.
+
+    Refuses any path with a ``frozen`` component (drafts never go to frozen/).
+    """
+    out = Path(out_dir)
+    if "frozen" in out.resolve().parts or "frozen" in out.parts:
+        raise ValueError(f"refusing to write DRAFT configs under a frozen/ directory: {out}")
+    out.mkdir(parents=True, exist_ok=True)
+    files = {
+        "primary": "fidelity_v2_DRAFT.json",
+        "taper_sensitivity": "fidelity_v2_cut4_DRAFT.json",
+    }
+    for key, threshold in (
+        ("primary", V2_TAPER_THRESHOLD),
+        ("taper_sensitivity", V2_TAPER_SENSITIVITY_THRESHOLD),
+    ):
+        payload = fidelity_run_config_to_dict(v2_fidelity_run_config(threshold))
+        (out / files[key]).write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
+    campaign = v2_campaign_numerics(fidelity_files=files)
+    (out / "campaign_v2_numerics_DRAFT.json").write_text(
+        json.dumps(campaign, sort_keys=True, indent=2) + "\n"
+    )
+    return {**files, "campaign": "campaign_v2_numerics_DRAFT.json"}

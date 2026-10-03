@@ -226,6 +226,9 @@ class ModelLOOTerms:
     runs: tuple[RunLOOTerms, ...]
     log_evidences: tuple[float, ...]
     likelihood_identity: Mapping[str, object] | None
+    #: ``None`` for an untapered likelihood; ``"taper_as_prior"`` for a v2
+    #: variance-tapered one (see :data:`.terms.TAPER_TREATMENTS`)
+    taper_treatment: str | None = None
 
     @property
     def n_events(self) -> int:
@@ -255,6 +258,12 @@ def evaluate_model_loo_terms(
     ``log L`` of every point (finite values to ``parity_rtol``, ``-inf``
     exactly): a mismatch means the data or model differ from the sampled
     ones and raises :class:`AnalysisInputError`.
+
+    Variance taper (v2): the stored ``log L`` is the tapered ``ln L + ln T``.
+    Its ``ln T(sigma^2)`` is re-evaluated at every point with the sampled
+    estimator and added before the parity check; leave-one-out then holds
+    ``ln T`` at its full-catalog value (``taper_treatment="taper_as_prior"``),
+    so the pointwise terms are the untapered ``ln ell_i - ln A``.
     """
     results = tuple(results)
     if not results:
@@ -270,13 +279,25 @@ def evaluate_model_loo_terms(
             identity, posterior, selection, population_model, names, hbi_config,
             what=f"PSIS-LOO terms of {label or 'model'}",
         )
+    treatment = "taper_as_prior" if getattr(hbi_config, "variance_taper", None) is not None else None
     fn = terms_fn or BatchedCatalogTerms(
-        posterior, selection, population_model, names, hbi_config=hbi_config, batch_size=batch_size
+        posterior, selection, population_model, names, hbi_config=hbi_config, batch_size=batch_size,
+        taper_treatment=treatment,
     )
+    taper_fn = None
+    if treatment is not None:
+        from gwpop_search.inference.dynesty_backend import build_batched_log_likelihood
+
+        taper_fn = build_batched_log_likelihood(
+            posterior, selection, population_model, names, hbi_config=hbi_config,
+            batch_size=batch_size, with_variance=True,
+        )
     runs = []
     for item in results:
         events, exposure = fn(item.samples)
         log_like = shape_log_likelihood_from_terms(events, exposure)
+        if taper_fn is not None:
+            log_like = log_like + taper_fn.components(item.samples)["log_taper"]
         stored = np.asarray(item.log_likelihoods, dtype=np.float64)
         both = np.isfinite(log_like) & np.isfinite(stored)
         pattern = np.isfinite(log_like) != np.isfinite(stored)
@@ -308,6 +329,7 @@ def evaluate_model_loo_terms(
         runs=tuple(runs),
         log_evidences=tuple(float(item.log_evidence) for item in results),
         likelihood_identity=identity,
+        taper_treatment=treatment,
     )
 
 

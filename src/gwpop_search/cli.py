@@ -460,11 +460,13 @@ def _enumerate_models(args: argparse.Namespace) -> None:
     from .grammar import (
         baseline_model_spec,
         enumerate_model_graph,
+        mutations_for_profile,
         save_model_graph,
     )
 
     graph = enumerate_model_graph(
         baseline_model_spec(args.hyperprior_profile),
+        mutations=mutations_for_profile(args.hyperprior_profile),
         max_depth=args.max_depth,
         max_models=args.max_models,
     )
@@ -1201,6 +1203,57 @@ def _write_nearby_baseline_config(args: argparse.Namespace) -> None:
     )
 
 
+def _write_v2_alt_root_config(args: argparse.Namespace) -> None:
+    from .grammar import load_model_spec
+    from .validation import (
+        NearbyBaselineSuiteSpec,
+        save_nearby_baseline_suite_spec,
+        v2_alt_root_scenario,
+        v2_chi_eff_atom_mutations,
+    )
+
+    if (args.root_model is None) == (args.alt_root is None):
+        raise ValueError("pass exactly one of --root-model or --alt-root")
+    if args.alt_root is not None:
+        from .grammar.v2 import V2_PROFILE, v2_alternative_roots
+
+        root_spec = v2_alternative_roots()[args.alt_root]
+        catalogue = args.mutation_catalogue or V2_PROFILE
+    else:
+        root_spec = load_model_spec(Path(args.root_model))
+        catalogue = args.mutation_catalogue or "default"
+    chi_eff = {}
+    for item in args.chi_eff_atom or []:
+        label, sep, mutation_id = str(item).partition("=")
+        if not sep or not label or not mutation_id:
+            raise ValueError(f"--chi-eff-atom expects LABEL=MUTATION_ID; got {item!r}")
+        if label in chi_eff:
+            raise ValueError(f"--chi-eff-atom {label} given twice")
+        chi_eff[label] = tuple(x for x in mutation_id.split(",") if x) if "," in mutation_id else mutation_id
+    if not chi_eff and catalogue == "gwtc5-v2":
+        # the v2 grammar's own C1-C6 / S1-S3 atoms (each one mutation of R0)
+        chi_eff = v2_chi_eff_atom_mutations()
+    candidates = [tuple(x for x in str(item).split(",") if x) for item in args.candidate or []]
+    scenario = v2_alt_root_scenario(
+        args.scenario_id,
+        root_spec,
+        candidate_paths=candidates,
+        chi_eff_mutation_ids=chi_eff,
+        mutation_catalogue_name=catalogue,
+        note=args.note or "",
+    )
+    spec = NearbyBaselineSuiteSpec(
+        scenarios=(scenario,),
+        config=_nearby_baseline_config_from_args(args),
+    )
+    save_nearby_baseline_suite_spec(Path(args.output), spec)
+    print(
+        "v2 D5 alternative-root config written: "
+        f"{args.output} scenario={args.scenario_id} paths={len(scenario.mutation_paths)} "
+        f"models<={scenario.max_models}"
+    )
+
+
 def _run_nearby_baseline_suite(args: argparse.Namespace) -> None:
     from .grammar import load_model_graph
     from .production import (
@@ -1593,14 +1646,19 @@ def _run_hsgp_scout(args: argparse.Namespace) -> None:
 
 
 def _canonicalize_gwcat_v2(args: argparse.Namespace) -> None:
-    from .data import canonicalize_gwcat_v2_pair
+    from .data import GwcatV2DataPolicy, canonicalize_gwcat_v2_pair
 
+    policy = (
+        None if args.v2_policy is None else GwcatV2DataPolicy.from_json(args.v2_policy)
+    )
     report = canonicalize_gwcat_v2_pair(
         Path(args.pe_export),
         Path(args.selection_export),
         Path(args.output_dir),
         required_spin_basis=args.spin_basis,
         required_selection_spin_basis=args.selection_spin_basis,
+        policy=policy,
+        spin_prior_allow_list=args.spin_prior_allow_list,
     )
     print(json.dumps(report, sort_keys=True, indent=2))
 
@@ -1717,10 +1775,13 @@ def _freeze_production_campaign(args: argparse.Namespace) -> None:
             )
         model_prior = {"version": "uniform-v1"}
 
+    from .production.freeze import verify_graph_file
+
     git_commit = args.git_commit or str(_code_identity()["git_commit"])
     campaign = build_production_campaign(
         load_dataset_manifest(Path(args.manifest)),
         load_model_graph(Path(args.graph)),
+        graph_file_sha256=str(verify_graph_file(Path(args.graph))["file_sha256"]),
         campaign_id=args.campaign_id,
         git_commit=git_commit,
         model_prior=model_prior,
@@ -2369,6 +2430,42 @@ def build_parser() -> argparse.ArgumentParser:
     _add_stress_arguments(nearby_template)
     nearby_template.set_defaults(func=_write_nearby_baseline_config)
 
+    v2_alt = subparsers.add_parser(
+        "write-v2-alt-root-config",
+        help=(
+            "write a v2 D5 alternative-root scenario restricted to the root, the "
+            "candidate edges and all 9 chi_eff atoms (writes a config only; runs nothing)"
+        ),
+    )
+    v2_alt.add_argument("--scenario-id", required=True)
+    v2_alt.add_argument("--root-model", help="alternative root model spec JSON")
+    v2_alt.add_argument(
+        "--alt-root",
+        choices=("A1", "A2"),
+        help="the v2 grammar's alternative root (A1 = R0 + beta per component, "
+        "A2 = R0 + kappa(m1)) instead of --root-model; implies --mutation-catalogue gwtc5-v2",
+    )
+    v2_alt.add_argument(
+        "--candidate",
+        action="append",
+        help="candidate mutation path: 'ID' (depth 1) or 'A,B' (B applied to root+A); repeatable",
+    )
+    v2_alt.add_argument(
+        "--chi-eff-atom",
+        action="append",
+        help="LABEL=MUTATION_ID (or LABEL=A,B for a two-step atom) for each of C1-C6, "
+        "S1-S3 (all nine required; default with the gwtc5-v2 catalogue: the v2 atoms)",
+    )
+    v2_alt.add_argument(
+        "--mutation-catalogue",
+        default=None,
+        help="named mutation catalogue (default: 'gwtc5-v2' with --alt-root, else 'default')",
+    )
+    v2_alt.add_argument("--note")
+    v2_alt.add_argument("--output", required=True)
+    _add_stress_arguments(v2_alt)
+    v2_alt.set_defaults(func=_write_v2_alt_root_config)
+
     nearby_run = subparsers.add_parser(
         "run-nearby-baseline-suite",
         help="run/resume explicit nearby-baseline search robustness scenarios",
@@ -2632,6 +2729,23 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     canonicalize.add_argument("--output-dir", required=True)
+    canonicalize.add_argument(
+        "--v2-policy",
+        default=None,
+        help=(
+            "JSON GwcatV2DataPolicy (OD-7 spin-prior allow-list, z_max and G17 "
+            "allow-list, exact priors, sky-marginal cumulative mixture); every "
+            "check must pass and the policy hash is recorded in the report"
+        ),
+    )
+    canonicalize.add_argument(
+        "--spin-prior-allow-list",
+        default=None,
+        help=(
+            "without --v2-policy: a .json {event: kind} or text 'NAME [KIND]' file "
+            "of events allowed a non-own_analytic spin prior in a reference pair"
+        ),
+    )
     canonicalize.set_defaults(func=_canonicalize_gwcat_v2)
 
     freeze_dataset = subparsers.add_parser(

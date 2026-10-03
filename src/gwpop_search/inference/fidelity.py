@@ -109,6 +109,8 @@ REQUIRED_BOUND = "multi"
 REQUIRED_SAMPLE = "rslice"
 
 _F0_STREAM = 0x46305341  # "F0SA"
+#: kept (finite tapered ln L) prior draws the F0 taper-support scan aims for
+F0_TAPER_SUPPORT_TARGET_FINITE = 25
 _IMPORTANCE_STREAM = 0x494D5054  # "IMPT"
 
 
@@ -144,6 +146,36 @@ def _as_float(name: str, value) -> float:
 
 _LEGACY_CRITERIA_FIELDS = ("max_r_hat", "min_mcmc_n_eff", "max_divergences")
 
+# Check families of a repeated dynesty fit (:func:`summarize_dynesty_fit`).
+# A check's family is its name without the ``.point``/``.draw_median``/
+# ``.draw_tail`` suffix; ``NumericalCriteria.binding`` sets, per family,
+# whether a failing check fails the evaluation (``stage == "gate"``) or is
+# recorded as advisory only.
+CHECK_FAMILIES = (
+    "nested_sampling.all_runs_terminated_by_dlogz",
+    "nested_sampling.selection_unsupported_evaluations",
+    "nested_sampling.min_kish_ess_per_run",
+    "nested_sampling.cross_run_r_hat",
+    "evidence.conservative_error",
+    "evidence.repeat_std",
+    "evidence.max_pairwise_z",
+    "importance.min_event_ess",
+    "importance.selection_ess",
+    "importance.max_event_weight_fraction",
+    "importance.selection_max_weight_fraction",
+    "importance.shape_log_likelihood_variance",
+    "taper.posterior_mass_in_taper_region",
+)
+_CHECK_SUFFIXES = (".point", ".draw_median", ".draw_tail")
+
+
+def check_family(name: str) -> str:
+    """The binding family of a check name (suffixes ``.point``/``.draw_*`` removed)."""
+    for suffix in _CHECK_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
 
 @dataclass(frozen=True)
 class NumericalCriteria:
@@ -167,6 +199,31 @@ class NumericalCriteria:
     (:func:`gwpop_search.inference.ns_diagnostics.insertion_index_ranks`,
     :func:`~gwpop_search.inference.ns_diagnostics.insertion_index_test`) and
     becomes live as soon as the backend persists the birth iterations.
+
+    ``binding`` (per-check binding flags) maps a check family
+    (:data:`CHECK_FAMILIES`) to ``True`` (binding: a failure fails the
+    evaluation) or ``False`` (recorded with ``stage="advisory"`` and
+    ``binding=False``; never fails the evaluation). Families not listed are
+    binding. With the likelihood variance taper inside the likelihood (v2),
+    the ``importance.*`` variance/ESS families are typically non-binding: the
+    taper, not a post-hoc gate, handles an unreliable estimate.
+
+    ``max_posterior_taper_mass`` (``None``: report only) limits the posterior
+    fraction inside the variance-taper region
+    (``taper.posterior_mass_in_taper_region``); it needs a tapered HBI
+    configuration.
+
+    ``posterior_mass_below_cuts`` (reported, never gated; empty: not
+    computed) lists variance cuts ``c`` at which the tapered evaluation
+    records the posterior fraction ``P(sigma^2 <= c)`` with its Kish-ESS
+    binomial error (``taper.pooled.posterior_mass_below``; the taper's own
+    threshold is always added to a non-empty list). Under the sharp cut the
+    evidence at a tighter cut ``c'`` is ``Z(c') = Z(c) P(sigma^2 <= c')``
+    (v2 D2, :mod:`gwpop_search.analysis.claims_v2`).
+
+    Serialization omits ``binding`` when empty, ``max_posterior_taper_mass``
+    when ``None`` and ``posterior_mass_below_cuts`` when empty, so the hashes
+    of configurations written before these fields existed are unchanged.
     """
 
     max_cross_run_r_hat: float | None = None
@@ -184,9 +241,36 @@ class NumericalCriteria:
     importance_tail_quantile: float = 0.1
     gate_importance_over_posterior: bool = True
     insertion_index_advisory: bool = False
+    binding: Mapping[str, bool] = field(default_factory=dict)
+    max_posterior_taper_mass: float | None = None
+    posterior_mass_below_cuts: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
+        if isinstance(self.posterior_mass_below_cuts, (str, bytes)) or not isinstance(
+            self.posterior_mass_below_cuts, (tuple, list)
+        ):
+            raise TypeError("posterior_mass_below_cuts must be a sequence of variance cuts")
+        from gwpop_search.hbi.taper import normalize_cuts
+
+        set_(self, "posterior_mass_below_cuts", normalize_cuts(self.posterior_mass_below_cuts))
+        if not isinstance(self.binding, Mapping):
+            raise TypeError("binding must be a mapping of check family -> bool")
+        binding = {str(key): value for key, value in self.binding.items()}
+        unknown = sorted(set(binding) - set(CHECK_FAMILIES))
+        if unknown:
+            raise ValueError(
+                f"unknown check families in binding: {unknown}; known: {list(CHECK_FAMILIES)}"
+            )
+        for key, value in binding.items():
+            if not isinstance(value, bool):
+                raise TypeError(f"binding[{key!r}] must be a bool")
+        set_(self, "binding", dict(sorted(binding.items())))
+        if self.max_posterior_taper_mass is not None:
+            mass = _as_float("max_posterior_taper_mass", self.max_posterior_taper_mass)
+            if not 0.0 <= mass <= 1.0:
+                raise ValueError("max_posterior_taper_mass must lie in [0, 1]")
+            set_(self, "max_posterior_taper_mass", mass)
         if self.max_cross_run_r_hat is not None:
             value = _as_float("max_cross_run_r_hat", self.max_cross_run_r_hat)
             if not value > 1.0:
@@ -245,8 +329,22 @@ class NumericalCriteria:
             )
         )
 
+    def is_binding(self, name: str) -> bool:
+        """Whether the check ``name`` (or its family) is binding."""
+        return bool(self.binding.get(check_family(name), True))
+
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["binding"] = dict(self.binding)
+        if not payload["binding"]:
+            payload.pop("binding")
+        if payload["max_posterior_taper_mass"] is None:
+            payload.pop("max_posterior_taper_mass")
+        if not payload["posterior_mass_below_cuts"]:
+            payload.pop("posterior_mass_below_cuts")
+        else:
+            payload["posterior_mass_below_cuts"] = list(self.posterior_mass_below_cuts)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "NumericalCriteria":
@@ -324,6 +422,19 @@ class F0SanityConfig:
     NumPy parity uses a thinned pair (``parity_pe_samples_per_event`` PE
     samples per event, ``parity_selected_per_campaign`` injections per
     campaign) at up to ``parity_points`` draws with finite thinned likelihood.
+
+    Taper-support gate (only with a variance taper, and only when set; ``None``
+    keeps pre-v2 configuration hashes and disables the gate): the fraction of
+    prior draws the taper keeps (finite *tapered* ``ln L``) must be
+    ``>= min_taper_finite_fraction``. When the ``prior_draws`` scan holds fewer
+    than :data:`F0_TAPER_SUPPORT_TARGET_FINITE` kept draws, further prior draws
+    (same seeded stream, ``prior_draws`` per round) are evaluated until it
+    does or ``taper_support_max_draws`` draws are reached, so that fractions
+    near the threshold are resolved. dynesty 3.1.0 starts only after it has
+    ``min(nlive - 20, 100)`` finite live points and gives up (here: a typed
+    :class:`~gwpop_search.inference.evidence.NoFiniteSupportError`) after
+    1000 batches of ``nlive`` draws, i.e. below a kept fraction of
+    ``100 / (1000 nlive)`` (2e-4 at nlive 500).
     """
 
     prior_draws: int = 4096
@@ -334,6 +445,8 @@ class F0SanityConfig:
     parity_selected_per_campaign: int = 512
     parity_points: int = 2
     parity_rtol: float = 1.0e-9
+    min_taper_finite_fraction: float | None = None
+    taper_support_max_draws: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -356,9 +469,27 @@ class F0SanityConfig:
         if not (math.isfinite(rtol) and rtol > 0.0):
             raise ValueError("parity_rtol must be finite and positive")
         object.__setattr__(self, "parity_rtol", rtol)
+        if (self.min_taper_finite_fraction is None) != (self.taper_support_max_draws is None):
+            raise ValueError(
+                "min_taper_finite_fraction and taper_support_max_draws are set together or not at all"
+            )
+        if self.min_taper_finite_fraction is not None:
+            kept = _as_float("min_taper_finite_fraction", self.min_taper_finite_fraction)
+            if not 0.0 < kept <= 1.0:
+                raise ValueError("min_taper_finite_fraction must lie in (0, 1]")
+            object.__setattr__(self, "min_taper_finite_fraction", kept)
+            draws = _as_positive_int("taper_support_max_draws", self.taper_support_max_draws)
+            if draws < self.prior_draws:
+                raise ValueError("taper_support_max_draws must be >= prior_draws")
+            object.__setattr__(self, "taper_support_max_draws", draws)
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        # the taper-support fields appear only when set (pre-v2 hashes unchanged)
+        payload = asdict(self)
+        for name in ("min_taper_finite_fraction", "taper_support_max_draws"):
+            if payload[name] is None:
+                del payload[name]
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "F0SanityConfig":
@@ -370,24 +501,13 @@ class F0SanityConfig:
 
 
 def _hbi_to_dict(hbi: HBIConfig) -> dict[str, object]:
-    return {
-        "rate_treatment": hbi.rate_treatment.value,
-        "raw_selection_use_observing_time": bool(hbi.raw_selection_use_observing_time),
-        "selection_chunk_size": (
-            None if hbi.selection_chunk_size is None else int(hbi.selection_chunk_size)
-        ),
-    }
+    # ``variance_taper`` appears only when configured, so pre-v2 configuration
+    # hashes are unchanged.
+    return hbi.to_dict()
 
 
 def _hbi_from_dict(payload: Mapping[str, object]) -> HBIConfig:
-    payload = dict(payload)
-    unknown = sorted(
-        set(payload)
-        - {"rate_treatment", "raw_selection_use_observing_time", "selection_chunk_size"}
-    )
-    if unknown:
-        raise ValueError(f"unknown HBI configuration field(s): {unknown}")
-    return HBIConfig(**payload)
+    return HBIConfig.from_dict(payload)
 
 
 @dataclass(frozen=True)
@@ -642,6 +762,27 @@ def _bool_check(name: str, passed: bool, *, value=None, stage: str = "gate", not
     if note is not None:
         payload["note"] = str(note)
     return payload
+
+
+def apply_binding(
+    checks: Sequence[Mapping[str, object]], criteria: "NumericalCriteria"
+) -> list[dict[str, object]]:
+    """Copies of ``checks`` with the per-family binding flags applied.
+
+    Every check gets ``binding`` (``True``/``False``). A ``stage == "gate"``
+    check of a non-binding family becomes ``stage = "advisory"``; advisory
+    checks stay advisory (and non-binding).
+    """
+    out = []
+    for check in checks:
+        item = dict(check)
+        stage = item.get("stage", "gate")
+        binding = stage == "gate" and criteria.is_binding(str(item["name"]))
+        if stage == "gate" and not binding:
+            item["stage"] = "advisory"
+        item["binding"] = bool(binding)
+        out.append(item)
+    return out
 
 
 def _gates_passed(checks: Sequence[Mapping[str, object]]) -> bool:
@@ -955,6 +1096,8 @@ def summarize_dynesty_fit(
     rhat_draws_per_run: int = 2000,
     diagnostics_batch_size: int = 16,
     diagnostics_fn=None,
+    taper_loglike=None,
+    taper_batch_size: int = 64,
 ) -> dict[str, object]:
     """All numerical gates of a repeated dynesty fit.
 
@@ -966,6 +1109,23 @@ def summarize_dynesty_fit(
     ``importance``. ``diagnostics_fn`` optionally supplies an already
     compiled :func:`~gwpop_search.inference.dynesty_backend.build_importance_diagnostics`
     function (its likelihood identity is still verified against every run).
+
+    Variance taper (``hbi_config.variance_taper``): the ``taper`` block is the
+    posterior taper-mass diagnostic of
+    :func:`~gwpop_search.inference.dynesty_backend.posterior_taper_mass`
+    (per run and pooled; the fraction of posterior mass inside the taper
+    region), evaluated with ``taper_loglike`` (a tapered batched likelihood
+    of the same estimator; built here with ``taper_batch_size`` rows per
+    call when omitted). It is always reported; the check
+    ``taper.posterior_mass_in_taper_region`` is added only when
+    ``criteria.max_posterior_taper_mass`` is set. With
+    ``criteria.posterior_mass_below_cuts`` every summary of the block also
+    carries ``posterior_mass_below`` (``P(sigma^2 <= c)`` and its Kish-ESS
+    binomial error at each cut and at the taper threshold; reported, never
+    gated). Without a taper the block is ``None``.
+
+    Binding: ``criteria.binding`` is applied to every check (each carries
+    ``binding``; non-binding families are recorded as advisory).
     """
     results = tuple(results)
     if not results:
@@ -1076,6 +1236,40 @@ def summarize_dynesty_fit(
     )
     checks.extend(importance_checks)
 
+    taper_block = None
+    taper = hbi_config.variance_taper
+    if taper is None:
+        if criteria.max_posterior_taper_mass is not None:
+            raise ValueError(
+                "max_posterior_taper_mass is set but the HBI configuration has no variance taper"
+            )
+    else:
+        from .dynesty_backend import posterior_taper_mass
+
+        loglike = taper_loglike
+        if loglike is None:
+            loglike = build_batched_log_likelihood(
+                posterior,
+                selection,
+                population_model,
+                names,
+                hbi_config=hbi_config,
+                batch_size=taper_batch_size,
+            )
+        cuts = ()
+        if criteria.posterior_mass_below_cuts:
+            cuts = tuple(sorted({*criteria.posterior_mass_below_cuts, float(taper.threshold)}))
+        taper_block = posterior_taper_mass(results, loglike, cuts=cuts)
+        if criteria.max_posterior_taper_mass is not None:
+            checks.append(
+                _check(
+                    "taper.posterior_mass_in_taper_region",
+                    taper_block["pooled"]["posterior_mass_in_taper_region"],
+                    criteria.max_posterior_taper_mass,
+                    comparison="le",
+                )
+            )
+
     insertion = {
         "available": False,
         "reason_code": INSERTION_INDEX_UNAVAILABLE_REASON,
@@ -1106,7 +1300,8 @@ def summarize_dynesty_fit(
             }
         )
 
-    return {
+    checks = apply_binding(checks, criteria)
+    summary = {
         "passed": _gates_passed(checks),
         "checks": checks,
         "nested_sampling": {
@@ -1122,6 +1317,9 @@ def summarize_dynesty_fit(
         "posterior_median": dict(posterior_block["median"]),
         "importance": importance,
     }
+    if taper_block is not None:
+        summary["taper"] = taper_block
+    return summary
 
 
 def save_pooled_posterior(path: str | Path, results: Sequence[object]) -> dict[str, object]:
@@ -1198,10 +1396,29 @@ def run_f0_sanity(
 
     NaN/``+inf`` in any likelihood evaluation raises
     :class:`gwpop_search.hbi.PopulationDensityError` (never a gate value).
+
+    With a variance taper (``hbi_config.variance_taper``) the support gate
+    (``f0.finite_fraction``) is the population support, i.e. the finite
+    fraction of the *untapered* likelihood: a sharp cut (the v2 default) sets
+    ``ln L = -inf`` wherever ``sigma^2 > threshold``, which at prior draws (and
+    on the thinned parity pair, whose variance is inflated by thinning) can be
+    almost everywhere without any support problem. The fraction of draws the
+    taper keeps is reported (``support.taper``). Parity then compares the
+    untapered value, ``sigma^2`` and -- where finite -- the tapered value.
     """
     names, transform = parameterization.prior_transform(priors)
     rng = np.random.default_rng([int(seed), _F0_STREAM])
     theta = np.asarray(transform(rng.random((config.prior_draws, len(names)))), dtype=float)
+
+    tapered = getattr(hbi_config, "variance_taper", None) is not None
+
+    def _evaluate(likelihood, rows):
+        """(tapered ln L, untapered ln L, sigma^2 or None) per row."""
+        if not tapered:
+            out = likelihood(rows)
+            return out, out, None
+        comps = likelihood.components(rows)
+        return comps["log_likelihood"], comps["log_likelihood_untapered"], comps["variance"]
 
     # 1. The production batched likelihood on the full data.
     start = time.perf_counter()
@@ -1213,18 +1430,67 @@ def run_f0_sanity(
         hbi_config=hbi_config,
         batch_size=config.batch_size,
     )
-    first = loglike(theta[: config.batch_size])
+    first = _evaluate(loglike, theta[: config.batch_size])
     compile_seconds = time.perf_counter() - start
     start = time.perf_counter()
+    empty = np.empty(0, dtype=float)
     rest = (
-        loglike(theta[config.batch_size :])
+        _evaluate(loglike, theta[config.batch_size :])
         if theta.shape[0] > config.batch_size
-        else np.empty(0, dtype=float)
+        else (empty, empty, None if not tapered else empty)
     )
     evaluation_seconds = time.perf_counter() - start
-    values = np.concatenate([first, rest])
+    values = np.concatenate([first[0], rest[0]])  # the likelihood that is sampled
+    untapered_values = np.concatenate([first[1], rest[1]])
     finite = np.isfinite(values)
-    finite_fraction = float(np.mean(finite))
+    # support gate: the population support (untapered ln L) -- see the docstring
+    supported = np.isfinite(untapered_values)
+    finite_fraction = float(np.mean(supported))
+    taper_support = None
+    taper_gate = None
+    if tapered:
+        variance_values = np.concatenate([first[2], rest[2]])
+        taper = hbi_config.variance_taper
+        # Sequential extension of the kept-fraction estimate (same seeded
+        # stream, continued): only the count of finite tapered values is used.
+        n_kept, n_scanned, rounds = int(np.count_nonzero(finite)), int(finite.size), 0
+        if config.min_taper_finite_fraction is not None:
+            while (
+                n_kept < F0_TAPER_SUPPORT_TARGET_FINITE
+                and n_scanned < config.taper_support_max_draws
+            ):
+                size = min(config.prior_draws, config.taper_support_max_draws - n_scanned)
+                extra = np.asarray(transform(rng.random((size, len(names)))), dtype=float)
+                extra_values = _evaluate(loglike, extra)[0]
+                n_kept += int(np.count_nonzero(np.isfinite(extra_values)))
+                n_scanned += size
+                rounds += 1
+            taper_gate = n_kept / n_scanned
+        taper_support = {
+            "taper": taper.to_dict(),
+            "n_finite_tapered": int(np.count_nonzero(finite)),
+            "finite_fraction_tapered": float(np.mean(finite)),
+            "kept_fraction_scan": {
+                "n_draws": n_scanned,
+                "n_kept": n_kept,
+                "kept_fraction": n_kept / n_scanned,
+                "extension_rounds": rounds,
+                "target_kept": F0_TAPER_SUPPORT_TARGET_FINITE,
+                "max_draws": config.taper_support_max_draws,
+                "min_kept_fraction": config.min_taper_finite_fraction,
+            },
+            "n_supported_above_threshold": int(
+                np.count_nonzero(supported & ~(variance_values <= taper.threshold))
+            ),
+            "supported_variance_quantiles": (
+                {
+                    f"q{q:g}": float(np.quantile(variance_values[supported & np.isfinite(variance_values)], q))
+                    for q in (0.05, 0.5, 0.95)
+                }
+                if np.any(supported & np.isfinite(variance_values))
+                else None
+            ),
+        }
     stats = loglike.stats()
 
     # 2. Jitted importance diagnostics on the same draws: exposure support.
@@ -1272,17 +1538,42 @@ def run_f0_sanity(
         hbi_config=hbi_config,
         batch_size=config.batch_size,
     )
-    thin_values = thin_loglike(theta)
+    thin_values, thin_untapered, thin_variance = _evaluate(thin_loglike, theta)
     points = []
-    for index in np.flatnonzero(np.isfinite(thin_values))[: config.parity_points]:
+    for index in np.flatnonzero(np.isfinite(thin_untapered))[: config.parity_points]:
         hyperparameters = {name: float(theta[index, k]) for k, name in enumerate(names)}
-        reference = float(
-            shape_log_likelihood(
-                pe_thin, sel_thin, population_model, hyperparameters, config=hbi_config
-            ).log_likelihood
+        result = shape_log_likelihood(
+            pe_thin, sel_thin, population_model, hyperparameters, config=hbi_config
         )
-        jax_value = float(thin_values[index])
+        if not tapered:
+            reference = float(result.log_likelihood)
+            jax_value = float(thin_values[index])
+            difference = abs(reference - jax_value)
+            points.append(
+                {
+                    "draw": int(index),
+                    "hyperparameters": hyperparameters,
+                    "jax": jax_value,
+                    "numpy": reference,
+                    "abs_diff": difference,
+                    "rel_diff": difference / max(1.0, abs(reference)),
+                }
+            )
+            continue
+        reference = float(result.log_likelihood_untapered)
+        jax_value = float(thin_untapered[index])
         difference = abs(reference - jax_value)
+        rel = difference / max(1.0, abs(reference))
+        ref_var, jax_var = float(result.taper_variance), float(thin_variance[index])
+        if np.isfinite(ref_var) and np.isfinite(jax_var):
+            var_rel = abs(ref_var - jax_var) / max(1.0, abs(ref_var))
+        else:
+            var_rel = 0.0 if ref_var == jax_var else float("inf")
+        ref_tapered, jax_tapered = float(result.log_likelihood), float(thin_values[index])
+        if np.isfinite(ref_tapered) and np.isfinite(jax_tapered):
+            tapered_rel = abs(ref_tapered - jax_tapered) / max(1.0, abs(ref_tapered))
+        else:  # the taper must cut the same points in both backends
+            tapered_rel = 0.0 if np.isfinite(ref_tapered) == np.isfinite(jax_tapered) else float("inf")
         points.append(
             {
                 "draw": int(index),
@@ -1290,7 +1581,14 @@ def run_f0_sanity(
                 "jax": jax_value,
                 "numpy": reference,
                 "abs_diff": difference,
-                "rel_diff": difference / max(1.0, abs(reference)),
+                "untapered_rel_diff": rel,
+                "jax_variance": jax_var,
+                "numpy_variance": ref_var,
+                "variance_rel_diff": var_rel,
+                "jax_tapered": jax_tapered,
+                "numpy_tapered": ref_tapered,
+                "tapered_rel_diff": tapered_rel,
+                "rel_diff": max(rel, var_rel, tapered_rel),
             }
         )
     parity_max = max((item["rel_diff"] for item in points), default=None)
@@ -1322,13 +1620,22 @@ def run_f0_sanity(
             comparison="le",
         ),
     ]
+    if taper_gate is not None:
+        checks.append(
+            _check(
+                "f0.taper_kept_fraction",
+                taper_gate,
+                config.min_taper_finite_fraction,
+                comparison="ge",
+            )
+        )
     throughput = {
         "batch_size": int(config.batch_size),
         "n_draws": int(theta.shape[0]),
         "compile_and_first_batch_seconds": float(compile_seconds),
         "evaluation_seconds": float(evaluation_seconds),
         "evaluations_per_second": (
-            float(rest.size / evaluation_seconds) if evaluation_seconds > 0 and rest.size else None
+            float(rest[0].size / evaluation_seconds) if evaluation_seconds > 0 and rest[0].size else None
         ),
         "device_seconds": float(stats.get("device_seconds", 0.0)),
     }
@@ -1353,10 +1660,12 @@ def run_f0_sanity(
         "diagnostics_likelihood_max_rel_diff": consistency,
         "diagnostics_likelihood_same_support": same_support,
     }
+    if taper_support is not None:
+        support["taper"] = taper_support
     parity = {
         "pe_samples_per_event": int(config.parity_pe_samples_per_event),
         "selected_per_campaign": int(config.parity_selected_per_campaign),
-        "n_thinned_finite": int(np.count_nonzero(np.isfinite(thin_values))),
+        "n_thinned_finite": int(np.count_nonzero(np.isfinite(thin_untapered))),
         "n_points_compared": len(points),
         "points": points,
         "max_rel_diff": parity_max,
@@ -1400,6 +1709,12 @@ class DeterministicHBIEvaluator:
     selection: object
     config: FidelityRunConfig = field(default_factory=FidelityRunConfig)
     dataset_identity: str = "unspecified"
+    #: Optional v2 data policy (``GwcatV2DataPolicy`` or anything with
+    #: ``z_max``) for the v2 support check's ``zmax.policy`` clause. Without it
+    #: the check still requires model zmax == the selection's (and PE's)
+    #: declared ``z_max``, which canonicalisation under the policy already
+    #: forced to equal the policy value (v2_policy, OD-6/G17).
+    data_policy: object | None = None
 
     supported_fidelities = tuple(item.value for item in LADDER_V2)
 
@@ -1526,6 +1841,17 @@ class DeterministicHBIEvaluator:
         start = time.perf_counter()
 
         population_model = compile_model_spec(model)
+        data_support = None
+        if getattr(population_model, "is_v2", False):
+            # v2 models declare their support (zmax, q_floor, mmin/mmax, sky,
+            # cosmology); the dataset must match it before anything is sampled
+            from gwpop_search.models.data_support import require_v2_data_support
+
+            data_support = require_v2_data_support(
+                population_model, self.posterior, self.selection,
+                policy=self.data_policy,
+                context=f"model {model.model_hash}",
+            )
         priors = prior_specs_from_model_spec(model)
         require_population_proxy_coverage(
             self.selection,
@@ -1560,6 +1886,8 @@ class DeterministicHBIEvaluator:
                 run_dir=run_dir,
             )
 
+        if data_support is not None:
+            diagnostics = {**diagnostics, "v2_data_support": data_support}
         elapsed = time.perf_counter() - start
         self._write_evaluation(
             run_dir,

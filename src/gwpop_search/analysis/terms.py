@@ -56,6 +56,52 @@ def _require_jax():
     return jax, jnp
 
 
+#: How an analysis evaluator treats a likelihood sampled under the v2 variance
+#: taper (``HBIConfig.variance_taper``). The evaluators here compute the
+#: *untapered* importance-sampling terms; a tapered run is accepted only when
+#: the caller names one of these treatments, which it records with its output.
+TAPER_TREATMENTS: dict[str, str] = {
+    "weights_only": (
+        "exact: only the per-sample population weights are used; they do not depend on "
+        "the taper, and the posterior draws already carry it"
+    ),
+    "first_order_untapered_mc": (
+        "Monte-Carlo error/bias of the untapered estimator ln Lhat at the tapered "
+        "posterior; the fluctuation of ln T(sigma^2_hat) itself is neglected (first "
+        "order; negligible where the posterior mass inside the taper region is small)"
+    ),
+    "taper_as_prior": (
+        "leave-one-out with ln T(sigma^2) held at its full-catalog value (a "
+        "Lambda-dependent prior factor); the stored tapered ln L is reproduced as "
+        "the untapered terms + ln T before any use"
+    ),
+}
+
+
+def _refuse_variance_taper(cfg, taper_treatment: str | None = None) -> str | None:
+    """Resolve how an untapered analysis evaluator treats a tapered likelihood.
+
+    A run sampled under a variance taper (``HBIConfig.variance_taper``) has a
+    different likelihood; silently reusing these evaluators on it would drop
+    the taper. Without a taper this returns ``None``; with one it returns the
+    named ``taper_treatment`` (one of :data:`TAPER_TREATMENTS`) and refuses
+    when none is given.
+    """
+    if getattr(cfg, "variance_taper", None) is None:
+        return None
+    if taper_treatment is None:
+        raise NotImplementedError(
+            "analysis evaluators compute the untapered likelihood terms; a run sampled "
+            "under HBIConfig.variance_taper needs an explicit taper_treatment "
+            f"(one of {sorted(TAPER_TREATMENTS)})"
+        )
+    if taper_treatment not in TAPER_TREATMENTS:
+        raise ValueError(
+            f"unknown taper_treatment {taper_treatment!r}; expected one of {sorted(TAPER_TREATMENTS)}"
+        )
+    return str(taper_treatment)
+
+
 def _pad_rows(X: np.ndarray, batch_size: int) -> tuple[np.ndarray, int]:
     m = X.shape[0]
     n_blocks = -(-m // batch_size)
@@ -108,6 +154,7 @@ class BatchedCatalogTerms:
         *,
         hbi_config=None,
         batch_size: int = 64,
+        taper_treatment: str | None = None,
     ):
         jax, jnp = _require_jax()
         from gwpop_search.hbi import HBIConfig, RateTreatment
@@ -116,6 +163,8 @@ class BatchedCatalogTerms:
         cfg = HBIConfig(selection_chunk_size=None) if hbi_config is None else hbi_config
         if cfg.rate_treatment is not RateTreatment.SHAPE:
             raise ValueError("analysis evaluators support the shape likelihood only")
+        #: ``None`` for an untapered likelihood, else the recorded treatment
+        self.taper_treatment = _refuse_variance_taper(cfg, taper_treatment)
         self.names = tuple(str(name) for name in names)
         if not self.names or len(set(self.names)) != len(self.names):
             raise ValueError("hyperparameter names must be unique and non-empty")
@@ -257,17 +306,21 @@ def pad_catalog(
     hbi_config=None,
     pe_capacity: int | None = None,
     selection_capacity: int | None = None,
+    taper_treatment: str | None = None,
 ) -> PaddedCatalog:
     """Lay out ``posterior``/``selection`` for :class:`CatalogWeightEvaluator`.
 
     ``pe_capacity``/``selection_capacity`` pad to fixed sizes (at least the
     data size) so that catalogs of different sizes share compiled functions.
+    A tapered ``hbi_config`` needs ``taper_treatment`` (see
+    :data:`TAPER_TREATMENTS`); the weights laid out here are taper-independent.
     """
     from gwpop_search.data import validate_pair
     from gwpop_search.hbi import HBIConfig
     from gwpop_search.hbi.common import density_required_fields, selection_log_factors
 
     cfg = HBIConfig(selection_chunk_size=None) if hbi_config is None else hbi_config
+    _refuse_variance_taper(cfg, taper_treatment)
     fields = density_required_fields(population_model, posterior.basis)
     validate_pair(posterior, selection, fields)
     counts = np.diff(posterior.offsets).astype(np.int64)
@@ -566,6 +619,33 @@ class CatalogWeightEvaluator:
             )
 
     # -- public -------------------------------------------------------------
+
+    def log_weights(self, X) -> tuple[np.ndarray, np.ndarray]:
+        """Raw per-sample log weights at ``X`` ``[K, ndim]``.
+
+        Returns ``(log w_ij [K, N, n_max], log u_m [K, M_pad])`` as NumPy
+        arrays: ``log w_ij = log p_pop(theta_ij) - log pi_ij`` (``-inf`` on
+        padding) and ``log u_m = log p_pop(theta_m) - log p_draw(theta_m) +
+        log(T_k/N_k)`` (``-inf`` on padding). NaN/+inf raises
+        :class:`~gwpop_search.hbi.PopulationDensityError`. Used by the
+        posterior predictive checks, which resample both.
+        """
+        X = _check_block(X, self.ndim, self.names)
+        if self.backend == "numpy":
+            lw_e, lu, invalid = self._numpy_log_weights(X)
+            self._raise_invalid(X, invalid)
+            return np.asarray(lw_e, dtype=np.float64), np.asarray(lu, dtype=np.float64)
+        fn = self._jitted("log_weights")
+        padded, n_blocks = _pad_rows(X, self.batch_size)
+        lw_out, lu_out = [], []
+        for b in range(n_blocks):
+            Xb = padded[b * self.batch_size : (b + 1) * self.batch_size]
+            lw_e, lu, invalid = self._jax.device_get(fn(self._jnp.asarray(Xb), self._data))
+            self._raise_invalid(Xb, invalid)
+            lw_out.append(np.asarray(lw_e, dtype=np.float64))
+            lu_out.append(np.asarray(lu, dtype=np.float64))
+        m = X.shape[0]
+        return np.concatenate(lw_out)[:m], np.concatenate(lu_out)[:m]
 
     def moments(self, X, W) -> dict[str, np.ndarray]:
         """Sum :func:`weight_moments` over ``X`` ``[K, ndim]`` with weights ``W`` ``[K]``.

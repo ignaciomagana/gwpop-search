@@ -29,15 +29,24 @@ DEFAULT_HYPERPRIOR_PROFILE = "phase3"
 #:              Phase-3 ceiling of 120 Msun would truncate GW231123_135430, which
 #:              has only 7.9% of its PE below 120 Msun; the O3+O4ab detected
 #:              injections cover m1_source to ~980 Msun.
+#: ``gwtc5-v2`` the v2 atom search (DRAFT, 2026-09-30): a different root, R0 =
+#:              LVK default BBH (BP2P) + Gaussian chi_eff with GWTC-5 Table 5
+#:              priors and explicit support (``grammar.v2.v2_root_model_spec``).
+#:              Its atoms are ``grammar.v2.V2_MUTATIONS``.
 _PROFILE_OVERRIDES: dict[str, dict[str, PriorConfig]] = {
     "phase3": {},
     "gwtc5-v1": {"mmax": _uniform(60.0, 200.0)},
 }
-HYPERPRIOR_PROFILES = tuple(_PROFILE_OVERRIDES)
+_V2_PROFILE = "gwtc5-v2"
+HYPERPRIOR_PROFILES = tuple(_PROFILE_OVERRIDES) + (_V2_PROFILE,)
 
 
 def baseline_model_spec(profile: str = DEFAULT_HYPERPRIOR_PROFILE) -> ModelSpec:
     """Return the declarative BBH baseline under a registered hyperprior profile."""
+    if profile == _V2_PROFILE:
+        from .v2 import v2_root_model_spec
+
+        return v2_root_model_spec()
     if profile not in _PROFILE_OVERRIDES:
         raise ValueError(
             f"unknown hyperprior profile {profile!r}; "

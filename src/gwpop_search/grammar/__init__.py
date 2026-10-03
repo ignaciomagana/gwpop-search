@@ -9,6 +9,7 @@ from .baseline import (
 from .enumerate import ModelEdge, ModelGraph, enumerate_model_graph
 from .io import load_model_graph, load_model_spec, save_model_graph, save_model_spec
 from .mutations import (
+    ConditionalPriors,
     DEFAULT_MUTATIONS,
     FOLLOWUP_MUTATION_TABLE,
     FOLLOWUP_MUTATIONS,
@@ -20,6 +21,17 @@ from .registry import (
     DEFAULT_COMPONENT_REGISTRY,
     ComponentRegistry,
     FamilyDefinition,
+)
+from .v2 import (
+    V2_ATOM_IDS,
+    V2_MUTATION_TABLE,
+    V2_MUTATIONS,
+    V2_PROFILE,
+    compose_atoms,
+    enumerate_v2_depth1,
+    mutations_for_profile,
+    plan_depth2,
+    v2_root_model_spec,
 )
 from .schema import (
     BlockSpec,
@@ -33,6 +45,7 @@ __all__ = [
     "DEFAULT_HYPERPRIOR_PROFILE",
     "HYPERPRIOR_PROFILES",
     "ComponentRegistry",
+    "ConditionalPriors",
     "DEFAULT_COMPONENT_REGISTRY",
     "DEFAULT_MUTATIONS",
     "FOLLOWUP_MUTATION_TABLE",
@@ -53,4 +66,13 @@ __all__ = [
     "save_model_graph",
     "save_model_spec",
     "structural_diff_axes",
+    "V2_ATOM_IDS",
+    "V2_MUTATION_TABLE",
+    "V2_MUTATIONS",
+    "V2_PROFILE",
+    "compose_atoms",
+    "enumerate_v2_depth1",
+    "mutations_for_profile",
+    "plan_depth2",
+    "v2_root_model_spec",
 ]

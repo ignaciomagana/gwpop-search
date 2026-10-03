@@ -82,6 +82,7 @@ def build_production_campaign(
     agents_enabled: bool = False,
     sampler_backend: Mapping[str, str] | None = None,
     require_root_profile: str | None = None,
+    graph_file_sha256: str | None = None,
 ) -> ProductionCampaignConfig:
     """Freeze a v2 campaign; the sampler pin defaults to the installed dynesty.
 
@@ -90,6 +91,11 @@ def build_production_campaign(
     profile is implicit in ``graph.root_hash`` because priors are part of every
     model hash; naming it here refuses a graph frozen under the wrong
     hyperpriors before any compute is spent.
+
+    ``graph_file_sha256`` (``verify_graph_file(path)["file_sha256"]``) records
+    the whole graph file, including its descriptive metadata; it is required
+    for a v2 graph, whose metadata (atom labels, DRAFT priors, G12 record)
+    feeds the claim table.
     """
     if require_root_profile is not None:
         profile = baseline_hyperprior_profile(graph.by_hash[graph.root_hash])
@@ -100,6 +106,21 @@ def build_production_campaign(
                 f"{require_root_profile!r} hyperprior profile; re-enumerate the "
                 f"graph with --hyperprior-profile {require_root_profile}"
             )
+    root_spec = graph.by_hash[graph.root_hash]
+    from gwpop_search.grammar.v2_structure import is_v2_model
+
+    if is_v2_model(root_spec) and fidelity.hbi.variance_taper is None:
+        # v2 spec (plan 2026-09-30, Numerics): the sigma^2_lnL taper lives inside
+        # the likelihood; a v2 campaign without it would score a different model
+        raise ValueError(
+            "a v2 model graph needs a fidelity configuration whose HBI likelihood "
+            "carries the variance taper (inference.v2_numerics.v2_fidelity_run_config)"
+        )
+    if is_v2_model(root_spec) and graph_file_sha256 is None:
+        raise ValueError(
+            "a v2 campaign must record the graph file's sha256 (graph_file_sha256 = "
+            "verify_graph_file(path)['file_sha256']): its metadata feeds the claim table"
+        )
     return ProductionCampaignConfig(
         campaign_id=campaign_id,
         dataset_manifest_hash=manifest.manifest_hash,
@@ -117,4 +138,5 @@ def build_production_campaign(
         sampler_backend=(
             installed_sampler_backend() if sampler_backend is None else dict(sampler_backend)
         ),
+        model_graph_file_sha256=graph_file_sha256,
     )

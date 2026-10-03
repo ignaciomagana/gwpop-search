@@ -6,15 +6,38 @@ import hashlib
 import json
 from pathlib import Path
 
-from .adapters import load_gwcat_v2_pair, validate_gwcat_v2_reference_pairing
-from .adapters.gwcat_v2 import REFERENCE_SELECTION_BASES
+from .adapters.gwcat_v2 import (
+    REFERENCE_SELECTION_BASES,
+    load_pe,
+    load_selection,
+    load_spin_prior_allow_list,
+    validate_reference_pairing,
+)
+from .pair import validate_pair
+from .v2_policy import GwcatV2DataPolicy, evaluate_gwcat_v2_policy
 
-
-_FORMAT_VERSION = "gwpop-search-gwcat-canonicalization-1.1"
+#: 2.0 (v2 adapter): the sky-marginal basis, the cumulative-mixture record,
+#: the GW-40c spin-prior source check and the optional v2 data policy (whose
+#: hash the report records).
+_FORMAT_VERSION = "gwpop-search-gwcat-canonicalization-2.0"
 # 1.0 reports predate an explicit selection-basis requirement: both halves
-# shared ``required_spin_basis``.
-_LEGACY_FORMAT_VERSIONS = {"gwpop-search-gwcat-canonicalization-1.0"}
+# shared ``required_spin_basis``. 1.1 reports predate the v2 policy and the
+# sky-marginal basis; both are accepted only for an identical policy-free rerun.
+_LEGACY_FORMAT_VERSIONS = {
+    "gwpop-search-gwcat-canonicalization-1.0",
+    "gwpop-search-gwcat-canonicalization-1.1",
+}
 _PE_SPIN_BASES = {"chieff", "chieff_chip", "component"}
+
+
+def _json_default(value):
+    import numpy as np
+
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"not JSON serializable: {type(value).__name__}")
 
 
 def _sha256_file(path: Path) -> str:
@@ -62,13 +85,34 @@ def _validate_existing_outputs(
     source_selection: dict[str, object],
     required_spin_basis: str,
     required_selection_spin_basis: str,
+    policy_hash: str | None,
+    spin_prior_allow_list: dict[str, str | None] | None,
 ) -> dict[str, object]:
     report = json.loads(report_path.read_text())
     format_version = report.get("format_version")
     if format_version == _FORMAT_VERSION:
         recorded_selection = report.get("required_selection_spin_basis")
+        if report.get("v2_policy_hash") != policy_hash:
+            raise ValueError(
+                "existing canonicalization was checked against a different v2 data "
+                f"policy (recorded {report.get('v2_policy_hash')!r}, "
+                f"requested {policy_hash!r})"
+            )
+        if report.get("spin_prior_allow_list") != spin_prior_allow_list:
+            raise ValueError(
+                "existing canonicalization used a different spin-prior allow-list"
+            )
     elif format_version in _LEGACY_FORMAT_VERSIONS:
-        recorded_selection = report.get("required_spin_basis")
+        if policy_hash is not None or spin_prior_allow_list is not None:
+            raise ValueError(
+                f"existing {format_version} canonicalization predates the v2 data "
+                "policy and cannot vouch for it; canonicalize into a fresh directory"
+            )
+        recorded_selection = (
+            report.get("required_selection_spin_basis")
+            if format_version.endswith("-1.1")
+            else report.get("required_spin_basis")
+        )
     else:
         raise ValueError("existing canonicalization report has unsupported format")
     if report.get("required_spin_basis") != required_spin_basis:
@@ -106,6 +150,8 @@ def canonicalize_gwcat_v2_pair(
     *,
     required_spin_basis: str,
     required_selection_spin_basis: str | None = None,
+    policy: GwcatV2DataPolicy | None = None,
+    spin_prior_allow_list=None,
 ) -> dict[str, object]:
     """Convert one reviewed gwcat-v2 pair without reconstructing denominators.
 
@@ -113,7 +159,30 @@ def canonicalize_gwcat_v2_pair(
     only permitted difference is a reference selection basis paired with its PE
     basis (``chieff_reference`` with ``chieff``), whose ceiling equality is
     verified by the adapter and recorded in the report.
+
+    The selection's sky declaration decides the basis of both halves (a
+    sky-marginal selection gives a sky-marginal pair). A ``chieff_reference``
+    selection has its declared out-of-reference sentinel rows dropped
+    (BUILD_PLAN OD-9) and the count recorded.
+
+    ``policy`` (a :class:`GwcatV2DataPolicy`) runs every v2 check and supplies
+    the OD-7 spin-prior allow-list; its hash is recorded, and a rerun must
+    name the same policy. Without a policy, ``spin_prior_allow_list`` may be
+    given directly; with neither, any non-``own_analytic`` spin prior in a
+    reference pair is refused.
     """
+    if policy is not None and spin_prior_allow_list is not None:
+        raise ValueError(
+            "pass the spin-prior allow-list through the v2 policy, not separately"
+        )
+    policy_hash = None if policy is None else policy.policy_hash
+    allow_list = (
+        dict(policy.spin_prior_allow_list)
+        if policy is not None
+        else load_spin_prior_allow_list(spin_prior_allow_list)
+    )
+    if allow_list is not None:
+        allow_list = dict(sorted(allow_list.items()))
     pe_export = Path(pe_export).resolve()
     selection_export = Path(selection_export).resolve()
     output_dir = Path(output_dir).resolve()
@@ -153,11 +222,13 @@ def canonicalize_gwcat_v2_pair(
             source_selection=source_selection,
             required_spin_basis=required_spin_basis,
             required_selection_spin_basis=required_selection,
+            policy_hash=policy_hash,
+            spin_prior_allow_list=allow_list,
         )
 
-    posterior, selection = load_gwcat_v2_pair(
-        pe_export,
-        selection_export,
+    selection = load_selection(selection_export)
+    posterior = load_pe(
+        pe_export, sky_marginal=bool(selection.metadata.get("sky_marginal"))
     )
     pe_spin = str(posterior.metadata.get("spin_basis", ""))
     selection_spin = str(selection.metadata.get("spin_basis", ""))
@@ -168,7 +239,15 @@ def canonicalize_gwcat_v2_pair(
             f"required_selection={required_selection!r}, "
             f"pe={pe_spin!r}, selection={selection_spin!r}"
         )
-    reference_pairing = validate_gwcat_v2_reference_pairing(posterior, selection)
+    policy_checks = None
+    if policy is not None:
+        policy_checks = evaluate_gwcat_v2_policy(posterior, selection, policy)
+        reference_pairing = policy_checks["reference_pairing"]
+    else:
+        reference_pairing = validate_reference_pairing(
+            posterior, selection, spin_prior_allow_list=allow_list
+        )
+    validate_pair(posterior, selection)
     selection_contract = (
         "gwcat exported estimator-ready pdraw, stored as "
         "log_draw_density with no second ndraw/time/campaign factor"
@@ -209,6 +288,13 @@ def canonicalize_gwcat_v2_pair(
             "pe": "gwcat exported p_pe, stored as log_ref_density",
             "selection": selection_contract,
         },
+        "sky_marginal": bool(selection.metadata.get("sky_marginal")),
+        "v2_policy": None if policy is None else policy.to_dict(),
+        "v2_policy_hash": policy_hash,
+        "spin_prior_allow_list": allow_list,
+        "v2_policy_checks": policy_checks,
     }
-    report_path.write_text(json.dumps(report, sort_keys=True, indent=2))
-    return report
+    report_path.write_text(
+        json.dumps(report, sort_keys=True, indent=2, default=_json_default)
+    )
+    return json.loads(report_path.read_text())

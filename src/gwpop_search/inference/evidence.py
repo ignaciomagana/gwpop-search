@@ -27,9 +27,19 @@ identical and the posterior is on canonical labels. Its manifest is the
 backend manifest plus a ``parameterization`` entry.
 
 dynesty's "could not find a single point with a valid log-likelihood" after
-1000 initialization attempts is re-raised as :class:`NoFiniteSupportError`
-(a typed numerical failure: the model has, numerically, no support on the
-data); everything else propagates.
+1000 initialization attempts -- and its stall with fewer finite points than it
+needs (``InsufficientFiniteSupportError``; dynesty itself would loop without
+limit) -- is re-raised as :class:`NoFiniteSupportError` (a typed numerical
+failure: the model has, numerically, too little support on the data);
+everything else propagates.
+
+Evidence error: each run's ``log_evidence_error`` is dynesty's ``logzerr``
+plus, in quadrature, the relative error of its initial kept-volume estimate
+(``sqrt(1/k - 1/(nlive N))``, zero without ``-inf`` regions; see
+``dynesty_backend.initial_volume_uncertainty``). Under the v2 sharp variance
+cut ``ln Z`` is the evidence over the full prior (the LVK
+``log_bayes_factor_scaled`` convention, not bilby's retained-prior
+``log_bayes_factor``).
 
 Repeat summary
 --------------
@@ -60,6 +70,7 @@ from .dynesty_backend import (
     DirtyCodeWarning,
     DynestyConfig,
     DynestyResult,
+    InsufficientFiniteSupportError,
     SelectionSupportWarning,
     build_batched_log_likelihood,
     build_dynesty_manifest,
@@ -83,7 +94,7 @@ class EvidenceBackendUnavailableError(ImportError):
 
 
 class NoFiniteSupportError(RuntimeError):
-    """dynesty found no hyperparameter with finite likelihood in 1000 x nlive prior draws."""
+    """dynesty found no (or too few) hyperparameters with finite likelihood in 1000 x nlive prior draws."""
 
 
 class LegacyEvidenceArtifactError(ValueError):
@@ -285,7 +296,7 @@ def run_hbi_evidence(
             parameterization=parameterization,
         )
     except RuntimeError as exc:
-        if _NO_FINITE_SUPPORT_MESSAGE in str(exc):
+        if isinstance(exc, InsufficientFiniteSupportError) or _NO_FINITE_SUPPORT_MESSAGE in str(exc):
             raise NoFiniteSupportError(
                 f"dynesty found no hyperparameter with finite log-likelihood in its "
                 f"initialization draws (run {run_dir}): {exc}"

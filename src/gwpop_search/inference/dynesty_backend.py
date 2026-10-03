@@ -18,6 +18,13 @@ same event terms and selection exposure as
 tests), vectorized over a fixed ``[batch_size, ndim]`` block of
 hyperparameter vectors with ``jax.jit(jax.vmap(...))``.
 
+* With ``HBIConfig.variance_taper`` set, the target is the *tapered* shape
+  likelihood ``log L + ln T(sigma^2_lnL)`` of :mod:`gwpop_search.hbi.taper`
+  (GWTC-5 / Callister & Farr 2024), with ``sigma^2_lnL`` computed in the same
+  device pass; the evidence is then ``ln int L T pi``. The taper is part of
+  the HBI configuration and therefore of the likelihood identity.
+  :func:`posterior_taper_mass` reports the posterior fraction inside the
+  taper region.
 * ``-inf`` is genuine zero population support and is handed to dynesty
   unchanged; dynesty's own initial-volume/plateau machinery accounts for the
   zero-likelihood part of the prior. (dynesty internally stores such points
@@ -170,6 +177,24 @@ class DynestyUnavailableError(ImportError):
 
 class PoolCancelledError(RuntimeError):
     """A pooled task was abandoned because another task in the same map failed."""
+
+
+class InsufficientFiniteSupportError(RuntimeError):
+    """dynesty's initialization found finite log-likelihoods, but fewer than it needs.
+
+    dynesty 3.1.0 draws batches of ``nlive`` prior points until it holds
+    ``min(nlive, max(ndim + 1, min(nlive - 20, 100)))`` finite ones. After
+    1000 batches it raises only when it found none; with 1..min-1 it warns
+    once and keeps drawing without limit. :func:`_new_sampler` turns that
+    warning into this error (re-raised by the evidence layer as
+    ``NoFiniteSupportError``), so a sharp variance cut that keeps a prior
+    fraction below ``min_npoints / (1000 nlive)`` is a typed failure, not an
+    unbounded loop.
+    """
+
+
+#: dynesty 3.1.0's warning when initialization stalls with some finite points
+_DYNESTY_INIT_STALL_WARNING = r"After \d+ attempts, we could not find at least"
 
 
 class DirtyCodeWarning(UserWarning):
@@ -469,7 +494,12 @@ def build_likelihood_identity(
 def _hbi_config_from_dict(payload: Mapping[str, object]):
     from gwpop_search.hbi import HBIConfig
 
-    known = {"rate_treatment", "raw_selection_use_observing_time", "selection_chunk_size"}
+    known = {
+        "rate_treatment",
+        "raw_selection_use_observing_time",
+        "selection_chunk_size",
+        "variance_taper",
+    }
     unknown = sorted(set(payload) - known)
     if unknown:
         raise ValueError(f"unknown HBI configuration field(s) {unknown}")
@@ -477,6 +507,7 @@ def _hbi_config_from_dict(payload: Mapping[str, object]):
         rate_treatment=payload["rate_treatment"],
         raw_selection_use_observing_time=bool(payload["raw_selection_use_observing_time"]),
         selection_chunk_size=payload["selection_chunk_size"],
+        variance_taper=payload.get("variance_taper"),
     )
 
 
@@ -799,6 +830,19 @@ class BatchedShapeLogLikelihood:
     :meth:`likelihood_identity` (names, HBI config, model, data digests) and
     :meth:`runtime_identity` (device and software runtime) are recorded by
     :func:`run_dynesty` in checkpoints and results.
+
+    Variance taper: with ``hbi_config.variance_taper`` set, every row is the
+    *tapered* shape likelihood ``ln L + ln T(sigma^2)`` of
+    :func:`gwpop_search.hbi.jax_backend.build_shape_log_likelihood_components`
+    (the same value as ``build_jax_shape_log_likelihood`` with that
+    configuration), so dynesty samples and integrates ``L T`` and the
+    evidence is ``int L T pi``. Per evaluation the variance ``sigma^2`` and
+    ``ln T`` are computed in the same device pass; :meth:`stats` tallies the
+    evaluations inside the taper region (``n_in_taper_region``), above the
+    threshold (``n_above_taper_threshold``) and the largest finite
+    ``sigma^2`` seen, and :meth:`components` returns the per-row
+    ``(ln L T, ln L, sigma^2, ln T)``. ``with_variance=True`` computes
+    ``sigma^2`` without a taper (``ln T = 0``; values equal up to rounding).
     """
 
     def __init__(
@@ -810,10 +854,15 @@ class BatchedShapeLogLikelihood:
         *,
         hbi_config=None,
         batch_size: int = 64,
+        with_variance: bool | None = None,
     ):
         jax, jnp = _require_jax()
         from gwpop_search.hbi import HBIConfig, RateTreatment
-        from gwpop_search.hbi.jax_backend import build_terms_function
+        from gwpop_search.hbi.jax_backend import (
+            build_terms_and_variance_function,
+            build_terms_function,
+            tapered_shape_value,
+        )
 
         cfg = HBIConfig() if hbi_config is None else hbi_config
         if cfg.rate_treatment is not RateTreatment.SHAPE:
@@ -823,14 +872,49 @@ class BatchedShapeLogLikelihood:
         self.batch_size = _as_int("batch_size", batch_size, minimum=1)
         self.n_events = int(posterior.n_events)
         self.hbi_config = cfg
+        self.variance_taper = cfg.variance_taper
+        self.with_variance = (
+            cfg.variance_taper is not None if with_variance is None else bool(with_variance)
+        )
+        if cfg.variance_taper is not None and not self.with_variance:
+            raise ValueError("a variance taper needs the variance (with_variance=True)")
         self._identity_inputs = (posterior, selection, population_model)
         self._likelihood_identity: dict | None = None
+        names_ = self.names
+        n_events = self.n_events
+        taper = cfg.variance_taper
+        self._variance_fn = None
+
+        if self.with_variance:
+            vterms = build_terms_and_variance_function(
+                posterior, selection, population_model, config=cfg, jit=False
+            )
+
+            def single_variance(x):
+                hyperparameters = {name: x[k] for k, name in enumerate(names_)}
+                event_terms, log_exposure, event_var, sel_var = vterms(hyperparameters)
+                tapered, value, variance, log_t = tapered_shape_value(
+                    event_terms,
+                    log_exposure,
+                    event_var,
+                    sel_var,
+                    n_events=n_events,
+                    taper=taper,
+                )
+                invalid = (
+                    jnp.any(jnp.isnan(event_terms) | (event_terms == jnp.inf))
+                    | jnp.isnan(log_exposure)
+                    | (log_exposure == jnp.inf)
+                )
+                events_finite = jnp.all(jnp.isfinite(event_terms))
+                selection_unsupported = events_finite & (log_exposure == -jnp.inf)
+                return tapered, invalid, selection_unsupported, value, variance, log_t
+
+            self._variance_fn = jax.jit(jax.vmap(single_variance))
 
         terms = build_terms_function(
             posterior, selection, population_model, config=cfg, jit=False
         )
-        names_ = self.names
-        n_events = self.n_events
 
         def single(x):
             hyperparameters = {name: x[k] for k, name in enumerate(names_)}
@@ -852,7 +936,9 @@ class BatchedShapeLogLikelihood:
             selection_unsupported = events_finite & (log_exposure == -jnp.inf)
             return value, invalid, selection_unsupported
 
-        self._device_fn = jax.jit(jax.vmap(single))
+        self._device_fn = (
+            self._variance_fn if self._variance_fn is not None else jax.jit(jax.vmap(single))
+        )
         self._jax = jax
         self._jnp = jnp
         self._stats_lock = threading.Lock()
@@ -865,8 +951,16 @@ class BatchedShapeLogLikelihood:
             "n_zero_support": 0,
             "n_selection_unsupported": 0,
         }
+        if self.with_variance:
+            self._stats.update(
+                {
+                    "n_in_taper_region": 0,
+                    "n_above_taper_threshold": 0,
+                    "max_finite_variance": 0.0,
+                }
+            )
 
-    def __call__(self, X) -> np.ndarray:
+    def _evaluate(self, X) -> tuple[np.ndarray, dict[str, np.ndarray] | None]:
         X = np.asarray(X, dtype=np.float64)
         if X.ndim != 2 or X.shape[1] != self.ndim:
             raise ValueError(
@@ -875,7 +969,7 @@ class BatchedShapeLogLikelihood:
             )
         m = X.shape[0]
         if m == 0:
-            return np.empty(0, dtype=np.float64)
+            return np.empty(0, dtype=np.float64), None
         bad_input = ~np.all(np.isfinite(X), axis=1)
         if bad_input.any():
             rows = np.flatnonzero(bad_input)
@@ -887,6 +981,12 @@ class BatchedShapeLogLikelihood:
         values = np.empty(padded.shape[0], dtype=np.float64)
         invalid = np.empty(padded.shape[0], dtype=bool)
         unsupported = np.empty(padded.shape[0], dtype=bool)
+        extra = None
+        if self.with_variance:
+            extra = {
+                key: np.empty(padded.shape[0], dtype=np.float64)
+                for key in ("log_likelihood_untapered", "variance", "log_taper")
+            }
         start = time.perf_counter()
         for block in range(n_blocks):
             sl = slice(block * self.batch_size, (block + 1) * self.batch_size)
@@ -894,8 +994,14 @@ class BatchedShapeLogLikelihood:
             values[sl] = np.asarray(out[0], dtype=np.float64)
             invalid[sl] = np.asarray(out[1], dtype=bool)
             unsupported[sl] = np.asarray(out[2], dtype=bool)
+            if extra is not None:
+                extra["log_likelihood_untapered"][sl] = np.asarray(out[3], dtype=np.float64)
+                extra["variance"][sl] = np.asarray(out[4], dtype=np.float64)
+                extra["log_taper"][sl] = np.asarray(out[5], dtype=np.float64)
         elapsed = time.perf_counter() - start
         values = values[:m]
+        if extra is not None:
+            extra = {key: value[:m] for key, value in extra.items()}
         invalid = invalid[:m] | np.isnan(values) | np.isposinf(values)
         if invalid.any():
             rows = np.flatnonzero(invalid)
@@ -913,7 +1019,42 @@ class BatchedShapeLogLikelihood:
             stats["device_seconds"] += elapsed
             stats["n_zero_support"] += int(np.count_nonzero(np.isneginf(values)))
             stats["n_selection_unsupported"] += int(np.count_nonzero(unsupported[:m]))
-        return values
+            if extra is not None:
+                variance = extra["variance"]
+                supported = np.isfinite(extra["log_likelihood_untapered"])
+                taper = self.variance_taper
+                if taper is not None:
+                    stats["n_in_taper_region"] += int(
+                        np.count_nonzero(supported & taper.in_region(variance))
+                    )
+                    stats["n_above_taper_threshold"] += int(
+                        np.count_nonzero(supported & ~(variance <= taper.threshold))
+                    )
+                finite = variance[supported & np.isfinite(variance)]
+                if finite.size:
+                    stats["max_finite_variance"] = max(
+                        float(stats["max_finite_variance"]), float(np.max(finite))
+                    )
+        return values, extra
+
+    def __call__(self, X) -> np.ndarray:
+        return self._evaluate(X)[0]
+
+    def components(self, X) -> dict[str, np.ndarray]:
+        """Per row: ``log_likelihood`` (tapered), ``log_likelihood_untapered``,
+        ``variance`` (``sigma^2_lnL``) and ``log_taper`` (needs the variance)."""
+        if not self.with_variance:
+            raise ValueError("components() needs a likelihood built with the variance")
+        values, extra = self._evaluate(X)
+        if extra is None:  # m == 0
+            empty = np.empty(0, dtype=np.float64)
+            return {
+                "log_likelihood": empty,
+                "log_likelihood_untapered": empty,
+                "variance": empty,
+                "log_taper": empty,
+            }
+        return {"log_likelihood": values, **extra}
 
     def stats(self) -> dict[str, object]:
         with self._stats_lock:
@@ -941,12 +1082,15 @@ def build_batched_log_likelihood(
     *,
     hbi_config=None,
     batch_size: int = 64,
+    with_variance: bool | None = None,
 ) -> BatchedShapeLogLikelihood:
     """Build ``f(X [m, ndim]) -> log L [m]`` for the standardized shape likelihood.
 
     Use ``HBIConfig(selection_chunk_size=None)`` (or a chunk at least as large
     as the selection) on GPUs: the chunked ``lax.scan`` is sequential and was
     measured ~40x slower at ``chunk=4096`` on the GWTC-5 candidate data.
+    With ``hbi_config.variance_taper`` the rows are the tapered likelihood
+    (see :class:`BatchedShapeLogLikelihood`).
     """
     return BatchedShapeLogLikelihood(
         posterior,
@@ -955,6 +1099,7 @@ def build_batched_log_likelihood(
         names,
         hbi_config=hbi_config,
         batch_size=batch_size,
+        with_variance=with_variance,
     )
 
 
@@ -1751,11 +1896,14 @@ class _RunTally:
     killed session made after its last checkpoint are lost with it and are
     repeated by the resume, so the totals equal those of an uninterrupted
     run. A counter a session cannot measure (a likelihood without ``stats()``)
-    becomes ``None`` for the whole run.
+    becomes ``None`` for the whole run. The variance-taper counters
+    (``_TAPER_KEYS``: likelihood evaluations inside the taper region and
+    above its threshold) are recorded only when the likelihood reports them.
     """
 
     _POOL_KEYS = ("n_evaluations", "n_zero_likelihood")
     _LIKELIHOOD_KEYS = ("n_selection_unsupported",)
+    _TAPER_KEYS = ("n_in_taper_region", "n_above_taper_threshold")
 
     def __init__(self):
         self.base: dict[str, object] = {
@@ -1792,6 +1940,16 @@ class _RunTally:
             else:
                 totals[key] = _add_delta(
                     self.base.get(key), like_now.get(key), start["likelihood"].get(key)
+                )
+        for key in self._TAPER_KEYS:
+            if (
+                like_now is not None
+                and start["likelihood"] is not None
+                and key in like_now
+                and key in start["likelihood"]
+            ):
+                totals[key] = _add_delta(
+                    self.base.get(key, 0), like_now[key], start["likelihood"][key]
                 )
         totals["elapsed_seconds"] = float(self.base["elapsed_seconds"]) + (
             time.perf_counter() - start["clock"]
@@ -1832,23 +1990,31 @@ def _new_sampler(
     if tally is None:
         tally = _RunTally()
         tally.bind(pool, time.perf_counter())
-    sampler = dynesty.NestedSampler(
-        pool.point_loglikelihood,
-        prior_transform,
-        ndim,
-        nlive=config.nlive,
-        bound=config.bound,
-        sample=config.sample,
-        update_interval=config.update_interval,
-        rstate=np.random.default_rng(seed),
-        queue_size=config.batch_size,
-        pool=pool,
-        use_pool=dict(_USE_POOL),
-        walks=config.walks,
-        slices=config.slices,
-        bootstrap=config.bootstrap,
-        enlarge=config.enlarge,
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=_DYNESTY_INIT_STALL_WARNING)
+        try:
+            sampler = dynesty.NestedSampler(
+                pool.point_loglikelihood,
+                prior_transform,
+                ndim,
+                nlive=config.nlive,
+                bound=config.bound,
+                sample=config.sample,
+                update_interval=config.update_interval,
+                rstate=np.random.default_rng(seed),
+                queue_size=config.batch_size,
+                pool=pool,
+                use_pool=dict(_USE_POOL),
+                walks=config.walks,
+                slices=config.slices,
+                bootstrap=config.bootstrap,
+                enlarge=config.enlarge,
+            )
+        except UserWarning as exc:
+            raise InsufficientFiniteSupportError(
+                f"dynesty initialization stalled: {exc} (the likelihood keeps less than "
+                f"about min(nlive - 20, 100) / (1000 nlive) of the prior, nlive={config.nlive})"
+            ) from exc
     setattr(sampler, _CHECKPOINT_META_ATTR, _checkpoint_meta(names, seed, config, identity))
     setattr(sampler, _TALLY_ATTR, tally)
     return sampler
@@ -1948,6 +2114,30 @@ def _queued_evaluations(sampler) -> int | None:
         return None
 
 
+def initial_volume_uncertainty(logvol_init: float, *, n_finite_initial: int, nlive: int) -> dict:
+    """Relative (= ln Z) error of dynesty's initial kept-volume estimate.
+
+    dynesty 3.1.0 stops initialization after ``N = exp(-logvol_init)``
+    batches of ``nlive`` prior draws holding ``k`` finite points (the rest of
+    the live set is a ``-inf`` plateau, removed with exact volume steps), so
+    the finite prior volume is estimated as ``k / (nlive N)`` with binomial
+    relative variance ``1/k - 1/(nlive N)`` (0 when every draw is finite).
+    """
+    n_batches = int(round(math.exp(-float(logvol_init))))
+    k = int(n_finite_initial)
+    if k <= 0 or n_batches <= 0:
+        raise ValueError(f"invalid initialization record: k={k}, batches={n_batches}")
+    variance = max(0.0, 1.0 / k - 1.0 / (float(nlive) * n_batches))
+    return {
+        "logvol_init": float(logvol_init),
+        "n_init_batches": n_batches,
+        "n_finite_initial": k,
+        "nlive": int(nlive),
+        "kept_fraction_estimate": k / (float(nlive) * n_batches),
+        "log_evidence_error": float(math.sqrt(variance)),
+    }
+
+
 def _result_from_sampler(
     sampler,
     *,
@@ -1989,6 +2179,20 @@ def _result_from_sampler(
         info["final_delta_logz"] = final_delta
         info["converged"] = bool(final_delta < config.dlogz)
     info["n_zero_likelihood_points"] = int(np.count_nonzero(zero))
+    # Initial-volume noise: with -inf regions (e.g. a sharp variance cut)
+    # dynesty estimates the kept prior fraction from its initialization
+    # (k finite of N batches x nlive draws; logvol_init = -ln N), and the
+    # evidence inherits its relative error sqrt(1/k - 1/(nlive N)), which
+    # dynesty's logzerr omits. It is added in quadrature (cf.
+    # gwpopulation_pipe scale_evidences_by_cut, frac_uncertainty).
+    initial_volume = initial_volume_uncertainty(
+        float(getattr(sampler, "logvol_init", 0.0)),
+        n_finite_initial=int(config.nlive) - int(np.count_nonzero(zero)),
+        nlive=int(config.nlive),
+    )
+    initial_volume["dynesty_logzerr"] = log_evidence_error
+    info["initial_volume"] = initial_volume
+    log_evidence_error = float(math.hypot(log_evidence_error, initial_volume["log_evidence_error"]))
     info["n_queued_evaluations"] = _queued_evaluations(sampler)
     info["cumulative"] = dict(totals)
     return DynestyResult(
@@ -2014,6 +2218,178 @@ def _result_from_sampler(
         n_selection_unsupported=_optional_int(totals.get("n_selection_unsupported")),
         provenance=copy.deepcopy(dict(provenance)),
     )
+
+
+def posterior_taper_mass(
+    results: Sequence[DynestyResult],
+    loglike: BatchedShapeLogLikelihood,
+    *,
+    log_likelihood_atol: float = 1.0e-8,
+    log_likelihood_rtol: float = 1.0e-8,
+    log_likelihood_hard_rtol: float = 1.0e-4,
+    max_support_mismatch_fraction: float = 1.0e-3,
+    cuts: Sequence[float] = (),
+    max_points_per_run: int | None = None,
+    subsample_seed: int = 0,
+) -> dict[str, object]:
+    """Posterior fraction inside the variance-taper region, per run and pooled.
+
+    ``sigma^2_lnL`` is re-evaluated with ``loglike`` (a tapered
+    :class:`BatchedShapeLogLikelihood` of exactly the estimator the runs
+    sampled; the likelihood identity is verified, ``selection_chunk_size``
+    aside) at every weighted point of each run (dead points and final live
+    points) and summarised with the run's importance weights by
+    :func:`gwpop_search.hbi.taper.taper_region_summary`. The pooled block is
+    the equal-weight mixture of the separately normalised runs.
+
+    Reproduction of the sampled likelihood is a *recorded diagnostic*: the
+    re-evaluation may run on another device or batch size than the sampling
+    (e.g. sampled on the H100, summarised on the same process's backend,
+    recorded as ``reevaluation_backend``), so rounding-level differences are
+    expected. ``reproduces`` is ``|d ln L| <= atol + rtol |ln L|`` on every
+    finite point and identical support; the largest deviation and the number
+    of support mismatches are reported. Only a gross mismatch -- relative
+    deviation above ``log_likelihood_hard_rtol`` or support differing on more
+    than ``max_support_mismatch_fraction`` of the points, i.e. a different
+    likelihood -- raises.
+
+    ``cuts`` adds ``posterior_mass_below`` to every summary: the weighted
+    fraction ``P(sigma^2 <= c)`` with its Kish-ESS binomial error
+    (:func:`gwpop_search.hbi.taper.posterior_mass_below`). Under the sharp cut
+    at ``threshold`` the evidence at a tighter cut ``c' < threshold`` is
+    exactly ``Z(c') = Z(threshold) P(sigma^2 <= c')`` (claims_v2 D2).
+
+    ``max_points_per_run`` (post-hoc use on a slow device; ``None`` evaluates
+    every weighted point, as the evaluator does): a run with more weighted
+    points is summarised on ``max_points_per_run`` systematic-resampling
+    draws of its points (``default_rng([subsample_seed, run index])``),
+    evaluated once per distinct point and weighted by multiplicity. The
+    fraction errors then combine both sampling stages,
+    ``1/n_eff = 1/kish(draws) + 1/kish(full weights)`` (``reference_kish_ess``),
+    and the block records ``subsample``.
+    """
+    from gwpop_search.hbi.taper import normalize_cuts, taper_region_summary
+
+    results = tuple(results)
+    if max_points_per_run is not None:
+        max_points_per_run = _as_int("max_points_per_run", max_points_per_run, minimum=1)
+    if not results:
+        raise ValueError("at least one dynesty result is required")
+    taper = getattr(loglike, "variance_taper", None)
+    if taper is None:
+        raise ValueError("posterior_taper_mass needs a likelihood with a variance taper")
+    names = tuple(loglike.names)
+    requested = _without_chunk_size(loglike.likelihood_identity())
+    variances, weights, runs, full_weights = [], [], [], []
+    subsampled = False
+    worst = 0.0
+    reproduces = True
+    support_mismatches = 0
+    for index, result in enumerate(results):
+        if tuple(result.names) != names:
+            raise ValueError(f"run {index} has different parameter names than the likelihood")
+        stored = result.likelihood_identity
+        if stored is None:
+            raise ValueError(f"run {index} carries no likelihood identity")
+        diffs = _manifest_differences(_without_chunk_size(stored), requested)
+        if diffs:
+            raise ValueError(
+                f"run {index} sampled a different likelihood than the one supplied; "
+                f"differing keys: {diffs}"
+            )
+        w_full = np.asarray(result.weights, dtype=float)
+        full_weights.append(w_full / w_full.sum() / len(results))
+        points = np.arange(w_full.size)
+        w = w_full
+        reference = None
+        subsample = None
+        if max_points_per_run is not None and w_full.size > max_points_per_run:
+            draws = equal_weight_resample(
+                points, w_full, max_points_per_run, np.random.default_rng([int(subsample_seed), index])
+            )
+            points, counts = np.unique(draws, return_counts=True)
+            w = counts.astype(float)
+            reference = float(1.0 / np.sum((w_full / w_full.sum()) ** 2))
+            subsample = {"n_draws": int(max_points_per_run), "n_distinct_points": int(points.size),
+                         "n_points_full": int(w_full.size), "kish_ess_full": reference,
+                         "seed": [int(subsample_seed), int(index)]}
+            subsampled = True
+        comps = loglike.components(np.asarray(result.samples)[points])
+        stored_logl = np.asarray(result.log_likelihoods, dtype=float)[points]
+        finite = np.isfinite(stored_logl) & np.isfinite(comps["log_likelihood"])
+        n_mismatch = int(np.sum(np.isfinite(stored_logl) != np.isfinite(comps["log_likelihood"])))
+        support_mismatches += n_mismatch
+        if n_mismatch:
+            reproduces = False
+            if n_mismatch > max_support_mismatch_fraction * max(stored_logl.size, 1):
+                raise ValueError(
+                    f"run {index}: re-evaluated likelihood support differs from the run at "
+                    f"{n_mismatch} of {stored_logl.size} points"
+                )
+        if finite.any():
+            new, old = comps["log_likelihood"][finite], stored_logl[finite]
+            absdev = np.abs(new - old)
+            dev = absdev / np.maximum(1.0, np.abs(old))
+            run_worst = float(np.max(dev))
+            worst = max(worst, run_worst)
+            if np.any(absdev > log_likelihood_atol + log_likelihood_rtol * np.abs(old)):
+                reproduces = False
+            if run_worst > log_likelihood_hard_rtol:
+                raise ValueError(
+                    f"run {index}: re-evaluated tapered log-likelihood deviates from the "
+                    f"sampled one by {run_worst:.3g} (relative): not the sampled likelihood"
+                )
+        summary = taper_region_summary(comps["variance"], w, taper, cuts=cuts, reference_kish_ess=reference)
+        summary["repeat"] = index
+        if subsample is not None:
+            summary["subsample"] = subsample
+        runs.append(summary)
+        variances.append(comps["variance"])
+        weights.append(w / w.sum() / len(results))
+    pooled_reference = None
+    if subsampled:
+        pooled_full = np.concatenate(full_weights)
+        pooled_reference = float(1.0 / np.sum(pooled_full**2))
+    pooled = taper_region_summary(
+        np.concatenate(variances), np.concatenate(weights), taper, cuts=cuts,
+        reference_kish_ess=pooled_reference,
+    )
+    if subsampled:
+        pooled["subsample"] = {"kish_ess_full": pooled_reference,
+                               "max_points_per_run": int(max_points_per_run),
+                               "seed": int(subsample_seed)}
+    return {
+        "taper": taper.to_dict(),
+        "definition": (
+            "posterior (importance-weighted dead + live points) fraction with "
+            f"{taper.region_definition()}; sigma^2 = sum_i Var[ln I_i] + N^2 Var[xi]/xi^2"
+        ),
+        "runs": runs,
+        "pooled": pooled,
+        "max_relative_log_likelihood_mismatch": worst,
+        "reproduces_sampled_log_likelihood": bool(reproduces),
+        "reproduction_tolerance": {"atol": float(log_likelihood_atol), "rtol": float(log_likelihood_rtol),
+                                   "hard_rtol": float(log_likelihood_hard_rtol)},
+        "support_mismatches": int(support_mismatches),
+        "reevaluation_backend": _jax_backend_name(),
+        **({} if not cuts else {
+            "posterior_mass_below_cuts": [float(c) for c in normalize_cuts(cuts)],
+            "posterior_mass_below_definition": (
+                "P(sigma^2 <= c) over the importance-weighted dead + live points; error "
+                "sqrt(p (1 - p) / n_eff), n_eff the Kish ESS of the weights. Under the sharp cut at "
+                "the threshold, ln Z(c') = ln Z(threshold) + ln P(sigma^2 <= c') for c' < threshold"
+            ),
+        }),
+    }
+
+
+def _jax_backend_name() -> str | None:
+    try:
+        import jax
+
+        return str(jax.default_backend())
+    except Exception:  # pragma: no cover - JAX is a hard dependency of the tapered path
+        return None
 
 
 def _warn_selection_unsupported(result: DynestyResult, *, stacklevel: int = 3) -> None:
@@ -2414,6 +2790,15 @@ class ImportanceDiagnosticsBatch:
     campaigns with squared exposure fractions (NaN when a campaign variance is
     infinite, as in the reference); and
     ``Var[log L] ~= sum_i Var[log ell_i] + N^2 Var[log A]``.
+
+    Variance taper: ``taper_variance`` is the ``sigma^2`` the likelihood's
+    taper sees (as ``shape_log_likelihood_variance``, except that a campaign
+    without population support contributes zero instead of making the
+    selection variance NaN; the two agree whenever every campaign has
+    support), ``log_taper`` is ``ln T(taper_variance)`` (0 without a taper),
+    ``log_likelihood`` is the likelihood that was sampled (tapered when the
+    HBI configuration has a taper) and ``log_likelihood_untapered`` is
+    ``ln L`` without it.
     """
 
     names: tuple[str, ...]
@@ -2439,6 +2824,9 @@ class ImportanceDiagnosticsBatch:
     selection_variance: np.ndarray
     event_variance_total: np.ndarray
     shape_log_likelihood_variance: np.ndarray
+    log_likelihood_untapered: np.ndarray | None = None
+    taper_variance: np.ndarray | None = None
+    log_taper: np.ndarray | None = None
 
     @property
     def n_events(self) -> int:
@@ -2456,6 +2844,15 @@ class ImportanceDiagnosticsBatch:
             "selection_ess": self.selection_ess,
             "selection_ess_fraction": self.selection_ess_fraction,
             "selection_max_weight": self.selection_max_weight,
+            **(
+                {}
+                if self.taper_variance is None
+                else {
+                    "log_likelihood_untapered": self.log_likelihood_untapered,
+                    "taper_variance": self.taper_variance,
+                    "log_taper": self.log_taper,
+                }
+            ),
         }
 
 
@@ -2556,6 +2953,7 @@ class ImportanceDiagnosticsFunction:
             else selection.n_selected
         )
         names_ = self.names
+        taper = cfg.variance_taper
 
         def single(x):
             hyperparameters = {name: x[k] for k, name in enumerate(names_)}
@@ -2633,6 +3031,18 @@ class ImportanceDiagnosticsFunction:
                 - n_events * jnp.where(jnp.isfinite(log_exposure), log_exposure, 0.0),
                 -jnp.inf,
             )
+            supported = jnp.isfinite(c_logexp)
+            taper_sel_var = jnp.sum(
+                jnp.where(supported, fractions**2 * jnp.where(supported, c_var, 0.0), 0.0)
+            )
+            taper_variance = event_var_total + n_events**2 * taper_sel_var
+            taper_variance = jnp.where(jnp.isnan(taper_variance), jnp.inf, taper_variance)
+            if taper is None:
+                log_t = jnp.zeros_like(taper_variance)
+                tapered = log_like
+            else:
+                log_t = taper.log_taper_jax(taper_variance)
+                tapered = jnp.where(jnp.isfinite(log_like), log_like + log_t, -jnp.inf)
             out.update(
                 {
                     "log_exposure": log_exposure,
@@ -2647,7 +3057,10 @@ class ImportanceDiagnosticsFunction:
                     "selection_variance": sel_var,
                     "event_variance_total": event_var_total,
                     "shape_log_likelihood_variance": event_var_total + n_events**2 * sel_var,
-                    "log_likelihood": log_like,
+                    "log_likelihood": tapered,
+                    "log_likelihood_untapered": log_like,
+                    "taper_variance": taper_variance,
+                    "log_taper": log_t,
                     "invalid": invalid,
                 }
             )
@@ -2684,6 +3097,10 @@ class ImportanceDiagnosticsFunction:
             chunks.append(self._jax.device_get(self._device_fn(self._jnp.asarray(padded[sl]))))
         out = {key: np.concatenate([np.asarray(c[key]) for c in chunks])[:m] for key in chunks[0]}
         invalid = out.pop("invalid").astype(bool)
+        if self.hbi_config.variance_taper is None:
+            # Untapered estimator: the batch keeps its pre-taper shape.
+            for key in ("log_likelihood_untapered", "taper_variance", "log_taper"):
+                out.pop(key)
         if invalid.any():
             rows = np.flatnonzero(invalid)
             raise PopulationDensityError(
